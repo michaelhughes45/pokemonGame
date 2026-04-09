@@ -61,6 +61,7 @@ Auth guards live in Express middleware — verify JWT on every protected route, 
   - `escape`: Escape Rope only
   - Everything else (X items, key items, contest items, mail, etc.) — NOT supported
 - **No terrain system** — weather only (rain, sun, sandstorm, hail, snow)
+- **Exp. Share is always on (Gen 6+ style)** — all Pokémon in the party gain EXP after battle; active battlers receive full EXP, benched Pokémon receive half EXP. No toggle.
 - **No PvP until Phase 5**
 - **No animations** — shadcn/ui CSS transitions only, no Framer Motion
 - **PC storage is a flat list** — no box grid system
@@ -250,7 +251,28 @@ Admin panel has a manual refresh button per entry.
 ## Folder Structure
 
 ```
-# Fill in after milestone 1.1 is complete
+pokemonGame/
+  frontend/                  ← React + Vite + TypeScript
+    src/
+      components/ui/         ← shadcn/ui components
+      lib/                   ← utilities (e.g. utils.ts from shadcn)
+      hooks/                 ← custom React hooks
+      pages/                 ← page-level components (not file-based routing)
+      index.css              ← Tailwind v4 + shadcn theme variables
+      main.tsx
+      App.tsx
+    .env                     ← VITE_API_URL=http://localhost:4000
+  backend/                   ← Express + TypeScript
+    src/
+      lib/
+        db.ts                ← MongoDB connection (connectDB)
+      middleware/            ← auth middleware (JWT verify)
+      models/                ← Mongoose models
+      routes/                ← Express routers
+      index.ts               ← app entry point, port 4000
+    .env                     ← MONGODB_URI, JWT_SECRET, PORT, FRONTEND_URL
+  .gitignore
+  CLAUDE_CONTEXT.md
 ```
 
 ---
@@ -269,7 +291,7 @@ Admin panel has a manual refresh button per entry.
 
 ## Completed Milestones
 
-- [ ] **1.1** Project setup — repo, Next.js + TS, MongoDB, shadcn/ui, dnd-kit, env vars
+- [x] **1.1** Project setup — repo, React+Vite frontend, Express backend, MongoDB, shadcn/ui, dnd-kit, env vars
 - [ ] **1.2** Auth — register, login, JWT session, role on user document
 - [ ] **1.3** Role guards — middleware, /dm/* and /admin/* protected
 - [ ] **1.4** Pokédex seed — fetch-on-demand from PokeAPI, cached to MongoDB
@@ -288,7 +310,7 @@ Admin panel has a manual refresh button per entry.
 - [ ] **3.7** Weather — rain/sun/sandstorm/hail, @smogon/calc receives weather field
 - [ ] **3.8** Items in battle — healing + status cure usable as turn action
 - [ ] **3.9** Switching — switch active Pokémon, ability triggers on entry
-- [ ] **3.10** Faint & battle end — faint prompt, EXP distributed, EV award deferred
+- [ ] **3.10** Faint & battle end — faint prompt, EXP distributed to full party (Gen 6+ Exp. Share), EV award deferred
 - [ ] **3.11** NPC AI — random/optimal move auto-submitted ★ first playable game
 - [ ] **4.1** Multi-player battle — two players polling same battle independently
 - [ ] **4.2** Group battle format — 3 players vs DM NPC team ★ first real session
@@ -310,9 +332,9 @@ Admin panel has a manual refresh button per entry.
 
 ## Current Milestone
 
-- **Starting:** 1.1 — Project setup
-- **Just finished:** N/A — this is the beginning
-- **Known issues / blockers:** None — greenfield project
+- **Starting:** 1.2 — Auth (register, login, JWT, role on user document)
+- **Just finished:** 1.1 — React+Vite frontend + Express backend scaffolded, shadcn/ui (Luma preset, Tailwind v4), dnd-kit, @smogon/calc, MongoDB connection utility, env files, pushed to GitHub as v1.1
+- **Known issues / blockers:** MongoDB Atlas connection string not yet set in backend/.env — fill in MONGODB_URI before starting 1.2
 
 ---
 
