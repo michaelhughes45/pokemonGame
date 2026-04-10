@@ -291,8 +291,8 @@ pokemonGame/
 
 - [x] **1.1** Project setup — repo, React+Vite frontend, Express backend, MongoDB, shadcn/ui, dnd-kit, env vars
 - [x] **1.2** Auth — register, login, JWT session, role on user document
-- [ ] **1.3** Role guards — middleware, /dm/* and /admin/* protected
-- [ ] **1.4** Pokédex seed — fetch-on-demand from PokeAPI, cached to MongoDB
+- [x] **1.3** Role guards — middleware, /dm/* and /admin/* protected
+- [x] **1.4** Pokédex seed — fetch-on-demand from PokeAPI, cached to MongoDB
 - [ ] **2.1** Trainer profile — /dashboard with username, role, trainer stat specialty
 - [ ] **2.2** Starter selection — /starter wizard, Pokémon in party at level 5
 - [ ] **2.3** Pokémon detail — /pokemon/[id] with stats, moves, held item, evolution path
@@ -330,8 +330,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 1.3 — Role guards (middleware protecting /dm/* and /admin/* routes)
-- **Just finished:** 1.2 — User model, bcrypt password hashing, JWT auth, verifyToken middleware, POST /api/auth/register + /login + GET /me all tested and working. Tagged v1.2.
+- **Starting:** 2.1 — Trainer profile (/dashboard with username, role, trainer stat specialty)
+- **Just finished:** 1.4 — PokedexCache Mongoose model, fetchSpecies() fetches from PokeAPI (parallel Promise.all for abilities + moves + evo chain), GET /api/pokedex/:idOrName checks cache first, saves on miss. Tested by ID, by name, cache hit, and 404. Tagged v1.4.
 - **Known issues / blockers:** None
 
 ---
