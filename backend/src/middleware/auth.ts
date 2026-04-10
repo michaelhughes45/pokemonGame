@@ -15,6 +15,22 @@ declare global {
   }
 }
 
+export function requireDm(req: Request, res: Response, next: NextFunction): void {
+  if (!req.user || (req.user.role !== 'dm' && req.user.role !== 'admin')) {
+    res.status(403).json({ data: null, error: 'DM or Admin access required' });
+    return;
+  }
+  next();
+}
+
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  if (!req.user || req.user.role !== 'admin') {
+    res.status(403).json({ data: null, error: 'Admin access required' });
+    return;
+  }
+  next();
+}
+
 export function verifyToken(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
 

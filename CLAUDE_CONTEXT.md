@@ -279,20 +279,18 @@ pokemonGame/
 
 ## Conventions Established
 
-```
-# Add as you build. Examples:
-# - All Mongoose models use .lean() for read-only queries
-# - API routes return { data, error } shape always
-# - Battle resolution logic lives in /lib/battle/
-# - @smogon/calc calls are centralised in /lib/battle/damage.ts
-```
+- All Mongoose models use `.lean()` for read-only queries
+- All API routes return `{ data, error }` shape — `data` is null on error, `error` is null on success
+- Mongoose models use `type` aliases (not `interface extends Document`) — modern Mongoose infers types from schema
+- `verifyToken` middleware attaches `{ userId, role }` to `req.user` via Express global declaration merging
+- Auth errors for invalid email vs wrong password both return `'Invalid credentials'` (deliberately vague to prevent account enumeration)
 
 ---
 
 ## Completed Milestones
 
 - [x] **1.1** Project setup — repo, React+Vite frontend, Express backend, MongoDB, shadcn/ui, dnd-kit, env vars
-- [ ] **1.2** Auth — register, login, JWT session, role on user document
+- [x] **1.2** Auth — register, login, JWT session, role on user document
 - [ ] **1.3** Role guards — middleware, /dm/* and /admin/* protected
 - [ ] **1.4** Pokédex seed — fetch-on-demand from PokeAPI, cached to MongoDB
 - [ ] **2.1** Trainer profile — /dashboard with username, role, trainer stat specialty
@@ -332,9 +330,9 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 1.2 — Auth (register, login, JWT, role on user document)
-- **Just finished:** 1.1 — React+Vite frontend + Express backend scaffolded, shadcn/ui (Luma preset, Tailwind v4), dnd-kit, @smogon/calc, MongoDB connection utility, env files, pushed to GitHub as v1.1
-- **Known issues / blockers:** MongoDB Atlas connection string not yet set in backend/.env — fill in MONGODB_URI before starting 1.2
+- **Starting:** 1.3 — Role guards (middleware protecting /dm/* and /admin/* routes)
+- **Just finished:** 1.2 — User model, bcrypt password hashing, JWT auth, verifyToken middleware, POST /api/auth/register + /login + GET /me all tested and working. Tagged v1.2.
+- **Known issues / blockers:** None
 
 ---
 

@@ -3,6 +3,9 @@ import express from 'express';
 import cors from 'cors';
 import { connectDB } from './lib/db';
 import authRouter from './routes/auth';
+import dmRouter from './routes/dm';
+import adminRouter from './routes/admin';
+import { verifyToken, requireDm, requireAdmin } from './middleware/auth';
 
 const app = express();
 const PORT = process.env.PORT ?? 4000;
@@ -15,6 +18,8 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/api/auth', authRouter);
+app.use('/api/dm', verifyToken, requireDm, dmRouter);
+app.use('/api/admin', verifyToken, requireAdmin, adminRouter);
 
 connectDB()
   .then(() => {
