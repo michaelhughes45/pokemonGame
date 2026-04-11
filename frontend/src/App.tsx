@@ -4,6 +4,16 @@ import { useAuth } from './hooks/useAuth';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 import DashboardPage from './pages/DashboardPage';
+import StarterPage from './pages/StarterPage';
+import DmPage from './pages/DmPage';
+
+function RequireDm({ children }: { children: React.ReactNode }) {
+  const { token, user, loading } = useAuth();
+  if (loading) return null;
+  if (!token) return <Navigate to="/login" replace />;
+  if (user?.role !== 'dm' && user?.role !== 'admin') return <Navigate to="/dashboard" replace />;
+  return <>{children}</>;
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { token, loading } = useAuth();
@@ -32,6 +42,22 @@ function AppRoutes() {
           <ProtectedRoute>
             <DashboardPage />
           </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/starter"
+        element={
+          <ProtectedRoute>
+            <StarterPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/dm"
+        element={
+          <RequireDm>
+            <DmPage />
+          </RequireDm>
         }
       />
       {/* Default: redirect root to dashboard (ProtectedRoute will bounce to /login if needed) */}

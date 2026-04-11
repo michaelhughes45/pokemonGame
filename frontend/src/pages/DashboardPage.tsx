@@ -1,5 +1,5 @@
 import { useAuth } from '../hooks/useAuth';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -30,6 +30,16 @@ export default function DashboardPage() {
             Log out
           </Button>
         </div>
+
+        <Link to="/starter" className="text-sm underline text-muted-foreground">
+          Pick your starter Pokémon →
+        </Link>
+
+        {(user.role === 'dm' || user.role === 'admin') && (
+          <Link to="/dm" className="text-sm underline text-muted-foreground">
+            DM Panel →
+          </Link>
+        )}
 
         <Card>
           <CardHeader>

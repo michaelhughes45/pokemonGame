@@ -61,6 +61,7 @@ Auth guards live in Express middleware — verify JWT on every protected route, 
   - `escape`: Escape Rope only
   - Everything else (X items, key items, contest items, mail, etc.) — NOT supported
 - **No terrain system** — weather only (rain, sun, sandstorm, hail, snow)
+- **Starters begin at level 1** — any species is valid as a starter; DM/admin can reset a player's starter via DELETE /api/dm/players/:username/starter
 - **Exp. Share is always on (Gen 6+ style)** — all Pokémon in the party gain EXP after battle; active battlers receive full EXP, benched Pokémon receive half EXP. No toggle.
 - **No PvP until Phase 5**
 - **No animations** — shadcn/ui CSS transitions only, no Framer Motion
@@ -294,7 +295,7 @@ pokemonGame/
 - [x] **1.3** Role guards — middleware, /dm/* and /admin/* protected
 - [x] **1.4** Pokédex seed — fetch-on-demand from PokeAPI, cached to MongoDB
 - [x] **2.1** Trainer profile — /dashboard with username, role, trainer stat specialty
-- [ ] **2.2** Starter selection — /starter wizard, Pokémon in party at level 5
+- [x] **2.2** Starter selection — /starter wizard, Pokémon in party at level 1
 - [ ] **2.3** Pokémon detail — /pokemon/[id] with stats, moves, held item, evolution path
 - [ ] **2.4** Party management — /party with dnd-kit drag-to-reorder
 - [ ] **2.5** PC storage — /pc flat list, swap into party
@@ -330,8 +331,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 2.2 — Starter selection (/starter wizard, Pokémon in party at level 5)
-- **Just finished:** 2.1 — React Router, AuthContext/AuthProvider/useAuth, LoginPage, RegisterPage, DashboardPage (username, role badge, trainer specialty, badges, money). Tagged v2.1.
+- **Starting:** 2.3 — Pokémon detail (/pokemon/[id] with stats, moves, held item, evolution path)
+- **Just finished:** 2.2 — Pokemon model, /starter search page (any species), POST /api/starter creates Pokémon at level 1 with level-1 moves, HP formula, random nature + gender. DM/admin can reset a player's starter via DELETE /api/dm/players/:username/starter. /dm page with RequireDm route guard. Tagged v2.2.
 - **Known issues / blockers:** None
 
 ---

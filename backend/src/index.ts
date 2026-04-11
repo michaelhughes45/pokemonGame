@@ -6,6 +6,7 @@ import authRouter from './routes/auth';
 import dmRouter from './routes/dm';
 import adminRouter from './routes/admin';
 import pokedexRouter from './routes/pokedex';
+import starterRouter from './routes/starter';
 import { verifyToken, requireDm, requireAdmin } from './middleware/auth';
 
 const app = express();
@@ -20,6 +21,7 @@ app.get('/health', (_req, res) => {
 
 app.use('/api/auth', authRouter);
 app.use('/api/pokedex', pokedexRouter);
+app.use('/api/starter', starterRouter);
 app.use('/api/dm', verifyToken, requireDm, dmRouter);
 app.use('/api/admin', verifyToken, requireAdmin, adminRouter);
 
