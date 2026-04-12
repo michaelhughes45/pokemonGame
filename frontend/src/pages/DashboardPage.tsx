@@ -1,29 +1,98 @@
+import { useEffect, useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useNavigate, Link } from 'react-router-dom';
+import axios from 'axios';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 
+const API = import.meta.env.VITE_API_URL;
+
 const roleBadgeVariant: Record<string, 'default' | 'secondary' | 'destructive'> = {
   admin: 'destructive',
-  dm: 'default',
+  dm:    'default',
   player: 'secondary',
 };
 
+// Standard Pokémon type colours — same map as PokemonDetailPage
+const TYPE_BG: Record<string, string> = {
+  normal:   'bg-stone-400',   fire:     'bg-orange-500',
+  water:    'bg-blue-500',    electric: 'bg-yellow-400',
+  grass:    'bg-green-500',   ice:      'bg-cyan-300',
+  fighting: 'bg-red-700',     poison:   'bg-purple-500',
+  ground:   'bg-yellow-600',  flying:   'bg-indigo-300',
+  psychic:  'bg-pink-500',    bug:      'bg-lime-500',
+  rock:     'bg-yellow-700',  ghost:    'bg-purple-700',
+  dragon:   'bg-indigo-600',  dark:     'bg-gray-700',
+  steel:    'bg-slate-400',   fairy:    'bg-pink-300',
+};
+
+type PartyMember = {
+  _id: string;
+  speciesId: number;
+  nickname: string | null;
+  level: number;
+  currentHp: number;
+  maxHp: number | null;
+  gender: 'male' | 'female' | 'none';
+  statusCondition: string | null;
+  partySlot: number | null;
+  speciesName: string | null;
+  types: string[];
+};
+
+function formatName(name: string): string {
+  return name
+    .split('-')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+function HpBar({ current, max }: { current: number; max: number | null }) {
+  const pct = max && max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
+  const color = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-yellow-400' : 'bg-red-500';
+  return (
+    <div className="flex items-center gap-2 mt-1">
+      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs font-mono text-muted-foreground">
+        {current}{max !== null ? `/${max}` : ''}
+      </span>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
-  const { user, logout } = useAuth();
+  const { user, token, logout } = useAuth();
   const navigate = useNavigate();
+
+  const [party, setParty]           = useState<PartyMember[]>([]);
+  const [partyLoading, setPartyLoading] = useState(true);
 
   function handleLogout() {
     logout();
     navigate('/login');
   }
 
+  // Fetch the player's party on mount
+  useEffect(() => {
+    axios
+      .get(`${API}/api/pokemon/party`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then(res => setParty(res.data.data ?? []))
+      .catch(() => {}) // Party section just stays empty on error
+      .finally(() => setPartyLoading(false));
+  }, [token]);
+
   if (!user) return null;
 
   return (
     <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="max-w-lg mx-auto flex flex-col gap-6">
+
+        {/* ── Top bar ── */}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <Button variant="outline" onClick={handleLogout} className="min-h-11">
@@ -31,16 +100,21 @@ export default function DashboardPage() {
           </Button>
         </div>
 
-        <Link to="/starter" className="text-sm underline text-muted-foreground">
-          Pick your starter Pokémon →
-        </Link>
+        {/* ── Navigation links ── */}
+        <div className="flex flex-col gap-1">
+          {party.length === 0 && !partyLoading && (
+            <Link to="/starter" className="text-sm underline text-muted-foreground">
+              Pick your starter Pokémon →
+            </Link>
+          )}
+          {(user.role === 'dm' || user.role === 'admin') && (
+            <Link to="/dm" className="text-sm underline text-muted-foreground">
+              DM Panel →
+            </Link>
+          )}
+        </div>
 
-        {(user.role === 'dm' || user.role === 'admin') && (
-          <Link to="/dm" className="text-sm underline text-muted-foreground">
-            DM Panel →
-          </Link>
-        )}
-
+        {/* ── Trainer card ── */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -55,18 +129,85 @@ export default function DashboardPage() {
               <span className="text-muted-foreground">Trainer specialty</span>
               <span>{user.trainerStatChoice ?? 'Not chosen yet'}</span>
             </div>
-
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">Badges</span>
               <span>{user.badges.length === 0 ? 'None yet' : user.badges.join(', ')}</span>
             </div>
-
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">Money</span>
               <span>₽{user.money.toLocaleString()}</span>
             </div>
           </CardContent>
         </Card>
+
+        {/* ── Party ── */}
+        {/*
+          Each card links to /pokemon/:id so the player can tap into the detail view.
+          The HP bar uses currentHp / maxHp (computed by the backend from base stats + level + nature).
+          Types are shown as coloured chips, same palette as the detail page.
+        */}
+        {(partyLoading || party.length > 0) && (
+          <div>
+            <h2 className="text-lg font-semibold mb-3">Your Party</h2>
+            {partyLoading ? (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            ) : (
+              <div className="flex flex-col gap-3">
+                {party.map(p => (
+                  <Link key={String(p._id)} to={`/pokemon/${p._id}`}>
+                    <Card className="hover:bg-muted/50 transition-colors cursor-pointer">
+                      <CardContent className="pt-4 flex gap-3 items-start">
+                        <img
+                          src={`https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${p.speciesId}.png`}
+                          alt={p.speciesName ?? String(p.speciesId)}
+                          width={64}
+                          height={64}
+                          className="pixelated shrink-0"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline gap-2 flex-wrap">
+                            <span className="font-semibold text-sm">
+                              {p.nickname
+                                ? `${formatName(p.nickname)}`
+                                : p.speciesName
+                                  ? formatName(p.speciesName)
+                                  : `#${p.speciesId}`}
+                            </span>
+                            {p.nickname && p.speciesName && (
+                              <span className="text-xs text-muted-foreground">
+                                ({formatName(p.speciesName)})
+                              </span>
+                            )}
+                            <span className="text-xs text-muted-foreground ml-auto">
+                              Lv. {p.level}
+                            </span>
+                          </div>
+                          <div className="flex gap-1 flex-wrap mt-1">
+                            {p.types.map(t => (
+                              <span
+                                key={t}
+                                className={`text-[10px] font-semibold text-white px-1.5 py-0.5 rounded ${TYPE_BG[t] ?? 'bg-gray-400'}`}
+                              >
+                                {formatName(t)}
+                              </span>
+                            ))}
+                            {p.statusCondition && (
+                              <Badge variant="secondary" className="text-[10px] uppercase">
+                                {p.statusCondition}
+                              </Badge>
+                            )}
+                          </div>
+                          <HpBar current={p.currentHp} max={p.maxHp} />
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
     </div>
   );

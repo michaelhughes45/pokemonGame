@@ -296,7 +296,7 @@ pokemonGame/
 - [x] **1.4** Pokédex seed — fetch-on-demand from PokeAPI, cached to MongoDB
 - [x] **2.1** Trainer profile — /dashboard with username, role, trainer stat specialty
 - [x] **2.2** Starter selection — /starter wizard, Pokémon in party at level 1
-- [ ] **2.3** Pokémon detail — /pokemon/[id] with stats, moves, held item, evolution path
+- [x] **2.3** Pokémon detail — /pokemon/[id] with stats, moves, held item, evolution path
 - [ ] **2.4** Party management — /party with dnd-kit drag-to-reorder
 - [ ] **2.5** PC storage — /pc flat list, swap into party
 - [ ] **2.6** Bag & items — /bag with scoped categories, out-of-battle use
@@ -331,8 +331,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 2.3 — Pokémon detail (/pokemon/[id] with stats, moves, held item, evolution path)
-- **Just finished:** 2.2 — Pokemon model, /starter search page (any species), POST /api/starter creates Pokémon at level 1 with level-1 moves, HP formula, random nature + gender. DM/admin can reset a player's starter via DELETE /api/dm/players/:username/starter. /dm page with RequireDm route guard. Tagged v2.2.
+- **Starting:** 2.4 — Party management (/party with dnd-kit drag-to-reorder)
+- **Just finished:** 2.3 — GET /api/pokemon/party (enriched with species name/types/maxHp), GET /api/pokemon/:id (full detail with computed stats), PokemonDetailPage (/pokemon/:id — sprite, types, stat bars, moves with PP, abilities, evolution path), dashboard party preview with clickable cards. Tagged v2.3.
 - **Known issues / blockers:** None
 
 ---
