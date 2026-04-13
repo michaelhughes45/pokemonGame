@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { User } from '../models/User';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
+import { fetchSpecies } from '../lib/pokeapi';
 
 const router = Router();
 
@@ -28,9 +29,9 @@ router.delete('/players/:username/starter', async (req: Request, res: Response):
 // ---------------------------------------------------------------------------
 // POST /api/dm/players/:username/pokemon
 // DM gives a Pokémon directly to a player. Goes into party if there's space
-// (fewer than 6), otherwise goes to PC. Species must already be in the
-// Pokédex cache — have the player or DM view it in the Pokédex first.
-// Body: { speciesId, level?, nature?, gender? }
+// (fewer than 6), otherwise goes to PC.
+// Body: { species, level?, nature?, gender? }
+//   species — national dex number (e.g. 25) OR name (e.g. "pikachu")
 // ---------------------------------------------------------------------------
 
 const VALID_NATURES = [
@@ -44,15 +45,15 @@ const VALID_NATURES = [
 
 router.post('/players/:username/pokemon', async (req: Request, res: Response): Promise<void> => {
   const { username } = req.params;
-  const { speciesId, level = 5, nature = 'Hardy', gender } = req.body as {
-    speciesId: number;
+  const { species, level = 5, nature = 'Hardy', gender } = req.body as {
+    species: string | number;
     level?: number;
     nature?: string;
     gender?: string;
   };
 
-  if (!speciesId || typeof speciesId !== 'number') {
-    res.status(400).json({ data: null, error: 'speciesId is required and must be a number' });
+  if (!species && species !== 0) {
+    res.status(400).json({ data: null, error: 'species is required (name or dex number)' });
     return;
   }
   if (!VALID_NATURES.includes(nature)) {
@@ -66,26 +67,35 @@ router.post('/players/:username/pokemon', async (req: Request, res: Response): P
     return;
   }
 
-  // Species must already be cached — viewing it on the Pokédex page will cache it
-  const species = await PokedexCache.findOne({ pokeApiId: speciesId }).lean();
-  if (!species) {
-    res.status(404).json({
-      data: null,
-      error: `Species #${speciesId} is not in the Pokédex cache. View it in the Pokédex first.`,
-    });
-    return;
+  // Determine whether the DM passed a numeric ID or a name string
+  const isNumeric = /^\d+$/.test(String(species));
+  const lookupQuery = isNumeric
+    ? { pokeApiId: Number(species) }
+    : { name: String(species).toLowerCase() };
+  const fetchKey = isNumeric ? Number(species) : String(species).toLowerCase();
+
+  // Look up species in cache. If missing, fetch from PokeAPI and cache it now.
+  let speciesDoc = await PokedexCache.findOne(lookupQuery).lean();
+  if (!speciesDoc) {
+    try {
+      const transformed = await fetchSpecies(fetchKey);
+      speciesDoc = (await PokedexCache.create(transformed)).toObject();
+    } catch {
+      res.status(404).json({ data: null, error: `Species "${species}" not found in PokeAPI.` });
+      return;
+    }
   }
 
   // Gen 3+ HP formula (no IVs/EVs until Phase 5)
-  const maxHp = Math.floor((2 * species.baseStats.hp * level) / 100) + level + 10;
+  const maxHp = Math.floor((2 * speciesDoc.baseStats.hp * level) / 100) + level + 10;
 
   // Resolve gender: use provided value, or derive from genderRatio in species data
   let resolvedGender: 'male' | 'female' | 'none';
   if (gender === 'male' || gender === 'female' || gender === 'none') {
     resolvedGender = gender;
-  } else if (species.genderRatio === -1) {
+  } else if (speciesDoc.genderRatio === -1) {
     resolvedGender = 'none';   // genderless species (Magnemite, etc.)
-  } else if (species.genderRatio === 0) {
+  } else if (speciesDoc.genderRatio === 0) {
     resolvedGender = 'female'; // always female (Chansey, etc.)
   } else {
     resolvedGender = 'male';
@@ -97,7 +107,7 @@ router.post('/players/:username/pokemon', async (req: Request, res: Response): P
   const partySlot = inParty ? partyCount + 1 : null;
 
   const pokemon = await Pokemon.create({
-    speciesId,
+    speciesId: speciesDoc.pokeApiId,
     ownerId:   user._id,
     ownerType: 'player',
     nickname:  null,
@@ -114,14 +124,14 @@ router.post('/players/:username/pokemon', async (req: Request, res: Response): P
 
   res.status(201).json({
     data: {
-      _id:        pokemon._id,
-      speciesId:  pokemon.speciesId,
-      speciesName: species.name,
-      level:      pokemon.level,
-      nature:     pokemon.nature,
-      gender:     pokemon.gender,
-      isInParty:  pokemon.isInParty,
-      partySlot:  pokemon.partySlot,
+      _id:         pokemon._id,
+      speciesId:   pokemon.speciesId,
+      speciesName: speciesDoc.name,
+      level:       pokemon.level,
+      nature:      pokemon.nature,
+      gender:      pokemon.gender,
+      isInParty:   pokemon.isInParty,
+      partySlot:   pokemon.partySlot,
     },
     error: null,
   });

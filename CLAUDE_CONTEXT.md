@@ -312,7 +312,7 @@ pokemonGame/
 - [x] **2.2** Starter selection — /starter wizard, Pokémon in party at level 1
 - [x] **2.3** Pokémon detail — /pokemon/[id] with stats, moves, held item, evolution path
 - [x] **2.4** Party management — /party with dnd-kit drag-to-reorder
-- [ ] **2.5** PC storage — /pc flat list, swap into party
+- [x] **2.5** PC storage — /pc flat list, swap into party
 - [ ] **2.6** Bag & items — /bag with scoped categories, out-of-battle use
 - [ ] **3.1** Battle document — DM creates battle, /battle/[id] loads blank battlefield
 - [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
@@ -345,8 +345,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 2.5 — PC storage (/pc flat list, swap into party)
-- **Just finished:** 2.4 — /party page with dnd-kit drag-to-reorder, PATCH /api/pokemon/party/reorder endpoint, POST /api/dm/players/:username/pokemon (DM give-pokemon, goes to party if space, otherwise PC). Tagged v2.4.
+- **Starting:** 2.6 — Bag & items (/bag with scoped categories, out-of-battle use)
+- **Just finished:** 2.5 — /pc flat list, GET /api/pokemon/pc, POST /api/pokemon/party/swap, DM give-pokemon UI on /dm (by name or dex number, auto-fetches from PokeAPI if not cached, lands in party if room otherwise PC). Tagged v2.5.
 - **Known issues / blockers:** None
 
 ---

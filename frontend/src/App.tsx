@@ -8,6 +8,7 @@ import StarterPage from './pages/StarterPage';
 import DmPage from './pages/DmPage';
 import PokemonDetailPage from './pages/PokemonDetailPage';
 import PartyPage from './pages/PartyPage';
+import PCPage from './pages/PCPage';
 
 function RequireDm({ children }: { children: React.ReactNode }) {
   const { token, user, loading } = useAuth();
@@ -67,6 +68,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <PartyPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/pc"
+        element={
+          <ProtectedRoute>
+            <PCPage />
           </ProtectedRoute>
         }
       />

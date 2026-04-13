@@ -155,6 +155,137 @@ router.patch('/party/reorder', verifyToken, async (req: Request, res: Response):
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/pokemon/pc
+// Returns all pokemon owned by the logged-in player that are NOT in their
+// party, enriched with species name and types (same shape as /party).
+// ---------------------------------------------------------------------------
+router.get('/pc', verifyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const pcDocs = await Pokemon.find({
+      ownerId:   req.user!.userId,
+      isInParty: false,
+    }).lean().sort({ createdAt: 1 }); // stable order: oldest first
+
+    const speciesIds    = pcDocs.map(p => p.speciesId);
+    const speciesEntries = await PokedexCache.find({ pokeApiId: { $in: speciesIds } })
+      .select('pokeApiId name types baseStats')
+      .lean();
+    const speciesMap = new Map(speciesEntries.map(s => [s.pokeApiId, s]));
+
+    const enriched = pcDocs.map(p => {
+      const species = speciesMap.get(p.speciesId);
+      const stats   = species ? computeStats(species.baseStats, p.level, p.nature) : null;
+      return {
+        _id:             p._id,
+        speciesId:       p.speciesId,
+        nickname:        p.nickname,
+        level:           p.level,
+        currentHp:       p.currentHp,
+        maxHp:           stats?.hp ?? null,
+        gender:          p.gender,
+        statusCondition: p.statusCondition,
+        speciesName:     species?.name ?? null,
+        types:           species?.types ?? [],
+      };
+    });
+
+    res.json({ data: enriched, error: null });
+  } catch (err) {
+    console.error('PC route error:', err);
+    res.status(500).json({ data: null, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/pokemon/party/swap
+// Moves a PC pokemon into the party.
+//   - If party has fewer than 6: body only needs { pcPokemonId }
+//   - If party is full: body needs { pcPokemonId, partyPokemonId } — the two
+//     are swapped (party member goes to PC, PC pokemon takes its slot).
+// ---------------------------------------------------------------------------
+router.post('/party/swap', verifyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { pcPokemonId, partyPokemonId } = req.body as {
+      pcPokemonId: string;
+      partyPokemonId?: string;
+    };
+
+    if (!pcPokemonId || !mongoose.Types.ObjectId.isValid(pcPokemonId)) {
+      res.status(400).json({ data: null, error: 'Invalid pcPokemonId' });
+      return;
+    }
+
+    // Verify the PC pokemon belongs to this user and is actually on PC
+    const pcPokemon = await Pokemon.findOne({
+      _id:       pcPokemonId,
+      ownerId:   req.user!.userId,
+      isInParty: false,
+    });
+    if (!pcPokemon) {
+      res.status(404).json({ data: null, error: 'PC Pokémon not found' });
+      return;
+    }
+
+    if (partyPokemonId) {
+      // ── Swap mode: exchange a party member with the PC pokemon ──────────
+      if (!mongoose.Types.ObjectId.isValid(partyPokemonId)) {
+        res.status(400).json({ data: null, error: 'Invalid partyPokemonId' });
+        return;
+      }
+
+      const partyPokemon = await Pokemon.findOne({
+        _id:       partyPokemonId,
+        ownerId:   req.user!.userId,
+        isInParty: true,
+      });
+      if (!partyPokemon) {
+        res.status(404).json({ data: null, error: 'Party Pokémon not found' });
+        return;
+      }
+
+      // Grab the slot before we overwrite it
+      const slot = partyPokemon.partySlot;
+
+      // Send party member to PC
+      await Pokemon.updateOne(
+        { _id: partyPokemonId },
+        { isInParty: false, partySlot: null }
+      );
+
+      // Move PC pokemon into the vacated slot
+      await Pokemon.updateOne(
+        { _id: pcPokemonId },
+        { isInParty: true, partySlot: slot }
+      );
+    } else {
+      // ── Add mode: party has room, just add ──────────────────────────────
+      const partyCount = await Pokemon.countDocuments({
+        ownerId:   req.user!.userId,
+        isInParty: true,
+      });
+
+      if (partyCount >= 6) {
+        res.status(400).json({
+          data:  null,
+          error: 'Party is full. Provide partyPokemonId to swap a member out.',
+        });
+        return;
+      }
+
+      await Pokemon.updateOne(
+        { _id: pcPokemonId },
+        { isInParty: true, partySlot: partyCount + 1 }
+      );
+    }
+
+    res.json({ data: { ok: true }, error: null });
+  } catch (err) {
+    console.error('Party swap error:', err);
+    res.status(500).json({ data: null, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/pokemon/:id
 // Returns a single Pokémon with full species data + computed stats.
 // Players can only view their own; DM/admin can view any.

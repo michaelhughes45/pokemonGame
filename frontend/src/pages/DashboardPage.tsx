@@ -112,6 +112,9 @@ export default function DashboardPage() {
               Manage Party →
             </Link>
           )}
+          <Link to="/pc" className="text-sm underline text-muted-foreground">
+            PC Storage →
+          </Link>
           {(user.role === 'dm' || user.role === 'admin') && (
             <Link to="/dm" className="text-sm underline text-muted-foreground">
               DM Panel →
