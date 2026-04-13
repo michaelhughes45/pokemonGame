@@ -107,6 +107,11 @@ export default function DashboardPage() {
               Pick your starter Pokémon →
             </Link>
           )}
+          {party.length > 0 && (
+            <Link to="/party" className="text-sm underline text-muted-foreground">
+              Manage Party →
+            </Link>
+          )}
           {(user.role === 'dm' || user.role === 'admin') && (
             <Link to="/dm" className="text-sm underline text-muted-foreground">
               DM Panel →

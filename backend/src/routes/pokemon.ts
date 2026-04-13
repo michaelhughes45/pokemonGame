@@ -108,6 +108,53 @@ router.get('/party', verifyToken, async (req: Request, res: Response): Promise<v
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/pokemon/party/reorder
+// Accepts { order: string[] } — an array of pokemon _id strings in the new
+// desired slot order. Updates partySlot on each document so slot 1 = index 0,
+// slot 2 = index 1, etc. All IDs must belong to this user and be in-party.
+// ---------------------------------------------------------------------------
+router.patch('/party/reorder', verifyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { order } = req.body as { order: string[] };
+
+    if (!Array.isArray(order) || order.length === 0 || order.length > 6) {
+      res.status(400).json({ data: null, error: 'order must be an array of 1–6 pokemon IDs' });
+      return;
+    }
+
+    // Validate every entry is a real ObjectId before touching the DB
+    if (order.some(id => !mongoose.Types.ObjectId.isValid(id))) {
+      res.status(400).json({ data: null, error: 'Invalid pokemon ID in order array' });
+      return;
+    }
+
+    // Confirm all belong to this user and are currently in-party
+    const found = await Pokemon.find({
+      _id: { $in: order },
+      ownerId: req.user!.userId,
+      isInParty: true,
+    }).select('_id').lean();
+
+    if (found.length !== order.length) {
+      res.status(400).json({ data: null, error: 'One or more pokemon not found in your party' });
+      return;
+    }
+
+    // Write each slot update in parallel — Promise.all fires all queries at once
+    await Promise.all(
+      order.map((id, index) =>
+        Pokemon.updateOne({ _id: id }, { partySlot: index + 1 })
+      )
+    );
+
+    res.json({ data: { updated: order.length }, error: null });
+  } catch (err) {
+    console.error('Party reorder error:', err);
+    res.status(500).json({ data: null, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/pokemon/:id
 // Returns a single Pokémon with full species data + computed stats.
 // Players can only view their own; DM/admin can view any.
