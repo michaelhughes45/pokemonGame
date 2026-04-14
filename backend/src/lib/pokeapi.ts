@@ -20,6 +20,8 @@ type Move = {
 
 type EvolutionStep = { speciesId: number; condition: string; value: string };
 
+type LevelUpMove = { moveId: string; level: number };
+
 export type TransformedSpecies = {
   pokeApiId: number;
   name: string;
@@ -27,6 +29,7 @@ export type TransformedSpecies = {
   baseStats: BaseStats;
   abilities: Ability[];
   moves: Move[];
+  levelUpMoves: LevelUpMove[]; // sorted ascending by level, used for moveset calculation
   evolutionChain: EvolutionStep[];
   evYield: BaseStats;
   catchRate: number;
@@ -125,18 +128,28 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
     }
   }
 
-  // Collect level-up move names (deduplicated across all generations)
-  const levelUpMoveNames: string[] = [];
+  // Collect level-up moves with the level they're first learnable.
+  // We take the minimum non-zero level across all game versions — this gives us
+  // the earliest point a move could be learned in any mainline game, which is
+  // the most inclusive choice for a TTRPG tool that isn't tied to one gen.
+  const levelUpMoveData: LevelUpMove[] = [];
   const seen = new Set<string>();
   for (const m of pokemon.moves) {
-    const isLevelUp = m.version_group_details.some(
-      (d: any) => d.move_learn_method.name === 'level-up'
-    );
-    if (isLevelUp && !seen.has(m.move.name)) {
+    const levelUpLevels = (m.version_group_details as any[])
+      .filter((d: any) => d.move_learn_method.name === 'level-up' && d.level_learned_at > 0)
+      .map((d: any) => d.level_learned_at as number);
+
+    if (levelUpLevels.length > 0 && !seen.has(m.move.name)) {
       seen.add(m.move.name);
-      levelUpMoveNames.push(m.move.name);
+      levelUpMoveData.push({
+        moveId: m.move.name as string,
+        level:  Math.min(...levelUpLevels),
+      });
     }
   }
+  levelUpMoveData.sort((a, b) => a.level - b.level);
+
+  const levelUpMoveNames = levelUpMoveData.map(m => m.moveId);
 
   const abilityNames: string[] = pokemon.abilities.map((a: any) => a.ability.name);
   const abilityIsHiddenMap = new Map<string, boolean>(
@@ -192,6 +205,7 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
     baseStats,
     abilities,
     moves,
+    levelUpMoves:   levelUpMoveData,
     evolutionChain: flattenEvolutionChain((evolutionChainData as any).chain),
     evYield,
     catchRate:      species.capture_rate as number,

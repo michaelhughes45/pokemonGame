@@ -54,28 +54,37 @@ router.post('/', verifyToken, async (req: Request, res: Response): Promise<void>
     cached = await PokedexCache.create(transformed);
   }
 
-  // Fetch raw PokeAPI data to find moves learned at level 1
-  const pokeRes = await fetch(`https://pokeapi.co/api/v2/pokemon/${speciesId}`);
-  if (!pokeRes.ok) {
-    res.status(502).json({ data: null, error: 'Failed to fetch move data from PokeAPI' });
-    return;
-  }
-  const pokeData = await pokeRes.json() as any;
+  // Use levelUpMoves from cache to find moves learnable at level 1.
+  // If the cache entry predates the levelUpMoves field, fall back to a raw fetch.
+  let moves: { moveId: string; currentPP: number; maxPP: number }[] = [];
 
-  // Collect move names learned at level 1 via level-up in any version group
-  const level1MoveNames = new Set<string>();
-  for (const m of pokeData.moves) {
-    const learnedAtOne = m.version_group_details.some(
-      (d: any) => d.move_learn_method.name === 'level-up' && d.level_learned_at === 1
-    );
-    if (learnedAtOne) level1MoveNames.add(m.move.name as string);
+  if (cached.levelUpMoves?.length) {
+    const moveDetailMap = new Map(cached.moves.map(m => [m.name, m]));
+    moves = (cached.levelUpMoves as { moveId: string; level: number }[])
+      .filter(m => m.level <= 1)
+      .slice(0, 4)
+      .map(entry => {
+        const detail = moveDetailMap.get(entry.moveId);
+        return { moveId: entry.moveId, currentPP: detail?.pp ?? 35, maxPP: detail?.pp ?? 35 };
+      });
+  } else {
+    // Old cache entry — fall back to extra PokeAPI fetch
+    const pokeRes = await fetch(`https://pokeapi.co/api/v2/pokemon/${speciesId}`);
+    if (pokeRes.ok) {
+      const pokeData = await pokeRes.json() as any;
+      const level1MoveNames = new Set<string>();
+      for (const m of pokeData.moves) {
+        const learnedAtOne = m.version_group_details.some(
+          (d: any) => d.move_learn_method.name === 'level-up' && d.level_learned_at === 1
+        );
+        if (learnedAtOne) level1MoveNames.add(m.move.name as string);
+      }
+      moves = cached.moves
+        .filter(m => level1MoveNames.has(m.name))
+        .slice(0, 4)
+        .map(m => ({ moveId: m.name, currentPP: m.pp ?? 35, maxPP: m.pp ?? 35 }));
+    }
   }
-
-  // Cross-reference with cached move data to get PP, take up to 4
-  const moves = cached.moves
-    .filter(m => level1MoveNames.has(m.name))
-    .slice(0, 4)
-    .map(m => ({ moveId: m.name, currentPP: m.pp ?? 35, maxPP: m.pp ?? 35 }));
 
   // HP formula (Gen 3+): floor(2 * baseHp * level / 100) + level + 10
   const level = 1;

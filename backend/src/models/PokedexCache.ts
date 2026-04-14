@@ -46,6 +46,17 @@ const StatSchema = new Schema(
   { _id: false }
 );
 
+// Compact record used to determine a Pokémon's starting moveset by level.
+// Stored separately from the full MoveSchema to keep the two concerns distinct:
+// MoveSchema = Pokédex display data; LevelUpMoveSchema = moveset calculation.
+const LevelUpMoveSchema = new Schema(
+  {
+    moveId: { type: String, required: true }, // PokeAPI slug == move name
+    level:  { type: Number, required: true }, // minimum level across all game versions
+  },
+  { _id: false }
+);
+
 const PokedexCacheSchema = new Schema(
   {
     pokeApiId:      { type: Number, required: true, unique: true },
@@ -54,6 +65,7 @@ const PokedexCacheSchema = new Schema(
     baseStats:      { type: StatSchema, required: true },
     abilities:      [AbilitySchema],
     moves:          [MoveSchema],
+    levelUpMoves:   [LevelUpMoveSchema], // for moveset calculation — see LevelUpMoveSchema
     evolutionChain: [EvolutionStepSchema],
     evYield:        { type: StatSchema, required: true },
     catchRate:      { type: Number, default: 0 },

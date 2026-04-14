@@ -115,6 +115,9 @@ export default function DashboardPage() {
           <Link to="/pc" className="text-sm underline text-muted-foreground">
             PC Storage →
           </Link>
+          <Link to="/bag" className="text-sm underline text-muted-foreground">
+            Bag →
+          </Link>
           {(user.role === 'dm' || user.role === 'admin') && (
             <Link to="/dm" className="text-sm underline text-muted-foreground">
               DM Panel →

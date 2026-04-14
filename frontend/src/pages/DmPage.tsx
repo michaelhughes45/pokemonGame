@@ -214,6 +214,100 @@ function GivePokemonCard({ token }: { token: string | null }) {
   );
 }
 
+// ── Give Item card ───────────────────────────────────────────────────────────
+
+function GiveItemCard({ token }: { token: string | null }) {
+  const [username, setUsername] = useState('');
+  const [itemId,   setItemId]   = useState('');
+  const [quantity, setQuantity] = useState('1');
+  const [loading,  setLoading]  = useState(false);
+  const [result,   setResult]   = useState('');
+  const [error,    setError]    = useState('');
+
+  async function handleSubmit(e: { preventDefault(): void }) {
+    e.preventDefault();
+    setResult(''); setError(''); setLoading(true);
+    try {
+      const res = await axios.post(
+        `${API}/api/dm/items/give`,
+        {
+          username: username.trim(),
+          itemId:   itemId.trim(),
+          quantity: Number(quantity),
+        },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const d = res.data.data;
+      setResult(`Gave ×${quantity} ${d.itemId} to ${d.username}. They now have ×${d.quantity}.`);
+      setItemId('');
+      setQuantity('1');
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to give item') : 'Failed to give item');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Give Item to Player</CardTitle></CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="item-username">Player username</Label>
+            <Input
+              id="item-username"
+              placeholder="e.g. ash"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              required
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="item-id">
+              Item ID{' '}
+              <span className="text-muted-foreground font-normal">(PokeAPI slug — e.g. super-potion, poke-ball)</span>
+            </Label>
+            <Input
+              id="item-id"
+              placeholder="e.g. super-potion"
+              value={itemId}
+              onChange={e => setItemId(e.target.value)}
+              required
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="item-quantity">Quantity</Label>
+            <Input
+              id="item-quantity"
+              type="number"
+              min={1}
+              max={99}
+              value={quantity}
+              onChange={e => setQuantity(e.target.value)}
+              required
+            />
+          </div>
+
+          {error  && <p className="text-sm text-destructive">{error}</p>}
+          {result && <p className="text-sm text-muted-foreground">{result}</p>}
+
+          <Button
+            type="submit"
+            disabled={loading || !username.trim() || !itemId.trim()}
+            className="min-h-11"
+          >
+            {loading ? 'Giving…' : 'Give Item'}
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── DmPage ───────────────────────────────────────────────────────────────────
 
 export default function DmPage() {
@@ -230,6 +324,7 @@ export default function DmPage() {
         </div>
 
         <GivePokemonCard token={token} />
+        <GiveItemCard token={token} />
         <ResetStarterCard token={token} />
       </div>
     </div>

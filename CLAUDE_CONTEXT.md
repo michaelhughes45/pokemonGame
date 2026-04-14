@@ -72,8 +72,12 @@ Auth guards live in Express middleware — verify JWT on every protected route, 
   - `stat_booster`: HP Up, Protein, Iron, Calcium, Zinc, Carbos, PP Up, PP Max
   - `held_type`: Charcoal, Mystic Water, Magnet, Miracle Seed, Never-Melt Ice, Spell Tag, TwistedSpoon, Black Belt, Poison Barb, Soft Sand, Hard Stone, Silver Powder, Sharp Beak, Dragon Fang, Black Glasses, Silk Scarf, Metal Coat
   - `pokeballs`: all variants
-  - `escape`: Escape Rope only
+  - `escape`: Escape Rope only (consumed out of battle, no mechanical effect until overworld added)
   - Everything else (X items, key items, contest items, mail, etc.) — NOT supported
+- **Item pocket derived automatically** — `backend/src/lib/itemData.ts` maps every supported itemId to its pocket. DM give-item endpoint uses this; pocket is never specified by the client
+- **Rare Candy implemented** — increments level by 1 (cap 100), currentHp rises by the same amount as maxHp increase (matches main games)
+- **Flutes implemented** — `poke-flute`, `blue-flute`, `green-flute` cure sleep; `yellow-flute` cures confusion (volatile status)
+- **levelUpMoves cached on species** — `PokedexCache` stores `levelUpMoves: [{ moveId, level }]` (minimum level across all game versions). DM give-pokemon and starter selection use this to assign the last 4 learnable moves at the target level. Old cache entries auto-refresh on next give-pokemon call
 - **No terrain system** — weather only (rain, sun, sandstorm, hail, snow)
 - **Starters begin at level 1** — any species is valid as a starter; DM/admin can reset a player's starter via DELETE /api/dm/players/:username/starter
 - **Exp. Share is always on (Gen 6+ style)** — all Pokémon in the party gain EXP after battle; active battlers receive full EXP, benched Pokémon receive half EXP. No toggle.
@@ -205,17 +209,21 @@ trainerClass, dialogueBefore, dialogueAfter
 _id, ownerId, itemId (PokeAPI slug), quantity,
 pocket ('healing'|'status_cure'|'pp_recovery'|'stat_booster'|'held_type'|'pokeballs'|'escape')
 ```
+Unique index on (ownerId, itemId) — one stack per player per item. Pocket is derived
+server-side via getPocket(itemId) — never specified by the client.
 
 ### `pokedex_cache`
 ```
 _id, pokeApiId, name, types ([]), baseStats ({ hp,atk,def,spatk,spdef,speed }),
 abilities ([{ name, isHidden, effect, implemented:Boolean }]),
 moves ([{ name, type, category, power, accuracy, pp, priority, effect, implemented:Boolean }]),
+levelUpMoves ([{ moveId, level }]) — min level across all game versions, sorted ascending,
 evolutionChain ([{ speciesId, condition, value }]),
 evYield ({ hp,atk,def,spatk,spdef,speed }),
 catchRate, expGroup, genderRatio, isLegendary, isMythical, cachedAt
 ```
 Fetched from PokeAPI on first encounter, served from MongoDB cache thereafter.
+Old entries missing `levelUpMoves` are auto-refreshed on next DM give-pokemon call.
 
 ---
 
@@ -281,9 +289,12 @@ pokemonGame/
     src/
       lib/
         db.ts                ← MongoDB connection (connectDB)
+        statCalc.ts          ← computeStats (Gen 3+ formula) — shared utility
+        itemData.ts          ← getPocket(itemId) lookup table — itemId → ItemPocket
+        pokeapi.ts           ← fetchSpecies (PokeAPI fetch + transform)
       middleware/            ← auth middleware (JWT verify)
-      models/                ← Mongoose models
-      routes/                ← Express routers
+      models/                ← Mongoose models (User, Pokemon, Item, PokedexCache)
+      routes/                ← Express routers (auth, pokemon, items, starter, dm, admin, pokedex)
       index.ts               ← app entry point, port 4000
     .env                     ← MONGODB_URI, JWT_SECRET, PORT, FRONTEND_URL
   .gitignore
@@ -299,6 +310,9 @@ pokemonGame/
 - Mongoose models use `type` aliases (not `interface extends Document`) — modern Mongoose infers types from schema
 - `verifyToken` middleware attaches `{ userId, role }` to `req.user` via Express global declaration merging
 - Auth errors for invalid email vs wrong password both return `'Invalid credentials'` (deliberately vague to prevent account enumeration)
+- Mongoose DocumentArray vs plain array TS conflicts: cast to explicit local types after `.lean()` (e.g. `const entries = (doc.field ?? []) as MyType[]`) rather than fighting Mongoose's inferred generics
+- Stat formula extracted to `backend/src/lib/statCalc.ts` — import `computeStats` from there, do not duplicate it in route files
+- Item effects live in `backend/src/routes/items.ts` (ITEM_EFFECTS table); item→pocket mapping lives in `backend/src/lib/itemData.ts` (getPocket)
 
 ---
 
@@ -313,7 +327,7 @@ pokemonGame/
 - [x] **2.3** Pokémon detail — /pokemon/[id] with stats, moves, held item, evolution path
 - [x] **2.4** Party management — /party with dnd-kit drag-to-reorder
 - [x] **2.5** PC storage — /pc flat list, swap into party
-- [ ] **2.6** Bag & items — /bag with scoped categories, out-of-battle use
+- [x] **2.6** Bag & items — /bag with scoped categories, out-of-battle use, DM give-item, Rare Candy, flutes, level-based moveset on give-pokemon
 - [ ] **3.1** Battle document — DM creates battle, /battle/[id] loads blank battlefield
 - [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
 - [ ] **3.3** Move submission — player POSTs move, appears in turnQueue
@@ -345,8 +359,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 2.6 — Bag & items (/bag with scoped categories, out-of-battle use)
-- **Just finished:** 2.5 — /pc flat list, GET /api/pokemon/pc, POST /api/pokemon/party/swap, DM give-pokemon UI on /dm (by name or dex number, auto-fetches from PokeAPI if not cached, lands in party if room otherwise PC). Tagged v2.5.
+- **Starting:** 3.1 — Battle document (DM creates battle, /battle/[id] loads blank battlefield)
+- **Just finished:** 2.6 — /bag with tabbed pockets, out-of-battle item use (healing, status cure, PP restore, held item equip, Rare Candy level-up, flutes, Escape Rope), DM give-item endpoint (pocket auto-derived from itemId), DM give-pokemon now assigns level-appropriate moveset from cached levelUpMoves. Tagged v2.6.
 - **Known issues / blockers:** None
 
 ---
