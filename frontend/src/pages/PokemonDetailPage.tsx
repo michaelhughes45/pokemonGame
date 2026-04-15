@@ -1,9 +1,17 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
 import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+  SheetDescription,
+} from '../components/ui/sheet';
 
 const API = import.meta.env.VITE_API_URL;
 
@@ -20,8 +28,19 @@ type EvolutionStep = {
   name: string | null;
 };
 
+type ReminderMove = {
+  moveId: string;
+  level: number;
+  type: string;
+  category: string;
+  power: number | null;
+  accuracy: number | null;
+  pp: number | null;
+};
+
 type PokemonDetail = {
   _id: string;
+  ownerId: string;
   speciesId: number;
   nickname: string | null;
   level: number;
@@ -45,6 +64,7 @@ type PokemonDetail = {
       name: string; type: string; category: string;
       power: number | null; accuracy: number | null; pp: number | null;
     }[];
+    reminderMoves: ReminderMove[];
     evolutionChain: EvolutionStep[];
     isLegendary: boolean;
     isMythical: boolean;
@@ -178,11 +198,24 @@ function PpBar({ current, max }: { current: number; max: number }) {
 
 export default function PokemonDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { token } = useAuth();
+  const { token, user } = useAuth();
+  const navigate = useNavigate();
 
   const [pokemon, setPokemon] = useState<PokemonDetail | null>(null);
   const [error, setError]     = useState('');
   const [loading, setLoading] = useState(true);
+
+  // Move Reminder state
+  const [reminderSlot, setReminderSlot]     = useState<number | null>(null);
+  const [reminderOpen, setReminderOpen]     = useState(false);
+  const [reminderBusy, setReminderBusy]     = useState(false);
+  const [reminderError, setReminderError]   = useState('');
+
+  // Release state — tracks which step of the two-step confirmation we're on:
+  // 'idle' | 'confirm1' (first warning) | 'confirm2' (final warning) | 'busy' (request in flight)
+  type ReleaseStep = 'idle' | 'confirm1' | 'confirm2' | 'busy';
+  const [releaseStep, setReleaseStep] = useState<ReleaseStep>('idle');
+  const [releaseError, setReleaseError] = useState('');
 
   useEffect(() => {
     if (!id) return;
@@ -220,7 +253,67 @@ export default function PokemonDetailPage() {
     );
   }
 
+  // ---------------------------------------------------------------------------
+  // Move Reminder handler
+  // ---------------------------------------------------------------------------
+  async function selectMove(moveId: string) {
+    if (reminderSlot === null || !pokemon) return;
+    setReminderBusy(true);
+    setReminderError('');
+    try {
+      const res = await axios.patch(
+        `${API}/api/pokemon/${pokemon._id}/moves`,
+        { slot: reminderSlot, moveId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      // Update local state so the UI reflects the new moveset immediately
+      setPokemon(prev =>
+        prev ? { ...prev, moves: res.data.data.moves } : prev
+      );
+      setReminderOpen(false);
+    } catch (err) {
+      setReminderError(
+        axios.isAxiosError(err)
+          ? (err.response?.data?.error ?? 'Failed to change move')
+          : 'Failed to change move'
+      );
+    } finally {
+      setReminderBusy(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Release handler
+  // ---------------------------------------------------------------------------
+  async function confirmRelease() {
+    if (!pokemon) return;
+    setReleaseStep('busy');
+    setReleaseError('');
+    try {
+      await axios.delete(
+        `${API}/api/pokemon/${pokemon._id}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      navigate('/dashboard');
+    } catch (err) {
+      setReleaseError(
+        axios.isAxiosError(err)
+          ? (err.response?.data?.error ?? 'Failed to release Pokémon')
+          : 'Failed to release Pokémon'
+      );
+      setReleaseStep('confirm2');
+    }
+  }
+
   const { species } = pokemon;
+
+  // Can the logged-in user use the Move Reminder on this Pokémon?
+  const canRemind =
+    user?.id === pokemon.ownerId || user?.role === 'dm' || user?.role === 'admin';
+
+  // Can the logged-in user release this Pokémon?
+  const canRelease =
+    user?.id === pokemon.ownerId || user?.role === 'dm' || user?.role === 'admin';
 
   // Display name: nickname takes priority, else species name
   const displayName = pokemon.nickname
@@ -329,17 +422,20 @@ export default function PokemonDetailPage() {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Moves</CardTitle>
+            {canRemind && (
+              <p className="text-xs text-muted-foreground">Tap Change to swap a move.</p>
+            )}
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             {pokemon.moves.length === 0 ? (
               <p className="text-sm text-muted-foreground">No moves.</p>
             ) : (
-              pokemon.moves.map(m => {
+              pokemon.moves.map((m, idx) => {
                 const detail = learnableMap.get(m.moveId);
                 return (
-                  <div key={m.moveId} className="border rounded-md p-3">
+                  <div key={`${m.moveId}-${idx}`} className="border rounded-md p-3">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-sm">{formatName(m.moveId)}</span>
+                      <span className="font-semibold text-sm flex-1 min-w-0">{formatName(m.moveId)}</span>
                       {detail && (
                         <>
                           <span
@@ -356,6 +452,20 @@ export default function PokemonDetailPage() {
                           )}
                         </>
                       )}
+                      {canRemind && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="ml-auto h-7 px-2 text-xs shrink-0"
+                          onClick={() => {
+                            setReminderSlot(idx);
+                            setReminderError('');
+                            setReminderOpen(true);
+                          }}
+                        >
+                          Change
+                        </Button>
+                      )}
                     </div>
                     <PpBar current={m.currentPP} max={m.maxPP} />
                   </div>
@@ -364,6 +474,85 @@ export default function PokemonDetailPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* ── Move Reminder Sheet ── */}
+        <Sheet open={reminderOpen} onOpenChange={setReminderOpen}>
+          <SheetContent side="bottom" className="max-h-[80vh] overflow-y-auto">
+            <SheetHeader className="pb-2">
+              <SheetTitle>
+                {reminderSlot !== null
+                  ? `Replace: ${formatName(pokemon.moves[reminderSlot]?.moveId ?? '')}`
+                  : 'Choose a Move'}
+              </SheetTitle>
+              <SheetDescription>
+                Moves learnable at or below Lv. {pokemon.level}
+              </SheetDescription>
+            </SheetHeader>
+
+            {reminderError && (
+              <p className="text-sm text-destructive px-6 pb-2">{reminderError}</p>
+            )}
+
+            <div className="flex flex-col gap-2 px-6 pb-6">
+              {species.reminderMoves.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No moves available.</p>
+              ) : (
+                species.reminderMoves.map(rm => {
+                  const alreadyKnown = pokemon.moves.some(m => m.moveId === rm.moveId);
+                  const isCurrentSlot =
+                    reminderSlot !== null &&
+                    pokemon.moves[reminderSlot]?.moveId === rm.moveId;
+                  return (
+                    <button
+                      key={rm.moveId}
+                      disabled={reminderBusy || isCurrentSlot}
+                      onClick={() => selectMove(rm.moveId)}
+                      className={`
+                        w-full text-left border rounded-md p-3 transition-colors
+                        ${isCurrentSlot
+                          ? 'opacity-50 cursor-not-allowed bg-muted'
+                          : alreadyKnown
+                          ? 'opacity-60 hover:bg-accent'
+                          : 'hover:bg-accent'}
+                        ${reminderBusy ? 'pointer-events-none' : ''}
+                      `}
+                    >
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs text-muted-foreground w-10 shrink-0">
+                          Lv.{rm.level}
+                        </span>
+                        <span className="font-semibold text-sm">{formatName(rm.moveId)}</span>
+                        {rm.type && (
+                          <span
+                            className={`text-[10px] font-semibold text-white px-1.5 py-0.5 rounded ${TYPE_BG[rm.type] ?? 'bg-gray-400'}`}
+                          >
+                            {formatName(rm.type)}
+                          </span>
+                        )}
+                        {rm.category && categoryBadge(rm.category)}
+                        {rm.power !== null && (
+                          <span className="text-xs text-muted-foreground">PWR {rm.power}</span>
+                        )}
+                        {rm.accuracy !== null && (
+                          <span className="text-xs text-muted-foreground">ACC {rm.accuracy}%</span>
+                        )}
+                        {rm.pp !== null && (
+                          <span className="text-xs text-muted-foreground">PP {rm.pp}</span>
+                        )}
+                        {alreadyKnown && !isCurrentSlot && (
+                          <Badge variant="secondary" className="text-[10px] ml-auto">known</Badge>
+                        )}
+                        {isCurrentSlot && (
+                          <Badge variant="secondary" className="text-[10px] ml-auto">current</Badge>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          </SheetContent>
+        </Sheet>
 
         {/* ── Held Item ── */}
         <Card>
@@ -468,6 +657,78 @@ export default function PokemonDetailPage() {
                   );
                 })}
               </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* ── Release ── */}
+        {canRelease && (
+          <Card className={releaseStep !== 'idle' ? 'border-destructive' : ''}>
+            <CardContent className="pt-5 flex flex-col gap-3">
+              {releaseStep === 'idle' && (
+                <Button
+                  variant="outline"
+                  className="border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground w-full"
+                  onClick={() => setReleaseStep('confirm1')}
+                >
+                  Release {pokemon.nickname ? formatName(pokemon.nickname) : formatName(species.name)}
+                </Button>
+              )}
+
+              {releaseStep === 'confirm1' && (
+                <>
+                  <p className="text-sm font-semibold text-destructive">
+                    Are you sure? Releasing a Pokémon is permanent.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatName(pokemon.nickname ?? species.name)} will be gone forever and cannot be recovered.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button variant="outline" className="flex-1" onClick={() => setReleaseStep('idle')}>
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      className="flex-1"
+                      onClick={() => setReleaseStep('confirm2')}
+                    >
+                      Yes, release
+                    </Button>
+                  </div>
+                </>
+              )}
+
+              {(releaseStep === 'confirm2' || releaseStep === 'busy') && (
+                <>
+                  <p className="text-sm font-semibold text-destructive">
+                    Final confirmation — are you absolutely sure?
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    This cannot be undone. {formatName(pokemon.nickname ?? species.name)} will be released into the wild permanently.
+                  </p>
+                  {releaseError && (
+                    <p className="text-xs text-destructive">{releaseError}</p>
+                  )}
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      className="flex-1"
+                      disabled={releaseStep === 'busy'}
+                      onClick={() => { setReleaseStep('idle'); setReleaseError(''); }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      className="flex-1"
+                      disabled={releaseStep === 'busy'}
+                      onClick={confirmRelease}
+                    >
+                      {releaseStep === 'busy' ? 'Releasing…' : 'Confirm Release'}
+                    </Button>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         )}

@@ -232,6 +232,88 @@ router.post('/party/swap', verifyToken, async (req: Request, res: Response): Pro
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/pokemon/:id/moves
+// Replace one move slot via the Move Reminder. Body: { slot: 0–3, moveId: string }
+// The moveId must appear in levelUpMoves at a level ≤ the Pokémon's current level.
+// Players can only modify their own Pokémon; DM/admin can modify any.
+// ---------------------------------------------------------------------------
+router.patch('/:id/moves', verifyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { slot, moveId } = req.body as { slot: unknown; moveId: unknown };
+
+    if (!Number.isInteger(slot) || (slot as number) < 0 || (slot as number) > 3) {
+      res.status(400).json({ data: null, error: 'slot must be an integer 0–3' });
+      return;
+    }
+    if (!moveId || typeof moveId !== 'string') {
+      res.status(400).json({ data: null, error: 'moveId is required' });
+      return;
+    }
+
+    const id = req.params.id as string;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      res.status(404).json({ data: null, error: 'Pokémon not found' });
+      return;
+    }
+
+    const pokemon = await Pokemon.findById(id).lean();
+    if (!pokemon) {
+      res.status(404).json({ data: null, error: 'Pokémon not found' });
+      return;
+    }
+
+    const { userId, role } = req.user!;
+    if (role === 'player' && pokemon.ownerId.toString() !== userId) {
+      res.status(403).json({ data: null, error: 'Forbidden' });
+      return;
+    }
+
+    const species = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId }).lean();
+    if (!species) {
+      res.status(404).json({ data: null, error: 'Species data not cached' });
+      return;
+    }
+
+    // Validate the move is learnable at or below the Pokémon's current level
+    type LevelUpMove = { moveId: string; level: number };
+    const levelUpMoves = (species.levelUpMoves ?? []) as LevelUpMove[];
+    const learnEntry = levelUpMoves.find(
+      lm => lm.moveId === moveId && lm.level <= pokemon.level
+    );
+    if (!learnEntry) {
+      res.status(400).json({ data: null, error: 'Move not available at this Pokémon\'s level' });
+      return;
+    }
+
+    // Look up PP from the cached move data; fall back to 5 if not found
+    type MoveRecord = { name: string; pp: number | null };
+    const movesArr = (species.moves ?? []) as MoveRecord[];
+    const moveDetail = movesArr.find(m => m.name === moveId);
+    const pp = moveDetail?.pp ?? 5;
+
+    type MoveSlot = { moveId: string; currentPP: number; maxPP: number };
+    const currentMoves = (pokemon.moves ?? []) as MoveSlot[];
+
+    if ((slot as number) >= currentMoves.length) {
+      res.status(400).json({ data: null, error: `No move in slot ${slot}` });
+      return;
+    }
+
+    const newMoves: MoveSlot[] = currentMoves.map((m, i) =>
+      i === (slot as number) ? { moveId: moveId as string, currentPP: pp, maxPP: pp } : m
+    );
+
+    await Pokemon.updateOne({ _id: pokemon._id }, { moves: newMoves });
+
+    res.json({ data: { moves: newMoves }, error: null });
+  } catch (err) {
+    console.error('Move reminder error:', err);
+    res.status(500).json({ data: null, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/pokemon/:id
 // Returns a single Pokémon with full species data + computed stats.
 // Players can only view their own; DM/admin can view any.
@@ -281,9 +363,33 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
 
     const stats = computeStats(species.baseStats, pokemon.level, pokemon.nature);
 
+    // Build reminderMoves: level-up moves learnable at or below the Pokémon's current level,
+    // enriched with display data from the moves cache. These populate the Move Reminder UI.
+    type MoveDetail = { name: string; type: string; category: string; power: number | null; accuracy: number | null; pp: number | null };
+    const moveDetailMap = new Map(
+      (species.moves as MoveDetail[]).map(m => [m.name, m])
+    );
+    type LevelUpMove = { moveId: string; level: number };
+    const reminderMoves = ((species.levelUpMoves ?? []) as LevelUpMove[])
+      .filter(lm => lm.level <= pokemon.level)
+      .map(lm => {
+        const detail = moveDetailMap.get(lm.moveId);
+        return {
+          moveId:   lm.moveId,
+          level:    lm.level,
+          type:     detail?.type     ?? '',
+          category: detail?.category ?? '',
+          power:    detail?.power    ?? null,
+          accuracy: detail?.accuracy ?? null,
+          pp:       detail?.pp       ?? 5,
+        };
+      })
+      .sort((a, b) => a.level - b.level || a.moveId.localeCompare(b.moveId));
+
     res.json({
       data: {
         _id:             pokemon._id,
+        ownerId:         pokemon.ownerId.toString(),
         speciesId:       pokemon.speciesId,
         nickname:        pokemon.nickname,
         level:           pokemon.level,
@@ -304,6 +410,7 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
           baseStats:      species.baseStats,
           abilities:      species.abilities,
           learnableMoves: species.moves,
+          reminderMoves,
           evolutionChain: evolutionChainWithNames,
           isLegendary:    species.isLegendary,
           isMythical:     species.isMythical,
@@ -313,6 +420,70 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
     });
   } catch (err) {
     console.error('Pokemon detail route error:', err);
+    res.status(500).json({ data: null, error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/pokemon/:id
+// Permanently releases (deletes) a Pokémon.
+// Players can only release their own; DM/admin can release any.
+// Players are blocked from releasing their very last Pokémon.
+// If the released Pokémon was in the party, remaining party slots are
+// compacted so there are no gaps.
+// ---------------------------------------------------------------------------
+router.delete('/:id', verifyToken, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const id = req.params.id as string;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      res.status(404).json({ data: null, error: 'Pokémon not found' });
+      return;
+    }
+
+    const pokemon = await Pokemon.findById(id).lean();
+    if (!pokemon) {
+      res.status(404).json({ data: null, error: 'Pokémon not found' });
+      return;
+    }
+
+    const { userId, role } = req.user!;
+    if (role === 'player' && pokemon.ownerId.toString() !== userId) {
+      res.status(403).json({ data: null, error: 'Forbidden' });
+      return;
+    }
+
+    // No one can release a trainer's last Pokémon — DMs must use the starter
+    // reset endpoint if they need to fully wipe a player's team.
+    const total = await Pokemon.countDocuments({ ownerId: pokemon.ownerId });
+    if (total <= 1) {
+      res.status(400).json({ data: null, error: 'Cannot release a trainer\'s last Pokémon' });
+      return;
+    }
+
+    const wasInParty = pokemon.isInParty;
+    const ownerId    = pokemon.ownerId;
+
+    await Pokemon.deleteOne({ _id: id });
+
+    // If the released Pokémon was in the party, compact remaining party slots
+    // so they run 1, 2, 3 … with no gaps.
+    if (wasInParty) {
+      const remaining = await Pokemon.find({ ownerId, isInParty: true })
+        .select('_id')
+        .lean()
+        .sort({ partySlot: 1 });
+
+      await Promise.all(
+        remaining.map((p, index) =>
+          Pokemon.updateOne({ _id: p._id }, { partySlot: index + 1 })
+        )
+      );
+    }
+
+    res.json({ data: { ok: true }, error: null });
+  } catch (err) {
+    console.error('Release pokemon error:', err);
     res.status(500).json({ data: null, error: 'Internal server error' });
   }
 });

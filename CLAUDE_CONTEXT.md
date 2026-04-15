@@ -328,6 +328,7 @@ pokemonGame/
 - [x] **2.4** Party management — /party with dnd-kit drag-to-reorder
 - [x] **2.5** PC storage — /pc flat list, swap into party
 - [x] **2.6** Bag & items — /bag with scoped categories, out-of-battle use, DM give-item, Rare Candy, flutes, level-based moveset on give-pokemon
+- [x] **2.7** Move reminder — player can replace any of their Pokémon's current moves with any move learnable at or below its current level, via the Pokémon detail page. Also added Pokémon release (DELETE /api/pokemon/:id) with two-step confirmation; no one can release a trainer's last Pokémon (DM must use starter reset instead)
 - [ ] **3.1** Battle document — DM creates battle, /battle/[id] loads blank battlefield
 - [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
 - [ ] **3.3** Move submission — player POSTs move, appears in turnQueue
@@ -360,7 +361,7 @@ pokemonGame/
 ## Current Milestone
 
 - **Starting:** 3.1 — Battle document (DM creates battle, /battle/[id] loads blank battlefield)
-- **Just finished:** 2.6 — /bag with tabbed pockets, out-of-battle item use (healing, status cure, PP restore, held item equip, Rare Candy level-up, flutes, Escape Rope), DM give-item endpoint (pocket auto-derived from itemId), DM give-pokemon now assigns level-appropriate moveset from cached levelUpMoves. Tagged v2.6.
+- **Just finished:** 2.7 — Move reminder on Pokémon detail page (PATCH /api/pokemon/:id/moves, bottom Sheet UI, level-filtered learnable moves). Pokémon release (DELETE /api/pokemon/:id, two-step confirmation, last-Pokémon guard applies to all roles). Tagged v2.7.
 - **Known issues / blockers:** None
 
 ---
