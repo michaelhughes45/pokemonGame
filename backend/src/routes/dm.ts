@@ -1,12 +1,51 @@
 import { Router, Request, Response } from 'express';
+import mongoose from 'mongoose';
 import { User } from '../models/User';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { Item } from '../models/Item';
+import { Campaign } from '../models/Campaign';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
 
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// assertCampaignPlayer
+// Shared guard used by all DM routes that target a specific player.
+// Checks:
+//   1. The DM has an active campaign.
+//   2. The target username exists.
+//   3. The target player is a member of that campaign.
+// Returns the target user document on success, or sends a 403/404 and returns
+// null so the calling route can do an early return.
+// ---------------------------------------------------------------------------
+async function assertCampaignPlayer(
+  dmUserId: string,
+  username: string,
+  res: Response
+): Promise<{ _id: mongoose.Types.ObjectId; [key: string]: unknown } | null> {
+  const campaign = await Campaign.findOne({ dmId: dmUserId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return null;
+  }
+
+  const target = await User.findOne({ username }).lean();
+  if (!target) {
+    res.status(404).json({ data: null, error: `Player "${username}" not found` });
+    return null;
+  }
+
+  const targetId = (target._id as mongoose.Types.ObjectId).toString();
+  const inCampaign = campaign.playerIds.some(id => id.toString() === targetId);
+  if (!inCampaign) {
+    res.status(403).json({ data: null, error: `"${username}" is not in your campaign` });
+    return null;
+  }
+
+  return target as { _id: mongoose.Types.ObjectId; [key: string]: unknown };
+}
 
 // DELETE /api/dm/players/:username/starter
 // Deletes all Pokémon belonging to the player so they can pick a new starter.
@@ -14,11 +53,8 @@ const router = Router();
 router.delete('/players/:username/starter', async (req: Request, res: Response): Promise<void> => {
   const { username } = req.params;
 
-  const user = await User.findOne({ username }).lean();
-  if (!user) {
-    res.status(404).json({ data: null, error: `Player "${username}" not found` });
-    return;
-  }
+  const user = await assertCampaignPlayer(req.user!.userId, username as string, res);
+  if (!user) return;
 
   const result = await Pokemon.deleteMany({ ownerId: user._id });
 
@@ -63,11 +99,8 @@ router.post('/players/:username/pokemon', async (req: Request, res: Response): P
     return;
   }
 
-  const user = await User.findOne({ username }).lean();
-  if (!user) {
-    res.status(404).json({ data: null, error: `Player "${username}" not found` });
-    return;
-  }
+  const user = await assertCampaignPlayer(req.user!.userId, username as string, res);
+  if (!user) return;
 
   // Determine whether the DM passed a numeric ID or a name string
   const isNumeric = /^\d+$/.test(String(species));
@@ -217,11 +250,8 @@ router.post('/items/give', async (req: Request, res: Response): Promise<void> =>
     return;
   }
 
-  const user = await User.findOne({ username: username.trim() }).lean();
-  if (!user) {
-    res.status(404).json({ data: null, error: `Player "${username}" not found` });
-    return;
-  }
+  const user = await assertCampaignPlayer(req.user!.userId, username.trim(), res);
+  if (!user) return;
 
   const item = await Item.findOneAndUpdate(
     { ownerId: user._id, itemId: itemId.trim() },

@@ -9,6 +9,7 @@ import pokedexRouter from './routes/pokedex';
 import starterRouter from './routes/starter';
 import pokemonRouter from './routes/pokemon';
 import itemsRouter from './routes/items';
+import campaignsRouter from './routes/campaigns';
 import { verifyToken, requireDm, requireAdmin } from './middleware/auth';
 
 const app = express();
@@ -26,6 +27,7 @@ app.use('/api/pokedex', pokedexRouter);
 app.use('/api/starter', starterRouter);
 app.use('/api/pokemon', pokemonRouter);
 app.use('/api/items', itemsRouter);
+app.use('/api/campaigns', verifyToken, campaignsRouter);
 app.use('/api/dm', verifyToken, requireDm, dmRouter);
 app.use('/api/admin', verifyToken, requireAdmin, adminRouter);
 

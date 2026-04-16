@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
@@ -8,6 +8,202 @@ import { Label } from '../components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 
 const API = import.meta.env.VITE_API_URL;
+
+// ── Campaign card ─────────────────────────────────────────────────────────────
+// Shows the DM's current campaign. If they don't have one yet, shows a create
+// form. If they do, shows the player list (with remove buttons) and an invite form.
+
+type CampaignPlayer = { _id: string; username: string };
+type PendingInvite  = { userId: string; username: string; sentAt: string };
+type CampaignData = {
+  _id: string;
+  name: string;
+  players: CampaignPlayer[];
+  pendingInvites: PendingInvite[];
+};
+
+function CampaignCard({ token }: { token: string | null }) {
+  const [campaign,       setCampaign]       = useState<CampaignData | null>(null);
+  const [loading,        setLoading]        = useState(true);
+  const [createName,     setCreateName]     = useState('');
+  const [createLoading,  setCreateLoading]  = useState(false);
+  const [inviteUsername, setInviteUsername] = useState('');
+  const [inviteLoading,  setInviteLoading]  = useState(false);
+  const [feedback,       setFeedback]       = useState('');
+  const [error,          setError]          = useState('');
+
+  const headers = { Authorization: `Bearer ${token}` };
+
+  // Fetch the DM's campaign on mount
+  useEffect(() => {
+    axios
+      .get(`${API}/api/campaigns/mine`, { headers })
+      .then(res => setCampaign(res.data.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  function clearMessages() { setFeedback(''); setError(''); }
+
+  async function handleCreate(e: { preventDefault(): void }) {
+    e.preventDefault();
+    if (!createName.trim()) return;
+    clearMessages(); setCreateLoading(true);
+    try {
+      await axios.post(`${API}/api/campaigns`, { name: createName.trim() }, { headers });
+      // Re-fetch so we get the full campaign object with the new _id
+      const res = await axios.get(`${API}/api/campaigns/mine`, { headers });
+      setCampaign(res.data.data);
+      setCreateName('');
+      setFeedback('Campaign created.');
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to create campaign') : 'Failed to create campaign');
+    } finally {
+      setCreateLoading(false);
+    }
+  }
+
+  async function handleInvite(e: { preventDefault(): void }) {
+    e.preventDefault();
+    if (!inviteUsername.trim()) return;
+    clearMessages(); setInviteLoading(true);
+    try {
+      await axios.post(`${API}/api/campaigns/invite`, { username: inviteUsername.trim() }, { headers });
+      // Re-fetch to show updated pending invites list
+      const res = await axios.get(`${API}/api/campaigns/mine`, { headers });
+      setCampaign(res.data.data);
+      setInviteUsername('');
+      setFeedback(`Invite sent to ${inviteUsername.trim()}.`);
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to send invite') : 'Failed to send invite');
+    } finally {
+      setInviteLoading(false);
+    }
+  }
+
+  async function handleRemove(username: string) {
+    clearMessages();
+    try {
+      await axios.delete(`${API}/api/campaigns/players/${encodeURIComponent(username)}`, { headers });
+      const res = await axios.get(`${API}/api/campaigns/mine`, { headers });
+      setCampaign(res.data.data);
+      setFeedback(`Removed ${username} from campaign.`);
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to remove player') : 'Failed to remove player');
+    }
+  }
+
+  if (loading) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Campaign</CardTitle></CardHeader>
+        <CardContent><p className="text-sm text-muted-foreground">Loading…</p></CardContent>
+      </Card>
+    );
+  }
+
+  // No campaign yet — show the create form
+  if (!campaign) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Campaign</CardTitle></CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground mb-4">
+            You don't have a campaign yet. Create one to start inviting players.
+          </p>
+          <form onSubmit={handleCreate} className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="campaign-name">Campaign name</Label>
+              <Input
+                id="campaign-name"
+                placeholder="e.g. Kanto Adventure"
+                value={createName}
+                onChange={e => setCreateName(e.target.value)}
+                required
+              />
+            </div>
+            {error    && <p className="text-sm text-destructive">{error}</p>}
+            {feedback && <p className="text-sm text-muted-foreground">{feedback}</p>}
+            <Button type="submit" disabled={createLoading} className="min-h-11">
+              {createLoading ? 'Creating…' : 'Create campaign'}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Has a campaign — show players, pending invites, and invite form
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{campaign.name}</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-5">
+
+        {/* Player list */}
+        <div>
+          <p className="text-sm font-medium mb-2">Players ({campaign.players.length})</p>
+          {campaign.players.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No players yet.</p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {campaign.players.map(p => (
+                <li key={p._id} className="flex items-center justify-between text-sm">
+                  <span>{p.username}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive min-h-9"
+                    onClick={() => handleRemove(p.username)}
+                  >
+                    Remove
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* Pending invites */}
+        {campaign.pendingInvites.length > 0 && (
+          <div>
+            <p className="text-sm font-medium mb-2">Pending invites</p>
+            <ul className="flex flex-col gap-1">
+              {campaign.pendingInvites.map(i => (
+                <li key={i.userId} className="text-sm text-muted-foreground">
+                  {i.username} — awaiting response
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Invite form */}
+        <form onSubmit={handleInvite} className="flex flex-col gap-3">
+          <p className="text-sm font-medium">Invite a player</p>
+          <div className="flex gap-2">
+            <Input
+              placeholder="Player username"
+              value={inviteUsername}
+              onChange={e => setInviteUsername(e.target.value)}
+              required
+              className="flex-1"
+            />
+            <Button type="submit" disabled={inviteLoading} className="min-h-11 shrink-0">
+              {inviteLoading ? 'Sending…' : 'Invite'}
+            </Button>
+          </div>
+        </form>
+
+        {error    && <p className="text-sm text-destructive">{error}</p>}
+        {feedback && <p className="text-sm text-muted-foreground">{feedback}</p>}
+
+      </CardContent>
+    </Card>
+  );
+}
 
 const NATURES = [
   'Hardy','Lonely','Brave','Adamant','Naughty',
@@ -323,6 +519,7 @@ export default function DmPage() {
           </Link>
         </div>
 
+        <CampaignCard token={token} />
         <GivePokemonCard token={token} />
         <GiveItemCard token={token} />
         <ResetStarterCard token={token} />

@@ -8,6 +8,12 @@ import { Badge } from '../components/ui/badge';
 
 const API = import.meta.env.VITE_API_URL;
 
+type PendingInvite = {
+  _id: string;
+  name: string;
+  dmUsername: string;
+};
+
 const roleBadgeVariant: Record<string, 'default' | 'secondary' | 'destructive'> = {
   admin: 'destructive',
   dm:    'default',
@@ -67,8 +73,10 @@ export default function DashboardPage() {
   const { user, token, logout } = useAuth();
   const navigate = useNavigate();
 
-  const [party, setParty]           = useState<PartyMember[]>([]);
+  const [party, setParty]               = useState<PartyMember[]>([]);
   const [partyLoading, setPartyLoading] = useState(true);
+  const [invites, setInvites]           = useState<PendingInvite[]>([]);
+  const [inviteError, setInviteError]   = useState('');
 
   function handleLogout() {
     logout();
@@ -82,9 +90,35 @@ export default function DashboardPage() {
         headers: { Authorization: `Bearer ${token}` },
       })
       .then(res => setParty(res.data.data ?? []))
-      .catch(() => {}) // Party section just stays empty on error
+      .catch(() => {})
       .finally(() => setPartyLoading(false));
   }, [token]);
+
+  // Fetch pending campaign invites for players
+  useEffect(() => {
+    if (!user || user.role !== 'player') return;
+    axios
+      .get(`${API}/api/campaigns/invites`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then(res => setInvites(res.data.data ?? []))
+      .catch(() => {});
+  }, [token, user]);
+
+  async function handleInviteRespond(campaignId: string, action: 'accept' | 'decline') {
+    setInviteError('');
+    try {
+      await axios.post(
+        `${API}/api/campaigns/invite/respond`,
+        { campaignId, action },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      // Remove the invite from the list regardless of accept/decline
+      setInvites(prev => prev.filter(i => i._id !== campaignId));
+    } catch (err: unknown) {
+      setInviteError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to respond') : 'Failed to respond');
+    }
+  }
 
   if (!user) return null;
 
@@ -124,6 +158,43 @@ export default function DashboardPage() {
             </Link>
           )}
         </div>
+
+        {/* ── Pending campaign invites (players only) ── */}
+        {invites.length > 0 && (
+          <div>
+            <h2 className="text-lg font-semibold mb-3">Campaign Invites</h2>
+            <div className="flex flex-col gap-3">
+              {invites.map(invite => (
+                <Card key={invite._id}>
+                  <CardContent className="pt-4 flex flex-col gap-3">
+                    <div>
+                      <p className="font-medium text-sm">{invite.name}</p>
+                      <p className="text-xs text-muted-foreground">from DM: {invite.dmUsername}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        className="min-h-9 flex-1"
+                        onClick={() => handleInviteRespond(invite._id, 'accept')}
+                      >
+                        Accept
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="min-h-9 flex-1"
+                        onClick={() => handleInviteRespond(invite._id, 'decline')}
+                      >
+                        Decline
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+              {inviteError && <p className="text-sm text-destructive">{inviteError}</p>}
+            </div>
+          </div>
+        )}
 
         {/* ── Trainer card ── */}
         <Card>

@@ -79,6 +79,18 @@ Auth guards live in Express middleware — verify JWT on every protected route, 
 - **Flutes implemented** — `poke-flute`, `blue-flute`, `green-flute` cure sleep; `yellow-flute` cures confusion (volatile status)
 - **levelUpMoves cached on species** — `PokedexCache` stores `levelUpMoves: [{ moveId, level }]` (minimum level across all game versions). DM give-pokemon and starter selection use this to assign the last 4 learnable moves at the target level. Old cache entries auto-refresh on next give-pokemon call
 - **No terrain system** — weather only (rain, sun, sandstorm, hail, snow)
+- **Physical board handles movement** — the app does not track position or adjacency. Players select targets manually; adjacency is self-reported from the physical table, not enforced by the app
+- **Two-phase turn structure** — move_submission phase collects all actor moves first; targeting phase resolves them sequentially in speed order. This matches the physical miniatures flow where intent is declared before targets are chosen
+- **Targeting is free-form** — players select any subset of Pokémon in the battle as targets. No targeting-type enforcement (single/adjacent/AoE) — the physical table and player judgment handle that
+- **Moves resolve immediately on target selection** — each actor picks targets then @smogon/calc runs right away; resolution is sequential (speed order), not all-at-once
+- **Status damage is end-of-round** — burn, poison, toxic ticks apply after all moves in the round have resolved, not mid-turn
+- **DM submits for all NPCs** — players submit their own moves; DM handles enemy side entirely
+- **Battle format is type + size, not a fixed enum** — `type` describes who the sides are (`pve`, `wild`, `pvp`); matchup size (1v1, 3v5, 6v6, etc.) is derived from the lengths of `playerSide` and `enemySide`. Supports any lopsided or symmetric matchup without schema changes
+- **Campaigns group a DM and their players** — all DM actions (give Pokémon, give item, view party, create encounters) are scoped to players in the DM's campaign. A DM cannot modify players outside their own campaign. DMs invite players by username; players accept/decline on their dashboard
+- **One active campaign per user** — a player must leave their current campaign before joining another. Trainer, Pokémon, and items are global to the user (not scoped per campaign). DMs run one campaign; their role does not include a player character
+- **Encounters, NPCs, and battles belong to a campaign** — all have a `campaignId` field; DMs can only see/edit their own campaign's data
+- **NPC parties cap at 12, player parties cap at 6** — allows gym leaders and bosses to field large teams without changing the player experience
+- **Player Pokémon limit is per-battle, set by DM on the encounter** — `playerPokemonLimit` (null = no limit). Tracks distinct Pokémon sent out via `usedPokemonIds` on each player's `playerSide` entry. No pre-selection — players pick freely up to the limit during the battle. If all used Pokémon faint, that player is out for the rest of the battle
 - **Starters begin at level 1** — any species is valid as a starter; DM/admin can reset a player's starter via DELETE /api/dm/players/:username/starter
 - **Exp. Share is always on (Gen 6+ style)** — all Pokémon in the party gain EXP after battle; active battlers receive full EXP, benched Pokémon receive half EXP. No toggle.
 - **No PvP until Phase 5**
@@ -159,9 +171,20 @@ NEXTAUTH_URL=
 ### `users`
 ```
 _id, username, email, passwordHash, role, trainerStats (Map<String,Number> e.g. {speed:20}),
-trainerStatChoice (String), badges ([]), money (Number), createdAt, updatedAt
+trainerStatChoice (String), badges ([]), money (Number), currentCampaignId (ObjectId | null), createdAt, updatedAt
 ```
 `trainerStats` is a flexible key-value map — new homebrew stats slot in without schema migration.
+
+### `campaigns`
+```
+_id, name, dmId (ObjectId→user), playerIds ([ObjectId→user]),
+pendingInvites ([{ userId, sentAt }]),
+isActive (Boolean), createdAt
+```
+DM creates the campaign and invites players by username. Players see pending invites on their
+dashboard and accept or decline. On accept, the player's `currentCampaignId` is set and they
+are added to `playerIds`. One active campaign per user at a time — a player must leave their
+current campaign before joining another.
 
 ### `pokemon`
 ```
@@ -178,28 +201,40 @@ caughtAt, caughtByPlayerId, createdAt
 
 ### `battles`
 ```
-_id (used as poll key), format ('1v1'|'pvp'|'group_vs_npc'|'group_vs_wild'|'6v6'),
+_id (used as poll key), campaignId (ObjectId), type ('pve'|'wild'|'pvp') — who the sides are; actual matchup size is derived from playerSide/enemySide lengths,
 status ('waiting'|'active'|'complete'),
-playerSide ([{ userId, activePokemonId, fainted:[] }]),
-enemySide ([{ npcId|userId, activePokemonId, fainted:[] }]),
-turnNumber, turnQueue ([pending submissions]),
+phase ('move_submission'|'targeting'|'end_of_round') — sub-state within 'active',
+playerSide ([{ userId, activePokemonId, usedPokemonIds:[], fainted:[] }]),
+enemySide ([{ npcId, activePokemonId, fainted:[] }]),
+turnNumber,
+turnQueue ([{
+  actorId (userId or npcId),
+  actorType ('player'|'npc'),
+  activePokemonId,
+  moveId,
+  targets ([pokemonId]) — empty [] during move_submission, filled during targeting phase,
+  resolved (Boolean)
+}]),
+currentTargetIndex (Number) — index into speed-sorted turnQueue for targeting prompts,
 weather (null|'rain'|'sun'|'sandstorm'|'hail'|'snow'),
 fieldConditions ([{ condition, turnsRemaining }]),
 turnLog ([{ turn, events:[] }]),
 catchAttempts ([{ playerId, pokemonId, result }]),
+playerPokemonLimit (Number | null) — max distinct Pokémon each player may send out; null means no limit (use full party of 6),
 expAwarded (Boolean), encounterId, lastUpdatedAt, createdAt, endedAt
 ```
 
 ### `encounters`
 ```
-_id, createdByDm, title, format, enemies ([{ npcId|wildSpeciesId, level, heldItem, moves:[] }]),
+_id, campaignId (ObjectId), createdByDm, title, type ('pve'|'wild'|'pvp'), enemies ([{ npcId|wildSpeciesId, level, heldItem, moves:[] }]),
 wildPokemon ([{ speciesId, levelRange, catchable:true }]),
+playerPokemonLimit (Number | null) — carried into battle document on launch; null means no limit,
 expMultiplier, notes, isActive
 ```
 
 ### `npcs`
 ```
-_id, createdByDm, name, type ('trainer'|'wild'), party ([ObjectId→pokemon]),
+_id, campaignId (ObjectId), createdByDm, name, type ('trainer'|'wild'), party ([ObjectId→pokemon], max 12),
 aiStrategy ('random'|'optimal'|'defensive'|'custom'), customAiNotes,
 trainerClass, dialogueBefore, dialogueAfter
 ```
@@ -249,14 +284,24 @@ Admin panel has a manual refresh button per entry.
 
 ## Battle Polling Flow
 
-1. DM launches encounter → battle document created in MongoDB
-2. Players navigate to `/battle/[id]` — client polls `/api/battle/[id]/state` every 2s
-3. Each player POSTs move/item/switch to `/api/battle/[id]/move`
-4. Server collects all submissions (or timer expires) → resolves turn server-side
-5. `@smogon/calc` runs for each attack, status/weather/ability effects apply
-6. Battle document updated in MongoDB with new state + `lastUpdatedAt` bumped
-7. Next poll returns updated state — all clients render same turn log
-8. Battle ends when one side fully fainted → EXP distributed, evolution checked
+Movement and positioning are handled on a physical table with miniatures. The app resolves
+damage, status effects, HP, PP, and turn order only — it does not track board position.
+
+### Round flow
+
+1. **DM launches encounter** → battle document created, `status: 'active'`, `phase: 'move_submission'`
+2. **Players navigate to `/battle/[id]`** — client polls `/api/battle/[id]/state` every 2–3s
+3. **Move submission phase** — each player POSTs their move choice (no target yet); DM submits for all NPCs.
+   Round does not advance until every actor has submitted.
+4. **Server sorts by speed** → builds speed-ordered `turnQueue`, sets `phase: 'targeting'`, `currentTargetIndex: 0`
+5. **Targeting phase (sequential)** — poll response indicates whose turn it is to pick targets.
+   The active actor selects which Pokémon their move hits (they know adjacency from the physical table).
+   Player POSTs target selection → server resolves move immediately (`@smogon/calc` runs, HP updates) →
+   `currentTargetIndex` increments → next actor is prompted.
+6. **End of round** — after all moves resolve, server applies end-of-round status damage
+   (burn, poison, toxic ticks, etc.), sets `phase: 'move_submission'` for next round.
+7. **Battle document updated** in MongoDB with new state + `lastUpdatedAt` bumped each step.
+8. **Battle ends** when one side is fully fainted → EXP distributed to full party (Gen 6+ style), evolution checked.
 
 ---
 
@@ -329,38 +374,36 @@ pokemonGame/
 - [x] **2.5** PC storage — /pc flat list, swap into party
 - [x] **2.6** Bag & items — /bag with scoped categories, out-of-battle use, DM give-item, Rare Candy, flutes, level-based moveset on give-pokemon
 - [x] **2.7** Move reminder — player can replace any of their Pokémon's current moves with any move learnable at or below its current level, via the Pokémon detail page. Also added Pokémon release (DELETE /api/pokemon/:id) with two-step confirmation; no one can release a trainer's last Pokémon (DM must use starter reset instead)
+- [ ] **2.8** Campaign system — DM creates campaign, invites players by username, players accept/decline on dashboard; all DM actions scoped to their campaign's players; one active campaign per user
 - [ ] **3.1** Battle document — DM creates battle, /battle/[id] loads blank battlefield
 - [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
-- [ ] **3.3** Move submission — player POSTs move, appears in turnQueue
-- [ ] **3.4** Turn resolution — @smogon/calc runs, damage applies, HP updates
-- [ ] **3.5** Turn log — resolved events display in battle UI
-- [ ] **3.6** Status conditions — burn, paralysis, sleep, poison, toxic, confusion
-- [ ] **3.7** Weather — rain/sun/sandstorm/hail, @smogon/calc receives weather field
-- [ ] **3.8** Items in battle — healing + status cure usable as turn action
-- [ ] **3.9** Switching — switch active Pokémon, ability triggers on entry
-- [ ] **3.10** Faint & battle end — faint prompt, EXP distributed to full party (Gen 6+ Exp. Share), EV award deferred
-- [ ] **3.11** NPC AI — random/optimal move auto-submitted ★ first playable game
-- [ ] **4.1** Multi-player battle — two players polling same battle independently
-- [ ] **4.2** Group battle format — 3 players vs DM NPC team ★ first real session
-- [ ] **4.3** Wild battles & catch — catch formula, Pokémon lands in PC with zeroed EVs
-- [ ] **4.4** Evolution engine — level-up check, override rules respected
-- [ ] **4.5** DM encounter builder — /dm/encounters, build and launch
-- [ ] **4.6** DM NPC builder — /dm/npcs, custom party and AI strategy
-- [ ] **4.7** DM EXP panel — /dm/exp, manual EXP award
+- [ ] **3.3** Move submission phase — all actors submit move choice (no target yet); round waits until every actor has submitted
+- [ ] **3.4** Targeting phase — speed-sorted queue built; each actor prompted in order to select which Pokémon their move hits
+- [ ] **3.5** Turn resolution — @smogon/calc runs immediately on target selection per actor; end-of-round status damage ticks after all moves resolve
+- [ ] **3.6** Turn log — resolved events display in battle UI
+- [ ] **3.7** Status conditions — burn, paralysis, sleep, poison, toxic, confusion
+- [ ] **3.8** Weather — rain/sun/sandstorm/hail, @smogon/calc receives weather field
+- [ ] **3.9** Items in battle — healing + status cure usable as turn action
+- [ ] **3.10** Switching — switch active Pokémon, ability triggers on entry; enforce playerPokemonLimit (track usedPokemonIds, block send-out if limit reached and all used Pokémon still alive)
+- [ ] **3.11** Faint & battle end — faint prompt, EXP distributed to full party (Gen 6+ Exp. Share), EV award deferred ★ first playable game
+- [ ] **4.1** Wild battles & catch — catch formula, Pokémon lands in PC with zeroed EVs
+- [ ] **4.2** Evolution engine — level-up check, override rules respected
+- [ ] **4.3** DM encounter builder — /dm/encounters, build and launch, set playerPokemonLimit per encounter ★ first real session
+- [ ] **4.4** DM NPC builder — /dm/npcs, custom party (up to 12 Pokémon) and optional AI strategy for auto-submission
+- [ ] **4.5** DM EXP panel — /dm/exp, manual EXP award
 - [ ] **5.1** EV award engine — post-battle evYield distribution, 252/510 caps
 - [ ] **5.2** EV tools — DM EV panel, EV-reducing berries from bag
 - [ ] **5.3** Trainer IV activation — +20 stat bonus passed to @smogon/calc
 - [ ] **5.4** PvP battles — player vs player format
-- [ ] **5.5** Full 6v6 — full party cycling across all formats
-- [ ] **5.6** Admin panel — user management, cache refresh, data reset
-- [ ] **5.7** Mobile polish — iOS Safari + Android Chrome tested, all touch targets ≥ 44px
-- [ ] **5.8** Battle replay — turn log replayable from beginning
+- [ ] **5.5** Admin panel — user management, cache refresh, data reset
+- [ ] **5.6** Mobile polish — iOS Safari + Android Chrome tested, all touch targets ≥ 44px
+- [ ] **5.7** Battle replay — turn log replayable from beginning
 
 ---
 
 ## Current Milestone
 
-- **Starting:** 3.1 — Battle document (DM creates battle, /battle/[id] loads blank battlefield)
+- **Starting:** 2.8 — Campaign system (DM creates campaign, invite flow, scoped DM actions)
 - **Just finished:** 2.7 — Move reminder on Pokémon detail page (PATCH /api/pokemon/:id/moves, bottom Sheet UI, level-filtered learnable moves). Pokémon release (DELETE /api/pokemon/:id, two-step confirmation, last-Pokémon guard applies to all roles). Tagged v2.7.
 - **Known issues / blockers:** None
 
