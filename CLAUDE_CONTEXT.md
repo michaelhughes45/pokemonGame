@@ -374,8 +374,9 @@ pokemonGame/
 - [x] **2.5** PC storage — /pc flat list, swap into party
 - [x] **2.6** Bag & items — /bag with scoped categories, out-of-battle use, DM give-item, Rare Candy, flutes, level-based moveset on give-pokemon
 - [x] **2.7** Move reminder — player can replace any of their Pokémon's current moves with any move learnable at or below its current level, via the Pokémon detail page. Also added Pokémon release (DELETE /api/pokemon/:id) with two-step confirmation; no one can release a trainer's last Pokémon (DM must use starter reset instead)
-- [ ] **2.8** Campaign system — DM creates campaign, invites players by username, players accept/decline on dashboard; all DM actions scoped to their campaign's players; one active campaign per user
-- [ ] **3.1** Battle document — DM creates battle, /battle/[id] loads blank battlefield
+- [x] **2.8** Campaign system — DM creates campaign, invites players by username, players accept/decline on dashboard; all DM actions scoped to their campaign's players; one active campaign per user
+- [x] **3.1** Battle document — Battle model, POST /api/battles (DM creates with campaign players), GET /api/battles/:id/state, blank battlefield UI at /battle/:id, CreateBattleCard on DM panel
+- [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
 - [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
 - [ ] **3.3** Move submission phase — all actors submit move choice (no target yet); round waits until every actor has submitted
 - [ ] **3.4** Targeting phase — speed-sorted queue built; each actor prompted in order to select which Pokémon their move hits
@@ -403,8 +404,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 2.8 — Campaign system (DM creates campaign, invite flow, scoped DM actions)
-- **Just finished:** 2.7 — Move reminder on Pokémon detail page (PATCH /api/pokemon/:id/moves, bottom Sheet UI, level-filtered learnable moves). Pokémon release (DELETE /api/pokemon/:id, two-step confirmation, last-Pokémon guard applies to all roles). Tagged v2.7.
+- **Starting:** 3.2 — Polling loop (client polls /api/battles/:id/state every 2–3s, active battle surfaces on player dashboard)
+- **Just finished:** 3.1 — Battle document (Battle model, POST /api/battles, GET /api/battles/:id/state, blank /battle/:id page, CreateBattleCard on DM panel). Tagged v3.1.
 - **Known issues / blockers:** None
 
 ---

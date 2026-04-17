@@ -10,6 +10,7 @@ import PokemonDetailPage from './pages/PokemonDetailPage';
 import PartyPage from './pages/PartyPage';
 import PCPage from './pages/PCPage';
 import BagPage from './pages/BagPage';
+import BattlePage from './pages/BattlePage';
 
 function RequireDm({ children }: { children: React.ReactNode }) {
   const { token, user, loading } = useAuth();
@@ -85,6 +86,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <BagPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/battle/:id"
+        element={
+          <ProtectedRoute>
+            <BattlePage />
           </ProtectedRoute>
         }
       />

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
 import { Button } from '../components/ui/button';
@@ -504,6 +504,153 @@ function GiveItemCard({ token }: { token: string | null }) {
   );
 }
 
+// ── Create Battle card ───────────────────────────────────────────────────────
+// Loads the DM's campaign players, lets the DM check which ones join,
+// pick a battle type, and optionally set a per-player Pokémon limit.
+// On submit it POSTs to /api/battles and navigates to /battle/:id.
+
+type CampaignPlayerBasic = { _id: string; username: string };
+
+function CreateBattleCard({ token }: { token: string | null }) {
+  const navigate = useNavigate();
+
+  const [players,        setPlayers]        = useState<CampaignPlayerBasic[]>([]);
+  const [loadingPlayers, setLoadingPlayers] = useState(true);
+  const [selected,       setSelected]       = useState<Set<string>>(new Set());
+  const [battleType,     setBattleType]     = useState<'pve' | 'wild' | 'pvp'>('pve');
+  const [limit,          setLimit]          = useState('');
+  const [loading,        setLoading]        = useState(false);
+  const [error,          setError]          = useState('');
+
+  const headers = { Authorization: `Bearer ${token}` };
+
+  // Fetch campaign players so we can show checkboxes
+  useEffect(() => {
+    axios
+      .get(`${API}/api/campaigns/mine`, { headers })
+      .then(res => {
+        const players: CampaignPlayerBasic[] = res.data.data?.players ?? [];
+        setPlayers(players);
+      })
+      .catch(() => {})
+      .finally(() => setLoadingPlayers(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  function togglePlayer(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) { next.delete(id); } else { next.add(id); }
+      return next;
+    });
+  }
+
+  async function handleSubmit(e: { preventDefault(): void }) {
+    e.preventDefault();
+    setError('');
+    if (selected.size === 0) {
+      setError('Select at least one player.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const body: Record<string, unknown> = {
+        type:      battleType,
+        playerIds: Array.from(selected),
+      };
+      if (limit.trim() !== '') body.playerPokemonLimit = Number(limit);
+
+      const res = await axios.post(`${API}/api/battles`, body, { headers });
+      navigate(`/battle/${res.data.data._id}`);
+    } catch (err: unknown) {
+      setError(
+        axios.isAxiosError(err)
+          ? (err.response?.data?.error ?? 'Failed to create battle')
+          : 'Failed to create battle'
+      );
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Create Battle</CardTitle></CardHeader>
+      <CardContent>
+        {loadingPlayers ? (
+          <p className="text-sm text-muted-foreground">Loading players…</p>
+        ) : players.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No players in your campaign yet. Invite some players first.
+          </p>
+        ) : (
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+
+            {/* Player checkboxes */}
+            <div className="flex flex-col gap-1.5">
+              <Label>Players</Label>
+              <div className="flex flex-col gap-2">
+                {players.map(p => (
+                  <label key={p._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(p._id)}
+                      onChange={() => togglePlayer(p._id)}
+                      className="h-4 w-4"
+                    />
+                    {p.username}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Battle type */}
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="battle-type">Battle type</Label>
+              <select
+                id="battle-type"
+                value={battleType}
+                onChange={e => setBattleType(e.target.value as 'pve' | 'wild' | 'pvp')}
+                className={selectClass}
+              >
+                <option value="pve">PvE (players vs trainer NPC)</option>
+                <option value="wild">Wild (players vs wild Pokémon)</option>
+                <option value="pvp">PvP (players vs players)</option>
+              </select>
+            </div>
+
+            {/* Optional per-player Pokémon limit */}
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="battle-limit">
+                Pokémon limit per player{' '}
+                <span className="text-muted-foreground font-normal">(optional — blank = no limit)</span>
+              </Label>
+              <Input
+                id="battle-limit"
+                type="number"
+                min={1}
+                max={6}
+                placeholder="e.g. 3"
+                value={limit}
+                onChange={e => setLimit(e.target.value)}
+              />
+            </div>
+
+            {error && <p className="text-sm text-destructive">{error}</p>}
+
+            <Button
+              type="submit"
+              disabled={loading || selected.size === 0}
+              className="min-h-11"
+            >
+              {loading ? 'Creating…' : 'Create Battle'}
+            </Button>
+          </form>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── DmPage ───────────────────────────────────────────────────────────────────
 
 export default function DmPage() {
@@ -520,6 +667,7 @@ export default function DmPage() {
         </div>
 
         <CampaignCard token={token} />
+        <CreateBattleCard token={token} />
         <GivePokemonCard token={token} />
         <GiveItemCard token={token} />
         <ResetStarterCard token={token} />
