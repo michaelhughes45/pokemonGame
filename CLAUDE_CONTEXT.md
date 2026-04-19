@@ -376,8 +376,7 @@ pokemonGame/
 - [x] **2.7** Move reminder — player can replace any of their Pokémon's current moves with any move learnable at or below its current level, via the Pokémon detail page. Also added Pokémon release (DELETE /api/pokemon/:id) with two-step confirmation; no one can release a trainer's last Pokémon (DM must use starter reset instead)
 - [x] **2.8** Campaign system — DM creates campaign, invites players by username, players accept/decline on dashboard; all DM actions scoped to their campaign's players; one active campaign per user
 - [x] **3.1** Battle document — Battle model, POST /api/battles (DM creates with campaign players), GET /api/battles/:id/state, blank battlefield UI at /battle/:id, CreateBattleCard on DM panel
-- [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
-- [ ] **3.2** Polling loop — client polls, MongoDB change reflects in UI within 2s
+- [x] **3.2** Polling loop — BattlePage polls /api/battles/:id/state every 3s (cancelled flag + interval cleanup on unmount); active battle surfaces on player dashboard via GET /api/battles/active; DM panel lists open battles via GET /api/battles/dm with links back into each battle
 - [ ] **3.3** Move submission phase — all actors submit move choice (no target yet); round waits until every actor has submitted
 - [ ] **3.4** Targeting phase — speed-sorted queue built; each actor prompted in order to select which Pokémon their move hits
 - [ ] **3.5** Turn resolution — @smogon/calc runs immediately on target selection per actor; end-of-round status damage ticks after all moves resolve
@@ -404,8 +403,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 3.2 — Polling loop (client polls /api/battles/:id/state every 2–3s, active battle surfaces on player dashboard)
-- **Just finished:** 3.1 — Battle document (Battle model, POST /api/battles, GET /api/battles/:id/state, blank /battle/:id page, CreateBattleCard on DM panel). Tagged v3.1.
+- **Starting:** 3.3 — Move submission phase (all actors submit move choice, round waits until every actor has submitted)
+- **Just finished:** 3.2 — Polling loop (BattlePage polls every 3s, active battle on player dashboard, DM battle list on DM panel). Tagged v3.2.
 - **Known issues / blockers:** None
 
 ---

@@ -86,6 +86,78 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/battles/dm
+// DM only (requireDm middleware applied in index.ts).
+//
+// Returns all non-complete battles for the DM's active campaign so the DM
+// panel can list them and the DM can navigate back into any open battle.
+// ---------------------------------------------------------------------------
+router.get('/dm', async (req: Request, res: Response): Promise<void> => {
+  const campaign = await Campaign.findOne({
+    dmId:     req.user!.userId,
+    isActive: true,
+  }).lean();
+
+  if (!campaign) {
+    res.json({ data: [], error: null });
+    return;
+  }
+
+  const battles = await Battle.find({
+    campaignId: campaign._id,
+    status:     { $ne: 'complete' },
+  })
+    .sort({ lastUpdatedAt: -1 })
+    .lean();
+
+  res.json({
+    data: battles.map(b => ({
+      _id:           b._id,
+      type:          b.type,
+      status:        b.status,
+      turnNumber:    b.turnNumber,
+      lastUpdatedAt: b.lastUpdatedAt,
+    })),
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/battles/active
+// Any authenticated user.
+//
+// Returns the caller's current non-complete battle (waiting or active), if any.
+// The dashboard uses this to surface "Battle in progress" without the client
+// needing to know a battle ID up front.
+// ---------------------------------------------------------------------------
+router.get('/active', async (req: Request, res: Response): Promise<void> => {
+  const userId = new mongoose.Types.ObjectId(req.user!.userId);
+
+  const battle = await Battle.findOne({
+    'playerSide.userId': userId,
+    status: { $ne: 'complete' },
+  })
+    .sort({ lastUpdatedAt: -1 })
+    .lean();
+
+  if (!battle) {
+    res.json({ data: null, error: null });
+    return;
+  }
+
+  res.json({
+    data: {
+      _id:           battle._id,
+      status:        battle.status,
+      type:          battle.type,
+      turnNumber:    battle.turnNumber,
+      lastUpdatedAt: battle.lastUpdatedAt,
+    },
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/battles/:id/state
 // Any authenticated user. Used for the client polling loop (3.2+).
 //

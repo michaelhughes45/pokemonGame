@@ -504,6 +504,66 @@ function GiveItemCard({ token }: { token: string | null }) {
   );
 }
 
+// ── Active Battles card ──────────────────────────────────────────────────────
+// Shows the DM all non-complete battles for their campaign so they can
+// navigate back into any open battle after leaving the page.
+
+type DmBattle = {
+  _id: string;
+  type: 'pve' | 'wild' | 'pvp';
+  status: 'waiting' | 'active';
+  turnNumber: number;
+};
+
+const TYPE_LABELS: Record<string, string> = { pve: 'PvE', wild: 'Wild', pvp: 'PvP' };
+
+function ActiveBattlesCard({ token }: { token: string | null }) {
+  const [battles, setBattles] = useState<DmBattle[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    axios
+      .get(`${API}/api/battles/dm`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then(res => setBattles(res.data.data ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [token]);
+
+  if (loading) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Active Battles</CardTitle></CardHeader>
+        <CardContent><p className="text-sm text-muted-foreground">Loading…</p></CardContent>
+      </Card>
+    );
+  }
+
+  if (battles.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Active Battles</CardTitle></CardHeader>
+      <CardContent className="flex flex-col gap-2">
+        {battles.map(b => (
+          <Link key={b._id} to={`/battle/${b._id}`}>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2 hover:bg-muted/50 transition-colors cursor-pointer min-h-11">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-sm font-medium">{TYPE_LABELS[b.type] ?? b.type} Battle</span>
+                <span className="text-xs text-muted-foreground">
+                  {b.status === 'waiting' ? 'Waiting to start' : `Turn ${b.turnNumber}`}
+                </span>
+              </div>
+              <span className="text-sm text-muted-foreground">Enter →</span>
+            </div>
+          </Link>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Create Battle card ───────────────────────────────────────────────────────
 // Loads the DM's campaign players, lets the DM check which ones join,
 // pick a battle type, and optionally set a per-player Pokémon limit.
@@ -667,6 +727,7 @@ export default function DmPage() {
         </div>
 
         <CampaignCard token={token} />
+        <ActiveBattlesCard token={token} />
         <CreateBattleCard token={token} />
         <GivePokemonCard token={token} />
         <GiveItemCard token={token} />

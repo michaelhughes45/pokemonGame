@@ -68,13 +68,34 @@ export default function BattlePage() {
 
   useEffect(() => {
     if (!id) return;
-    axios
-      .get(`${API}/api/battles/${id}/state`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      .then(res => setBattle(res.data.data))
-      .catch(() => setError('Could not load battle.'))
-      .finally(() => setLoading(false));
+
+    let cancelled = false;
+
+    async function fetchState() {
+      try {
+        const res = await axios.get(`${API}/api/battles/${id}/state`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!cancelled) {
+          setBattle(res.data.data);
+          setError('');
+        }
+      } catch {
+        if (!cancelled) setError('Could not load battle.');
+      } finally {
+        // Only clear the initial loading spinner on the very first fetch.
+        // Subsequent polls run silently — the UI stays visible while data refreshes.
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    fetchState();
+    const interval = setInterval(fetchState, 3000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [id, token]);
 
   const isDm = user?.role === 'dm' || user?.role === 'admin';

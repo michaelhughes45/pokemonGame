@@ -14,6 +14,13 @@ type PendingInvite = {
   dmUsername: string;
 };
 
+type ActiveBattle = {
+  _id: string;
+  status: 'waiting' | 'active';
+  type: 'pve' | 'wild' | 'pvp';
+  turnNumber: number;
+};
+
 const roleBadgeVariant: Record<string, 'default' | 'secondary' | 'destructive'> = {
   admin: 'destructive',
   dm:    'default',
@@ -77,6 +84,7 @@ export default function DashboardPage() {
   const [partyLoading, setPartyLoading] = useState(true);
   const [invites, setInvites]           = useState<PendingInvite[]>([]);
   const [inviteError, setInviteError]   = useState('');
+  const [activeBattle, setActiveBattle] = useState<ActiveBattle | null>(null);
 
   function handleLogout() {
     logout();
@@ -93,6 +101,17 @@ export default function DashboardPage() {
       .catch(() => {})
       .finally(() => setPartyLoading(false));
   }, [token]);
+
+  // Fetch active battle for players (surfaces "Battle in progress" card)
+  useEffect(() => {
+    if (!user || user.role !== 'player') return;
+    axios
+      .get(`${API}/api/battles/active`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      .then(res => setActiveBattle(res.data.data ?? null))
+      .catch(() => {});
+  }, [token, user]);
 
   // Fetch pending campaign invites for players
   useEffect(() => {
@@ -133,6 +152,23 @@ export default function DashboardPage() {
             Log out
           </Button>
         </div>
+
+        {/* ── Active battle banner (players only) ── */}
+        {activeBattle && (
+          <Link to={`/battle/${activeBattle._id}`}>
+            <Card className="border-green-500 bg-green-50 hover:bg-green-100 transition-colors cursor-pointer">
+              <CardContent className="pt-4 flex items-center justify-between">
+                <div className="flex flex-col gap-0.5">
+                  <p className="font-semibold text-sm text-green-900">
+                    {activeBattle.status === 'waiting' ? 'Battle Starting…' : `Battle in Progress — Turn ${activeBattle.turnNumber}`}
+                  </p>
+                  <p className="text-xs text-green-700 capitalize">{activeBattle.type} battle</p>
+                </div>
+                <span className="text-green-700 text-sm font-medium">Enter →</span>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
 
         {/* ── Navigation links ── */}
         <div className="flex flex-col gap-1">
