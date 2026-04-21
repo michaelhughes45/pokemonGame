@@ -4,20 +4,20 @@ import mongoose, { Schema } from 'mongoose';
 // Sub-document types
 // ---------------------------------------------------------------------------
 
-type PlayerSideEntry = {
+export type PlayerSideEntry = {
   userId: mongoose.Types.ObjectId;
   activePokemonId: mongoose.Types.ObjectId | null;
   usedPokemonIds: mongoose.Types.ObjectId[];
   fainted: mongoose.Types.ObjectId[];
 };
 
-type EnemySideEntry = {
+export type EnemySideEntry = {
   npcId: mongoose.Types.ObjectId;
   activePokemonId: mongoose.Types.ObjectId | null;
   fainted: mongoose.Types.ObjectId[];
 };
 
-type TurnQueueEntry = {
+export type TurnQueueEntry = {
   actorId: mongoose.Types.ObjectId;
   actorType: 'player' | 'npc';
   activePokemonId: mongoose.Types.ObjectId;
@@ -47,7 +47,7 @@ type TurnLogEntry = {
 // Top-level battle document type
 // ---------------------------------------------------------------------------
 
-type IBattle = {
+export type IBattle = {
   campaignId: mongoose.Types.ObjectId;
   // 'pve' | 'wild' | 'pvp' — describes who the sides are.
   // Actual matchup size (1v1, 3v5, etc.) is derived from the
