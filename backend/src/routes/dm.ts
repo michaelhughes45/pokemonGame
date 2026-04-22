@@ -5,6 +5,7 @@ import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { Item } from '../models/Item';
 import { Campaign } from '../models/Campaign';
+import { Npc } from '../models/Npc';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
 
@@ -269,6 +270,250 @@ router.post('/items/give', async (req: Request, res: Response): Promise<void> =>
       pocket:   item.pocket,
       username,
     },
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/npcs
+// Returns all NPCs belonging to the DM's active campaign.
+// ---------------------------------------------------------------------------
+router.get('/npcs', async (req: Request, res: Response): Promise<void> => {
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.json({ data: [], error: null });
+    return;
+  }
+
+  const npcs = await Npc.find({ campaignId: campaign._id })
+    .select('name type party')
+    .lean();
+
+  res.json({
+    data: npcs.map(n => ({
+      _id:        n._id,
+      name:       n.name,
+      type:       n.type,
+      partyCount: n.party.length,
+    })),
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs
+// Creates a new NPC in the DM's active campaign.
+// Body: { name, type? }
+// ---------------------------------------------------------------------------
+router.post('/npcs', async (req: Request, res: Response): Promise<void> => {
+  const { name, type = 'trainer' } = req.body as { name: string; type?: string };
+
+  if (!name?.trim()) {
+    res.status(400).json({ data: null, error: 'name is required' });
+    return;
+  }
+  if (!['trainer', 'wild'].includes(type)) {
+    res.status(400).json({ data: null, error: "type must be 'trainer' or 'wild'" });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const npc = await Npc.create({
+    campaignId:  campaign._id,
+    createdByDm: req.user!.userId,
+    name:        name.trim(),
+    type,
+    party:       [],
+    aiStrategy:  'random',
+  });
+
+  res.status(201).json({
+    data:  { _id: npc._id, name: npc.name, type: npc.type, partyCount: 0 },
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs/:npcId/pokemon
+// Gives a Pokémon to an NPC. Mirrors the player give-pokemon endpoint but
+// uses ownerType 'npc' and adds the Pokémon to the NPC's party array (max 12).
+// Body: { species, level?, nature?, gender? }
+// ---------------------------------------------------------------------------
+router.post('/npcs/:npcId/pokemon', async (req: Request, res: Response): Promise<void> => {
+  const { npcId } = req.params;
+  const { species, level = 5, nature = 'Hardy', gender } = req.body as {
+    species: string | number;
+    level?:  number;
+    nature?: string;
+    gender?: string;
+  };
+
+  if (!mongoose.Types.ObjectId.isValid(npcId as string)) {
+    res.status(400).json({ data: null, error: 'Invalid NPC ID' });
+    return;
+  }
+  if (!species && species !== 0) {
+    res.status(400).json({ data: null, error: 'species is required (name or dex number)' });
+    return;
+  }
+  if (!VALID_NATURES.includes(nature)) {
+    res.status(400).json({ data: null, error: `Invalid nature. Valid values: ${VALID_NATURES.join(', ')}` });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const npc = await Npc.findOne({ _id: npcId, campaignId: campaign._id });
+  if (!npc) {
+    res.status(404).json({ data: null, error: 'NPC not found in your campaign' });
+    return;
+  }
+  if (npc.party.length >= 12) {
+    res.status(400).json({ data: null, error: 'NPC party is full (max 12)' });
+    return;
+  }
+
+  const isNumeric  = /^\d+$/.test(String(species));
+  const lookupQuery = isNumeric ? { pokeApiId: Number(species) } : { name: String(species).toLowerCase() };
+  const fetchKey   = isNumeric ? Number(species) : String(species).toLowerCase();
+
+  let speciesDoc = await PokedexCache.findOne(lookupQuery).lean();
+  if (!speciesDoc) {
+    try {
+      const transformed = await fetchSpecies(fetchKey);
+      speciesDoc = (await PokedexCache.create(transformed)).toObject();
+    } catch {
+      res.status(404).json({ data: null, error: `Species "${species}" not found in PokeAPI.` });
+      return;
+    }
+  } else if (!speciesDoc.levelUpMoves?.length) {
+    try {
+      const transformed = await fetchSpecies(fetchKey);
+      await PokedexCache.updateOne(
+        { pokeApiId: transformed.pokeApiId },
+        { $set: { levelUpMoves: transformed.levelUpMoves } }
+      );
+      (speciesDoc as any).levelUpMoves = transformed.levelUpMoves;
+    } catch {
+      // non-fatal
+    }
+  }
+
+  type LevelUpMoveEntry = { moveId: string; level: number };
+  type MoveEntry        = { name: string; pp: number | null };
+  const levelUpMoves = (speciesDoc.levelUpMoves ?? []) as LevelUpMoveEntry[];
+  const moveEntries  = (speciesDoc.moves ?? [])        as MoveEntry[];
+
+  const maxHp = Math.floor((2 * speciesDoc.baseStats.hp * level) / 100) + level + 10;
+
+  let resolvedGender: 'male' | 'female' | 'none';
+  if (gender === 'male' || gender === 'female' || gender === 'none') {
+    resolvedGender = gender;
+  } else if (speciesDoc.genderRatio === -1) {
+    resolvedGender = 'none';
+  } else if (speciesDoc.genderRatio === 0) {
+    resolvedGender = 'female';
+  } else {
+    resolvedGender = 'male';
+  }
+
+  const moveDetailMap = new Map(moveEntries.map(m => [m.name, m]));
+  const moves = levelUpMoves
+    .filter(m => m.level <= level && m.level > 0)
+    .slice(-4)
+    .map(entry => {
+      const detail = moveDetailMap.get(entry.moveId);
+      return { moveId: entry.moveId, currentPP: detail?.pp ?? 10, maxPP: detail?.pp ?? 10 };
+    });
+
+  const npcObjectId = new mongoose.Types.ObjectId(npcId as string);
+
+  const pokemon = await Pokemon.create({
+    speciesId: speciesDoc.pokeApiId,
+    ownerId:   npcObjectId,
+    ownerType: 'npc',
+    nickname:  null,
+    level,
+    exp:       0,
+    currentHp: maxHp,
+    nature,
+    gender:    resolvedGender,
+    heldItem:  null,
+    moves,
+    isInParty: true,
+    partySlot: null,
+  });
+
+  npc.party.push(pokemon._id);
+  await npc.save();
+
+  res.status(201).json({
+    data: {
+      _id:         pokemon._id,
+      speciesId:   pokemon.speciesId,
+      speciesName: speciesDoc.name,
+      level:       pokemon.level,
+      nature:      pokemon.nature,
+    },
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/npcs/:npcId/party
+// Returns the full party Pokémon list for an NPC, including moves, so the
+// DM can select which Pokémon to send out and which move to submit.
+// ---------------------------------------------------------------------------
+router.get('/npcs/:npcId/party', async (req: Request, res: Response): Promise<void> => {
+  const { npcId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(npcId as string)) {
+    res.status(400).json({ data: null, error: 'Invalid NPC ID' });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const npc = await Npc.findOne({ _id: npcId, campaignId: campaign._id }).lean();
+  if (!npc) {
+    res.status(404).json({ data: null, error: 'NPC not found in your campaign' });
+    return;
+  }
+
+  const pokemons = await Pokemon.find(
+    { ownerId: new mongoose.Types.ObjectId(npcId as string), ownerType: 'npc' },
+    'speciesId nickname level currentHp nature moves'
+  ).lean();
+
+  const speciesIds = [...new Set(pokemons.map(p => p.speciesId))];
+  const caches     = speciesIds.length > 0
+    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name').lean()
+    : [];
+  const nameMap = new Map(caches.map(c => [c.pokeApiId as number, c.name]));
+
+  res.json({
+    data: pokemons.map(p => ({
+      _id:         p._id,
+      speciesId:   p.speciesId,
+      speciesName: nameMap.get(p.speciesId) ?? `#${p.speciesId}`,
+      nickname:    p.nickname,
+      level:       p.level,
+      currentHp:   p.currentHp,
+      moves:       p.moves,
+    })),
     error: null,
   });
 });

@@ -378,7 +378,7 @@ pokemonGame/
 - [x] **3.1** Battle document — Battle model, POST /api/battles (DM creates with campaign players), GET /api/battles/:id/state, blank battlefield UI at /battle/:id, CreateBattleCard on DM panel
 - [x] **3.2** Polling loop — BattlePage polls /api/battles/:id/state every 3s (cancelled flag + interval cleanup on unmount); active battle surfaces on player dashboard via GET /api/battles/active; DM panel lists open battles via GET /api/battles/dm with links back into each battle
 - [x] **3.3** Move submission phase — DM starts battle (waiting→active); players send out party Pokémon and submit move choice (no target yet); DM submits for NPCs; when all actors submitted, server speed-sorts turnQueue and advances phase to targeting; player side card shows Submitted/Pending badges per player
-- [ ] **3.4** Targeting phase — speed-sorted queue built; each actor prompted in order to select which Pokémon their move hits
+- [x] **3.4** Targeting phase + NPC management — POST /api/battles/:id/submit-target; speed-sorted turnQueue drives sequential targeting prompts; state endpoint enriched with activePokemonInfo (name, HP, maxHp) on both sides; Npc model + full CRUD (GET/POST /api/dm/npcs, POST /api/dm/npcs/:id/pokemon, GET /api/dm/npcs/:id/party); battle creation accepts npcIds; DM panel NpcCard + NPC checkboxes in CreateBattleCard; BattlePage DM NPC send-out + move submission UI; targeting card for players (pick targets) and DM (pick NPC targets); DELETE /api/battles/:id (DM only); bug fix: checkAndAdvance now requires all playerSide entries to have activePokemonId before advancing to targeting
 - [ ] **3.5** Turn resolution — @smogon/calc runs immediately on target selection per actor; end-of-round status damage ticks after all moves resolve
 - [ ] **3.6** Turn log — resolved events display in battle UI
 - [ ] **3.7** Status conditions — burn, paralysis, sleep, poison, toxic, confusion
@@ -403,8 +403,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 3.4 — Targeting phase (speed-sorted queue built; each actor prompted in order to select which Pokémon their move hits)
-- **Just finished:** 3.3 — Move submission phase (DM start battle, player send-out, move submission, speed-sort on advance, Submitted/Pending badges). Tagged v3.3.
+- **Starting:** 3.5 — Turn resolution (@smogon/calc runs immediately on target selection per actor; end-of-round status damage ticks after all moves resolve)
+- **Just finished:** 3.4 — Targeting phase + NPC management (submit-target endpoint, activePokemonInfo in state, full NPC CRUD, DM targeting UI, delete battle). Tagged v3.4.
 - **Known issues / blockers:** None
 
 ---

@@ -5,6 +5,7 @@ import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
+import { Npc } from '../models/Npc';
 import { computeStats, BaseStats } from '../lib/statCalc';
 
 const router = Router();
@@ -15,7 +16,10 @@ const router = Router();
 // speed (highest first) and advance the phase to 'targeting'.
 // ---------------------------------------------------------------------------
 async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void> {
-  const playerActors = battle.playerSide.filter(e => e.activePokemonId != null);
+  // All players must have sent out a Pokémon before the phase can advance
+  if (battle.playerSide.some(e => e.activePokemonId == null)) return;
+
+  const playerActors = battle.playerSide; // all have active Pokémon at this point
   const npcActors    = battle.enemySide.filter(e => e.activePokemonId != null);
   const totalActors  = playerActors.length + npcActors.length;
 
@@ -63,9 +67,10 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
 // builder is built in milestone 4.3/4.4.
 // ---------------------------------------------------------------------------
 router.post('/', async (req: Request, res: Response): Promise<void> => {
-  const { type, playerIds, playerPokemonLimit = null } = req.body as {
+  const { type, playerIds, npcIds = [], playerPokemonLimit = null } = req.body as {
     type: string;
     playerIds: string[];
+    npcIds?: string[];
     playerPokemonLimit?: number | null;
   };
 
@@ -75,6 +80,14 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
   }
   if (!Array.isArray(playerIds) || playerIds.length === 0) {
     res.status(400).json({ data: null, error: 'playerIds must be a non-empty array' });
+    return;
+  }
+  if (!Array.isArray(npcIds)) {
+    res.status(400).json({ data: null, error: 'npcIds must be an array' });
+    return;
+  }
+  if (!npcIds.every(id => mongoose.Types.ObjectId.isValid(id))) {
+    res.status(400).json({ data: null, error: 'All npcIds must be valid' });
     return;
   }
   if (
@@ -104,6 +117,18 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
+  // Validate all requested NPCs exist and belong to this campaign
+  if (npcIds.length > 0) {
+    const foundNpcs = await Npc.find({
+      _id:        { $in: npcIds },
+      campaignId: campaign._id,
+    }, '_id').lean();
+    if (foundNpcs.length !== npcIds.length) {
+      res.status(400).json({ data: null, error: 'One or more NPCs were not found in your campaign' });
+      return;
+    }
+  }
+
   const battle = await Battle.create({
     campaignId: campaign._id,
     type,
@@ -115,7 +140,11 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
       usedPokemonIds:  [],
       fainted:         [],
     })),
-    enemySide:          [],
+    enemySide: npcIds.map(id => ({
+      npcId:           new mongoose.Types.ObjectId(id),
+      activePokemonId: null,
+      fainted:         [],
+    })),
     playerPokemonLimit: playerPokemonLimit ?? null,
     lastUpdatedAt:      new Date(),
   });
@@ -544,11 +573,155 @@ router.get('/active', async (req: Request, res: Response): Promise<void> => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/battles/:id/submit-target
+// Player or DM — submits target selection for the current actor in the
+// speed-sorted turnQueue.
+//
+// - Player actors may only submit when it is their own turn
+//   (turnQueue[currentTargetIndex].actorId === userId)
+// - DM submits for NPC actors
+// - Targets must be active, non-fainted Pokémon on the opposing side
+//
+// Fills in targets, increments currentTargetIndex, and transitions phase
+// to 'end_of_round' once all actors have picked.
+// Body: { targets: string[] }
+// ---------------------------------------------------------------------------
+router.post('/:id/submit-target', async (req: Request, res: Response): Promise<void> => {
+  const { targets } = req.body as { targets: string[] };
+  const { userId, role } = req.user!;
+
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    res.status(400).json({ data: null, error: 'Invalid battle ID' });
+    return;
+  }
+
+  if (!Array.isArray(targets) || targets.length === 0) {
+    res.status(400).json({ data: null, error: 'targets must be a non-empty array of Pokémon IDs' });
+    return;
+  }
+
+  if (!targets.every(t => mongoose.Types.ObjectId.isValid(t))) {
+    res.status(400).json({ data: null, error: 'All target IDs must be valid' });
+    return;
+  }
+
+  const battle = await Battle.findById(req.params.id);
+  if (!battle) {
+    res.status(404).json({ data: null, error: 'Battle not found' });
+    return;
+  }
+  if (battle.status !== 'active') {
+    res.status(400).json({ data: null, error: 'Battle is not active' });
+    return;
+  }
+  if (battle.phase !== 'targeting') {
+    res.status(400).json({ data: null, error: 'Battle is not in targeting phase' });
+    return;
+  }
+
+  const idx = battle.currentTargetIndex;
+  if (idx >= battle.turnQueue.length) {
+    res.status(400).json({ data: null, error: 'No actor is waiting to pick targets' });
+    return;
+  }
+
+  const currentEntry = battle.turnQueue[idx];
+
+  // Verify the caller is the correct actor for this turn
+  if (currentEntry.actorType === 'player') {
+    if (currentEntry.actorId.toString() !== userId) {
+      res.status(403).json({ data: null, error: 'It is not your turn to pick targets' });
+      return;
+    }
+  } else {
+    if (role !== 'dm' && role !== 'admin') {
+      res.status(403).json({ data: null, error: 'Only the DM can pick targets for NPCs' });
+      return;
+    }
+  }
+
+  // Opposing side: players target enemies; NPCs target players
+  const isPlayerActor = currentEntry.actorType === 'player';
+  const validTargetIds = isPlayerActor
+    ? battle.enemySide
+        .filter(e => e.activePokemonId != null)
+        .map(e => e.activePokemonId!.toString())
+    : battle.playerSide
+        .filter(e => e.activePokemonId != null)
+        .map(e => e.activePokemonId!.toString());
+
+  const invalidTargets = targets.filter(t => !validTargetIds.includes(t));
+  if (invalidTargets.length > 0) {
+    res.status(400).json({ data: null, error: 'One or more targets are not valid active opposing Pokémon' });
+    return;
+  }
+
+  // Verify targets are alive
+  const targetPokemons = await Pokemon.find({ _id: { $in: targets } }, 'currentHp').lean();
+  const fainted = targetPokemons.filter(p => p.currentHp <= 0);
+  if (fainted.length > 0) {
+    res.status(400).json({ data: null, error: 'Cannot target a fainted Pokémon' });
+    return;
+  }
+
+  // Fill targets and advance
+  battle.turnQueue[idx].targets = targets.map(t => new mongoose.Types.ObjectId(t));
+  battle.currentTargetIndex     = idx + 1;
+
+  if (battle.currentTargetIndex >= battle.turnQueue.length) {
+    battle.phase = 'end_of_round';
+  }
+
+  battle.lastUpdatedAt = new Date();
+  await battle.save();
+
+  res.json({
+    data:  { phase: battle.phase, currentTargetIndex: battle.currentTargetIndex },
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/battles/:id
+// DM only — permanently deletes a battle.
+// ---------------------------------------------------------------------------
+router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
+  const { role } = req.user!;
+  if (role !== 'dm' && role !== 'admin') {
+    res.status(403).json({ data: null, error: 'DM only' });
+    return;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    res.status(400).json({ data: null, error: 'Invalid battle ID' });
+    return;
+  }
+
+  const battle = await Battle.findById(req.params.id);
+  if (!battle) {
+    res.status(404).json({ data: null, error: 'Battle not found' });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign || campaign._id.toString() !== battle.campaignId.toString()) {
+    res.status(403).json({ data: null, error: 'Not your campaign' });
+    return;
+  }
+
+  await Battle.findByIdAndDelete(req.params.id);
+  res.json({ data: { deleted: true }, error: null });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/battles/:id/state
 // Any authenticated user. Used for the client polling loop (3.2+).
 //
-// Returns the full battle document with player usernames joined in so the
-// frontend doesn't need to make extra requests to display who's in the battle.
+// Returns the full battle document with:
+//   - player usernames joined from the users collection
+//   - activePokemonInfo (name, currentHp, maxHp) joined for every active
+//     Pokémon on both sides so the frontend can display health bars and
+//     targeting options without extra per-Pokémon requests.
 // ---------------------------------------------------------------------------
 router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
   const id = req.params.id as string;
@@ -564,20 +737,76 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  // Join usernames for the player side so the UI can display names instead of IDs
+  // Join usernames for the player side
   const userIds = battle.playerSide.map(entry => entry.userId);
-  const users = await User.find({ _id: { $in: userIds } }, 'username').lean();
+  const users   = await User.find({ _id: { $in: userIds } }, 'username').lean();
   const usernameMap = new Map(users.map(u => [u._id.toString(), u.username]));
+
+  // Collect every active Pokémon ID from both sides so we can join name + HP
+  // in a single query rather than N individual requests.
+  const allActivePokemonIds = [
+    ...battle.playerSide.map(e => e.activePokemonId),
+    ...battle.enemySide.map(e => e.activePokemonId),
+  ].filter((pid): pid is mongoose.Types.ObjectId => pid != null);
+
+  const activePokemons = allActivePokemonIds.length > 0
+    ? await Pokemon.find(
+        { _id: { $in: allActivePokemonIds } },
+        'nickname speciesId currentHp level nature'
+      ).lean()
+    : [];
+
+  const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
+  const caches     = speciesIds.length > 0
+    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats').lean()
+    : [];
+
+  const pokemonMap = new Map(activePokemons.map(p => [p._id.toString(), p]));
+  const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+  // Build a compact info object for a single active Pokémon slot.
+  const buildInfo = (pokemonId: mongoose.Types.ObjectId | null) => {
+    if (!pokemonId) return null;
+    const poke = pokemonMap.get(pokemonId.toString());
+    if (!poke) return null;
+    const cache       = cacheMap.get(poke.speciesId);
+    const speciesName = cache?.name ?? `#${poke.speciesId}`;
+    const maxHp       = cache
+      ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp
+      : null;
+    return {
+      _id:         poke._id.toString(),
+      name:        poke.nickname ?? speciesName,
+      speciesName,
+      currentHp:   poke.currentHp,
+      maxHp,
+    };
+  };
 
   const playerSideWithNames = battle.playerSide.map(entry => ({
     ...entry,
-    username: usernameMap.get(entry.userId.toString()) ?? 'Unknown',
+    username:          usernameMap.get(entry.userId.toString()) ?? 'Unknown',
+    activePokemonInfo: buildInfo(entry.activePokemonId),
+  }));
+
+  // Join NPC names so the frontend can label enemy slots without extra requests
+  const npcIds  = battle.enemySide.map(e => e.npcId);
+  const npcs    = npcIds.length > 0
+    ? await Npc.find({ _id: { $in: npcIds } }, 'name').lean()
+    : [];
+  const npcNameMap = new Map(npcs.map(n => [(n._id as mongoose.Types.ObjectId).toString(), n.name]));
+
+  const enemySideWithInfo = battle.enemySide.map(entry => ({
+    ...entry,
+    npcName:           npcNameMap.get(entry.npcId.toString()) ?? 'NPC',
+    activePokemonInfo: buildInfo(entry.activePokemonId),
   }));
 
   res.json({
     data: {
       ...battle,
       playerSide: playerSideWithNames,
+      enemySide:  enemySideWithInfo,
     },
     error: null,
   });

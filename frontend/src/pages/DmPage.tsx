@@ -504,6 +504,200 @@ function GiveItemCard({ token }: { token: string | null }) {
   );
 }
 
+// ── NPC card ─────────────────────────────────────────────────────────────────
+// Lists the DM's NPCs, lets them create new ones, and gives Pokémon to each.
+
+type NpcSummary = { _id: string; name: string; type: string; partyCount: number };
+
+function NpcCard({ token }: { token: string | null }) {
+  const [npcs,         setNpcs]         = useState<NpcSummary[]>([]);
+  const [loading,      setLoading]      = useState(true);
+  const [newName,      setNewName]      = useState('');
+  const [newType,      setNewType]      = useState<'trainer' | 'wild'>('trainer');
+  const [creating,     setCreating]     = useState(false);
+  const [createError,  setCreateError]  = useState('');
+  // Which NPC's give-pokemon form is expanded
+  const [expandedNpc,  setExpandedNpc]  = useState<string | null>(null);
+  // Give-pokemon form fields (shared across all NPCs — only one open at a time)
+  const [gpSpecies,    setGpSpecies]    = useState('');
+  const [gpLevel,      setGpLevel]      = useState('5');
+  const [gpNature,     setGpNature]     = useState('Hardy');
+  const [gpGender,     setGpGender]     = useState('auto');
+  const [gpLoading,    setGpLoading]    = useState(false);
+  const [gpResult,     setGpResult]     = useState('');
+  const [gpError,      setGpError]      = useState('');
+
+  const headers = { Authorization: `Bearer ${token}` };
+
+  useEffect(() => {
+    axios.get(`${API}/api/dm/npcs`, { headers })
+      .then(res => setNpcs(res.data.data ?? []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  async function handleCreate(e: { preventDefault(): void }) {
+    e.preventDefault();
+    if (!newName.trim()) return;
+    setCreateError(''); setCreating(true);
+    try {
+      const res = await axios.post(`${API}/api/dm/npcs`, { name: newName.trim(), type: newType }, { headers });
+      setNpcs(prev => [...prev, res.data.data]);
+      setNewName('');
+    } catch (err: unknown) {
+      setCreateError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to create NPC') : 'Failed to create NPC');
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  function openGivePokemon(npcId: string) {
+    setExpandedNpc(npcId);
+    setGpSpecies(''); setGpLevel('5'); setGpNature('Hardy'); setGpGender('auto');
+    setGpResult(''); setGpError('');
+  }
+
+  async function handleGivePokemon(npcId: string) {
+    if (!gpSpecies.trim()) return;
+    setGpLoading(true); setGpResult(''); setGpError('');
+    const body: Record<string, unknown> = { species: gpSpecies.trim(), level: Number(gpLevel), nature: gpNature };
+    if (gpGender !== 'auto') body.gender = gpGender;
+    try {
+      const res = await axios.post(`${API}/api/dm/npcs/${npcId}/pokemon`, body, { headers });
+      const p = res.data.data;
+      setGpResult(`Added ${p.speciesName ?? `#${p.speciesId}`} (Lv. ${p.level}, ${p.nature}).`);
+      setGpSpecies('');
+      setNpcs(prev => prev.map(n => n._id === npcId ? { ...n, partyCount: n.partyCount + 1 } : n));
+    } catch (err: unknown) {
+      setGpError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to add Pokémon') : 'Failed to add Pokémon');
+    } finally {
+      setGpLoading(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>NPCs</CardTitle></CardHeader>
+      <CardContent className="flex flex-col gap-5">
+
+        {/* NPC list */}
+        {loading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : npcs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No NPCs yet — create one below.</p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {npcs.map(npc => (
+              <li key={npc._id} className="flex flex-col gap-2 border rounded-md p-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium">{npc.name}</span>
+                  <span className="text-muted-foreground text-xs capitalize">
+                    {npc.type} · {npc.partyCount} Pokémon
+                  </span>
+                </div>
+                {expandedNpc === npc._id ? (
+                  <div className="flex flex-col gap-3 pt-1">
+                    <div className="flex flex-col gap-1.5">
+                      <Label htmlFor={`gp-species-${npc._id}`}>Species</Label>
+                      <Input
+                        id={`gp-species-${npc._id}`}
+                        placeholder="e.g. gengar or 94"
+                        value={gpSpecies}
+                        onChange={e => setGpSpecies(e.target.value)}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="flex flex-col gap-1.5">
+                        <Label>Level</Label>
+                        <Input type="number" min={1} max={100} value={gpLevel} onChange={e => setGpLevel(e.target.value)} />
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <Label>Nature</Label>
+                        <select value={gpNature} onChange={e => setGpNature(e.target.value)} className={selectClass}>
+                          {NATURES.map(n => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <Label>Gender</Label>
+                      <select value={gpGender} onChange={e => setGpGender(e.target.value)} className={selectClass}>
+                        <option value="auto">Auto</option>
+                        <option value="male">Male</option>
+                        <option value="female">Female</option>
+                        <option value="none">Genderless</option>
+                      </select>
+                    </div>
+                    {gpError  && <p className="text-sm text-destructive">{gpError}</p>}
+                    {gpResult && <p className="text-sm text-muted-foreground">{gpResult}</p>}
+                    <div className="flex gap-2">
+                      <Button
+                        onClick={() => handleGivePokemon(npc._id)}
+                        disabled={gpLoading || !gpSpecies.trim()}
+                        className="flex-1 min-h-11"
+                      >
+                        {gpLoading ? 'Adding…' : 'Add Pokémon'}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => setExpandedNpc(null)}
+                        className="min-h-11"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => openGivePokemon(npc._id)}
+                    className="w-full min-h-9"
+                  >
+                    + Add Pokémon
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* Create NPC form */}
+        <form onSubmit={handleCreate} className="flex flex-col gap-3 border-t pt-4">
+          <p className="text-sm font-medium">Create NPC</p>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="npc-name">Name</Label>
+            <Input
+              id="npc-name"
+              placeholder="e.g. Rival Gary"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              required
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="npc-type">Type</Label>
+            <select
+              id="npc-type"
+              value={newType}
+              onChange={e => setNewType(e.target.value as 'trainer' | 'wild')}
+              className={selectClass}
+            >
+              <option value="trainer">Trainer</option>
+              <option value="wild">Wild</option>
+            </select>
+          </div>
+          {createError && <p className="text-sm text-destructive">{createError}</p>}
+          <Button type="submit" disabled={creating || !newName.trim()} className="min-h-11">
+            {creating ? 'Creating…' : 'Create NPC'}
+          </Button>
+        </form>
+
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Active Battles card ──────────────────────────────────────────────────────
 // Shows the DM all non-complete battles for their campaign so they can
 // navigate back into any open battle after leaving the page.
@@ -518,18 +712,29 @@ type DmBattle = {
 const TYPE_LABELS: Record<string, string> = { pve: 'PvE', wild: 'Wild', pvp: 'PvP' };
 
 function ActiveBattlesCard({ token }: { token: string | null }) {
-  const [battles, setBattles] = useState<DmBattle[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [battles,    setBattles]    = useState<DmBattle[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const headers = { Authorization: `Bearer ${token}` };
 
   useEffect(() => {
     axios
-      .get(`${API}/api/battles/dm`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
+      .get(`${API}/api/battles/dm`, { headers })
       .then(res => setBattles(res.data.data ?? []))
       .catch(() => {})
       .finally(() => setLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
+
+  async function handleDelete(id: string) {
+    setDeletingId(id);
+    try {
+      await axios.delete(`${API}/api/battles/${id}`, { headers });
+      setBattles(prev => prev.filter(b => b._id !== id));
+    } catch { /* silently ignore — battle stays in list */ }
+    finally { setDeletingId(null); }
+  }
 
   if (loading) {
     return (
@@ -547,17 +752,28 @@ function ActiveBattlesCard({ token }: { token: string | null }) {
       <CardHeader><CardTitle>Active Battles</CardTitle></CardHeader>
       <CardContent className="flex flex-col gap-2">
         {battles.map(b => (
-          <Link key={b._id} to={`/battle/${b._id}`}>
-            <div className="flex items-center justify-between rounded-md border px-3 py-2 hover:bg-muted/50 transition-colors cursor-pointer min-h-11">
-              <div className="flex flex-col gap-0.5">
-                <span className="text-sm font-medium">{TYPE_LABELS[b.type] ?? b.type} Battle</span>
-                <span className="text-xs text-muted-foreground">
-                  {b.status === 'waiting' ? 'Waiting to start' : `Turn ${b.turnNumber}`}
-                </span>
+          <div key={b._id} className="flex items-center gap-2">
+            <Link to={`/battle/${b._id}`} className="flex-1">
+              <div className="flex items-center justify-between rounded-md border px-3 py-2 hover:bg-muted/50 transition-colors cursor-pointer min-h-11">
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-sm font-medium">{TYPE_LABELS[b.type] ?? b.type} Battle</span>
+                  <span className="text-xs text-muted-foreground">
+                    {b.status === 'waiting' ? 'Waiting to start' : `Turn ${b.turnNumber}`}
+                  </span>
+                </div>
+                <span className="text-sm text-muted-foreground">Enter →</span>
               </div>
-              <span className="text-sm text-muted-foreground">Enter →</span>
-            </div>
-          </Link>
+            </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-destructive hover:text-destructive shrink-0 min-h-11"
+              onClick={() => handleDelete(b._id)}
+              disabled={deletingId === b._id}
+            >
+              {deletingId === b._id ? '…' : 'Delete'}
+            </Button>
+          </div>
         ))}
       </CardContent>
     </Card>
@@ -575,8 +791,10 @@ function CreateBattleCard({ token }: { token: string | null }) {
   const navigate = useNavigate();
 
   const [players,        setPlayers]        = useState<CampaignPlayerBasic[]>([]);
-  const [loadingPlayers, setLoadingPlayers] = useState(true);
-  const [selected,       setSelected]       = useState<Set<string>>(new Set());
+  const [npcs,           setNpcs]           = useState<NpcSummary[]>([]);
+  const [loadingData,    setLoadingData]    = useState(true);
+  const [selectedPlayers, setSelectedPlayers] = useState<Set<string>>(new Set());
+  const [selectedNpcs,   setSelectedNpcs]   = useState<Set<string>>(new Set());
   const [battleType,     setBattleType]     = useState<'pve' | 'wild' | 'pvp'>('pve');
   const [limit,          setLimit]          = useState('');
   const [loading,        setLoading]        = useState(false);
@@ -584,21 +802,30 @@ function CreateBattleCard({ token }: { token: string | null }) {
 
   const headers = { Authorization: `Bearer ${token}` };
 
-  // Fetch campaign players so we can show checkboxes
   useEffect(() => {
-    axios
-      .get(`${API}/api/campaigns/mine`, { headers })
-      .then(res => {
-        const players: CampaignPlayerBasic[] = res.data.data?.players ?? [];
-        setPlayers(players);
+    Promise.all([
+      axios.get(`${API}/api/campaigns/mine`, { headers }),
+      axios.get(`${API}/api/dm/npcs`, { headers }),
+    ])
+      .then(([campaignRes, npcsRes]) => {
+        setPlayers(campaignRes.data.data?.players ?? []);
+        setNpcs(npcsRes.data.data ?? []);
       })
       .catch(() => {})
-      .finally(() => setLoadingPlayers(false));
+      .finally(() => setLoadingData(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
   function togglePlayer(id: string) {
-    setSelected(prev => {
+    setSelectedPlayers(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) { next.delete(id); } else { next.add(id); }
+      return next;
+    });
+  }
+
+  function toggleNpc(id: string) {
+    setSelectedNpcs(prev => {
       const next = new Set(prev);
       if (next.has(id)) { next.delete(id); } else { next.add(id); }
       return next;
@@ -608,7 +835,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
   async function handleSubmit(e: { preventDefault(): void }) {
     e.preventDefault();
     setError('');
-    if (selected.size === 0) {
+    if (selectedPlayers.size === 0) {
       setError('Select at least one player.');
       return;
     }
@@ -616,7 +843,8 @@ function CreateBattleCard({ token }: { token: string | null }) {
     try {
       const body: Record<string, unknown> = {
         type:      battleType,
-        playerIds: Array.from(selected),
+        playerIds: Array.from(selectedPlayers),
+        npcIds:    Array.from(selectedNpcs),
       };
       if (limit.trim() !== '') body.playerPokemonLimit = Number(limit);
 
@@ -636,8 +864,8 @@ function CreateBattleCard({ token }: { token: string | null }) {
     <Card>
       <CardHeader><CardTitle>Create Battle</CardTitle></CardHeader>
       <CardContent>
-        {loadingPlayers ? (
-          <p className="text-sm text-muted-foreground">Loading players…</p>
+        {loadingData ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
         ) : players.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No players in your campaign yet. Invite some players first.
@@ -653,7 +881,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
                   <label key={p._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
                     <input
                       type="checkbox"
-                      checked={selected.has(p._id)}
+                      checked={selectedPlayers.has(p._id)}
                       onChange={() => togglePlayer(p._id)}
                       className="h-4 w-4"
                     />
@@ -662,6 +890,27 @@ function CreateBattleCard({ token }: { token: string | null }) {
                 ))}
               </div>
             </div>
+
+            {/* NPC checkboxes */}
+            {npcs.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                <Label>NPCs</Label>
+                <div className="flex flex-col gap-2">
+                  {npcs.map(n => (
+                    <label key={n._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
+                      <input
+                        type="checkbox"
+                        checked={selectedNpcs.has(n._id)}
+                        onChange={() => toggleNpc(n._id)}
+                        className="h-4 w-4"
+                      />
+                      <span>{n.name}</span>
+                      <span className="text-muted-foreground text-xs">({n.partyCount} Pokémon)</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Battle type */}
             <div className="flex flex-col gap-1.5">
@@ -699,7 +948,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
 
             <Button
               type="submit"
-              disabled={loading || selected.size === 0}
+              disabled={loading || selectedPlayers.size === 0}
               className="min-h-11"
             >
               {loading ? 'Creating…' : 'Create Battle'}
@@ -728,6 +977,7 @@ export default function DmPage() {
 
         <CampaignCard token={token} />
         <ActiveBattlesCard token={token} />
+        <NpcCard token={token} />
         <CreateBattleCard token={token} />
         <GivePokemonCard token={token} />
         <GiveItemCard token={token} />
