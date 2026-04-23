@@ -57,6 +57,11 @@ type NpcPartyPokemon = {
   moves: MoveSlot[];
 };
 
+type TurnLogEntry = {
+  turn: number;
+  events: string[];
+};
+
 type BattleState = {
   _id: string;
   type: 'pve' | 'wild' | 'pvp';
@@ -69,6 +74,7 @@ type BattleState = {
   currentTargetIndex: number;
   weather: string | null;
   playerPokemonLimit: number | null;
+  turnLog: TurnLogEntry[];
   lastUpdatedAt: string;
 };
 
@@ -386,6 +392,21 @@ export default function BattlePage() {
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to submit move.'));
     } finally { setSubmitting(false); }
+  }
+
+  async function handleAdvanceRound() {
+    if (!id) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(`${API}/api/battles/${id}/advance-round`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to advance round.'));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function handleSubmitTarget() {
@@ -775,13 +796,60 @@ export default function BattlePage() {
           </Card>
         )}
 
-        {/* End of round placeholder — resolution added in milestone 3.5 */}
+        {/* End of round — show log and let DM advance */}
         {battle.status === 'active' && battle.phase === 'end_of_round' && (
           <Card>
-            <CardContent className="pt-6">
-              <p className="text-sm text-center text-muted-foreground">
-                All targets selected — resolving round (coming in milestone 3.5)
-              </p>
+            <CardHeader>
+              <CardTitle className="text-base">Round {battle.turnNumber} Complete</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              {isDm ? (
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    Review the log below, then advance when ready.
+                  </p>
+                  {actionError && <p className="text-sm text-destructive">{actionError}</p>}
+                  <Button
+                    onClick={handleAdvanceRound}
+                    disabled={submitting}
+                    className="w-full min-h-11"
+                  >
+                    {submitting ? 'Advancing…' : 'Advance to Next Round'}
+                  </Button>
+                </>
+              ) : (
+                <p className="text-sm text-center text-muted-foreground py-2">
+                  Round complete — waiting for the DM to advance…
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Battle Log — visible to everyone once events exist */}
+        {battle.status === 'active' && battle.turnLog.length > 0 && (
+          <Card>
+            <CardHeader><CardTitle className="text-base">Battle Log</CardTitle></CardHeader>
+            <CardContent>
+              <div className="flex flex-col gap-4 max-h-64 overflow-y-auto pr-1">
+                {[...battle.turnLog].reverse().map((entry, idx) => (
+                  <div key={entry.turn}>
+                    <p className={`text-xs font-semibold mb-1 ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      Turn {entry.turn}
+                    </p>
+                    <ul className="flex flex-col gap-1">
+                      {entry.events.map((event, i) => (
+                        <li
+                          key={i}
+                          className={`text-sm ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}
+                        >
+                          {event}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
             </CardContent>
           </Card>
         )}

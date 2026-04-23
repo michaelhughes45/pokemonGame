@@ -102,7 +102,7 @@ Auth guards live in Express middleware — verify JWT on every protected route, 
 
 ## GitHub Workflow
 
-**Repo:** github.com/[your-username]/pokettrpg (single monorepo, main branch only)
+**Repo:** github.com/michaelhughes45/pokemonGame (single monorepo, main branch only)
 
 ### Branching strategy
 Push directly to `main`. No feature branches. Use **git tags** to mark every completed
@@ -150,18 +150,21 @@ This means after every milestone commit, a live deployed version exists automati
 ### .gitignore essentials
 Make sure these are ignored from day one:
 ```
-.env.local
-.env*.local
 node_modules/
-.next/
+.env
 ```
 
 ### Environment variables
-Never commit secrets. Store all of these in Vercel dashboard + local `.env.local`:
+Never commit secrets. Store backend vars in Railway/Render dashboard + local `backend/.env`:
 ```
 MONGODB_URI=
-NEXTAUTH_SECRET=
-NEXTAUTH_URL=
+JWT_SECRET=
+PORT=
+FRONTEND_URL=
+```
+Store frontend vars in Vercel dashboard + local `frontend/.env`:
+```
+VITE_API_URL=
 ```
 
 ---
@@ -379,8 +382,8 @@ pokemonGame/
 - [x] **3.2** Polling loop — BattlePage polls /api/battles/:id/state every 3s (cancelled flag + interval cleanup on unmount); active battle surfaces on player dashboard via GET /api/battles/active; DM panel lists open battles via GET /api/battles/dm with links back into each battle
 - [x] **3.3** Move submission phase — DM starts battle (waiting→active); players send out party Pokémon and submit move choice (no target yet); DM submits for NPCs; when all actors submitted, server speed-sorts turnQueue and advances phase to targeting; player side card shows Submitted/Pending badges per player
 - [x] **3.4** Targeting phase + NPC management — POST /api/battles/:id/submit-target; speed-sorted turnQueue drives sequential targeting prompts; state endpoint enriched with activePokemonInfo (name, HP, maxHp) on both sides; Npc model + full CRUD (GET/POST /api/dm/npcs, POST /api/dm/npcs/:id/pokemon, GET /api/dm/npcs/:id/party); battle creation accepts npcIds; DM panel NpcCard + NPC checkboxes in CreateBattleCard; BattlePage DM NPC send-out + move submission UI; targeting card for players (pick targets) and DM (pick NPC targets); DELETE /api/battles/:id (DM only); bug fix: checkAndAdvance now requires all playerSide entries to have activePokemonId before advancing to targeting
-- [ ] **3.5** Turn resolution — @smogon/calc runs immediately on target selection per actor; end-of-round status damage ticks after all moves resolve
-- [ ] **3.6** Turn log — resolved events display in battle UI
+- [x] **3.5** Turn resolution — @smogon/calc runs on target selection per actor (random damage roll, 1/24 crit rate, 1.5× crit multiplier, weather passed to calc, fallback formula if species/move unrecognised); end-of-round burn/poison/toxic damage (1/8 maxHp) applied after last actor resolves; PP deducted from attacker; phase parks at end_of_round awaiting DM
+- [x] **3.6** Turn log + DM advance — events written to turnLog on each resolution; Battle Log card visible to all (most recent turn at top, older turns dimmed); end_of_round card shows DM an "Advance to Next Round" button and players a waiting message; POST /api/battles/:id/advance-round (DM only) clears turnQueue, increments turnNumber, resets to move_submission
 - [ ] **3.7** Status conditions — burn, paralysis, sleep, poison, toxic, confusion
 - [ ] **3.8** Weather — rain/sun/sandstorm/hail, @smogon/calc receives weather field
 - [ ] **3.9** Items in battle — healing + status cure usable as turn action
@@ -403,18 +406,15 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 3.5 — Turn resolution (@smogon/calc runs immediately on target selection per actor; end-of-round status damage ticks after all moves resolve)
-- **Just finished:** 3.4 — Targeting phase + NPC management (submit-target endpoint, activePokemonInfo in state, full NPC CRUD, DM targeting UI, delete battle). Tagged v3.4.
+- **Starting:** 3.7 — Status conditions (burn, paralysis, sleep, poison, toxic, confusion)
+- **Just finished:** 3.6 — Turn log + DM advance-round button. Tagged v3.6.
 - **Known issues / blockers:** None
 
 ---
 
 ## How to Use This File
 
-1. Place this file at the root of your repo as `CLAUDE_CONTEXT.md`
-2. Paste the entire file at the start of every new Claude Code session or milestone chat
-3. Check off milestones as you complete them (`- [x]`)
-4. Run the end-of-milestone git routine before closing each session
-5. Fill in **Folder Structure** after milestone 1.1
-6. Add to **Conventions Established** as patterns emerge during coding
-7. Update **Current Milestone** section before closing each session
+1. Check off milestones as you complete them (`- [x]`)
+2. Run the end-of-milestone git routine before closing each session
+3. Add to **Conventions Established** as patterns emerge during coding
+4. Update **Current Milestone** section before closing each session

@@ -7,6 +7,7 @@ import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { Npc } from '../models/Npc';
 import { computeStats, BaseStats } from '../lib/statCalc';
+import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field, Generations } from '@smogon/calc';
 
 const router = Router();
 
@@ -51,6 +52,188 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
   battle.set('turnQueue', withSpeed.map(x => x.entry));
   battle.phase              = 'targeting';
   battle.currentTargetIndex = 0;
+}
+
+// ---------------------------------------------------------------------------
+// @smogon/calc helpers
+// ---------------------------------------------------------------------------
+
+const GEN9 = Generations.get(9);
+
+// Convert a PokeAPI slug to a display name suitable for @smogon/calc and
+// human-readable log strings.  "ice-beam" → "Ice Beam", "mr-mime" → "Mr Mime"
+function slugToDisplayName(slug: string): string {
+  return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+// Map our battle weather strings to the values @smogon/calc expects.
+function toCalcWeather(weather: IBattle['weather']): string | undefined {
+  if (!weather) return undefined;
+  const map: Record<string, string> = {
+    rain: 'Rain', sun: 'Sun', sandstorm: 'Sand', hail: 'Hail', snow: 'Snow',
+  };
+  return map[weather];
+}
+
+// Resolve a single move from one attacker against one target.
+// Runs @smogon/calc with a random damage roll and a 1/24 crit roll.
+// Returns the damage dealt and human-readable event strings for the turn log.
+async function resolveMove(
+  attackerPokemonId: mongoose.Types.ObjectId,
+  targetPokemonId:   mongoose.Types.ObjectId,
+  moveId:            string,
+  weather:           IBattle['weather'],
+): Promise<{ damage: number; events: string[] }> {
+  const [attacker, target] = await Promise.all([
+    Pokemon.findById(attackerPokemonId).lean(),
+    Pokemon.findById(targetPokemonId).lean(),
+  ]);
+  if (!attacker || !target) {
+    return { damage: 0, events: ['(Pokémon not found during move resolution)'] };
+  }
+
+  const [attackerCache, targetCache] = await Promise.all([
+    PokedexCache.findOne({ pokeApiId: attacker.speciesId }).lean(),
+    PokedexCache.findOne({ pokeApiId: target.speciesId }).lean(),
+  ]);
+  if (!attackerCache || !targetCache) {
+    return { damage: 0, events: ['(Species cache missing during move resolution)'] };
+  }
+
+  const attackerName = attacker.nickname ?? slugToDisplayName(attackerCache.name as string);
+  const targetName   = target.nickname   ?? slugToDisplayName(targetCache.name   as string);
+  const moveName     = slugToDisplayName(moveId);
+
+  // Look up the move's data from the attacker's species cache.
+  // The `name` field on each cached move is the PokeAPI slug, matching moveId.
+  const moveData = (attackerCache.moves as Array<{
+    name: string; category: string; power: number | null; implemented: boolean;
+  }>).find(m => m.name === moveId);
+
+  // Status moves and unrecognised moves deal no damage
+  if (!moveData || !moveData.power) {
+    const implNote = moveData && !moveData.implemented ? ' (effect not yet implemented)' : '';
+    return {
+      damage: 0,
+      events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`],
+    };
+  }
+
+  const isCrit = Math.random() < 1 / 24; // Gen 6+ base crit rate
+
+  let damage    = 0;
+  let effectNote = '';
+
+  try {
+    const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+    const zeroes = { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 };
+
+    const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), {
+      level:  attacker.level,
+      nature: cap(attacker.nature) as any,
+      evs:    zeroes,
+      ivs:    zeroes,
+      curHP:  attacker.currentHp,
+    });
+
+    const calcTarget = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string), {
+      level:  target.level,
+      nature: cap(target.nature) as any,
+      evs:    zeroes,
+      ivs:    zeroes,
+      curHP:  target.currentHp,
+    });
+
+    const calcMove  = new CalcMove(GEN9, moveName);
+    const calcField = new Field({ weather: toCalcWeather(weather) as any });
+
+    const result = calculate(GEN9, calcAttacker, calcTarget, calcMove, calcField);
+    const rolls  = Array.isArray(result.damage)
+      ? (result.damage as number[])
+      : [result.damage as number];
+    damage = rolls[Math.floor(Math.random() * rolls.length)];
+    // Apply crit multiplier manually (1.5× in Gen 6+)
+    if (isCrit && damage > 0) damage = Math.floor(damage * 1.5);
+
+    const desc = result.desc();
+    if (damage === 0 || desc.includes('immune'))         effectNote = " It had no effect!";
+    else if (desc.includes('super effective'))           effectNote = " It's super effective!";
+    else if (desc.includes('not very effective'))        effectNote = " It's not very effective...";
+  } catch {
+    // Fallback if @smogon/calc doesn't recognise the species or move name
+    damage = Math.max(1, Math.floor((moveData.power * attacker.level) / 50));
+  }
+
+  damage = Math.max(0, damage);
+
+  const critNote = isCrit && damage > 0 ? ' Critical hit!' : '';
+
+  return {
+    damage,
+    events: [`${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${critNote}`],
+  };
+}
+
+// Apply end-of-round effects (burn/poison/toxic damage) and reset the battle
+// to move_submission for the next round.  Called after the last actor in the
+// turnQueue resolves their move.
+async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void> {
+  const allActiveIds = [
+    ...battle.playerSide.map(e => e.activePokemonId),
+    ...battle.enemySide.map(e => e.activePokemonId),
+  ].filter((id): id is mongoose.Types.ObjectId => id != null);
+
+  if (allActiveIds.length > 0) {
+    const activePokemons = await Pokemon.find(
+      { _id: { $in: allActiveIds }, currentHp: { $gt: 0 } },
+      'speciesId level nature currentHp statusCondition nickname',
+    ).lean();
+
+    const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
+    const caches     = speciesIds.length > 0
+      ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats').lean()
+      : [];
+    const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+    const statusEvents: string[] = [];
+
+    for (const poke of activePokemons) {
+      if (
+        poke.statusCondition !== 'burn' &&
+        poke.statusCondition !== 'poison' &&
+        poke.statusCondition !== 'toxic'
+      ) continue;
+
+      const cache = cacheMap.get(poke.speciesId);
+      if (!cache) continue;
+
+      const maxHp   = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
+      const pokeName = poke.nickname ?? slugToDisplayName(cache.name as string);
+      const damage   = Math.max(1, Math.floor(maxHp / 8));
+      const newHp    = Math.max(0, poke.currentHp - damage);
+
+      await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+      statusEvents.push(
+        `${pokeName} is hurt by its ${poke.statusCondition}! (${damage} damage, ${newHp} HP remaining)`,
+      );
+    }
+
+    if (statusEvents.length > 0) {
+      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+      if (!logEntry) {
+        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+        logEntry = battle.turnLog[battle.turnLog.length - 1];
+      }
+      for (const event of statusEvents) {
+        logEntry.events.push(event);
+      }
+      battle.markModified('turnLog');
+    }
+  }
+
+  // All moves resolved — hold at end_of_round so the DM can read the log
+  // before advancing. The advance-round endpoint handles the actual reset.
+  battle.phase = 'end_of_round';
 }
 
 // ---------------------------------------------------------------------------
@@ -664,12 +847,54 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
     return;
   }
 
-  // Fill targets and advance
-  battle.turnQueue[idx].targets = targets.map(t => new mongoose.Types.ObjectId(t));
-  battle.currentTargetIndex     = idx + 1;
+  // Build a HP map from the liveness check above so we can compute new HP
+  // without an extra DB round-trip per target.
+  const targetHpMap = new Map(targetPokemons.map(p => [p._id.toString(), p.currentHp]));
 
+  // Fill targets and immediately resolve damage (sequential speed-order design)
+  battle.turnQueue[idx].targets = targets.map(t => new mongoose.Types.ObjectId(t));
+
+  const moveEvents: string[] = [];
+  for (const targetId of targets) {
+    const { damage, events } = await resolveMove(
+      currentEntry.activePokemonId,
+      new mongoose.Types.ObjectId(targetId),
+      currentEntry.moveId,
+      battle.weather,
+    );
+    moveEvents.push(...events);
+
+    if (damage > 0) {
+      const currentHp = targetHpMap.get(targetId) ?? 0;
+      const newHp     = Math.max(0, currentHp - damage);
+      await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+    }
+  }
+
+  // Deduct 1 PP from the attacker's move slot (floor at 0)
+  await Pokemon.updateOne(
+    { _id: currentEntry.activePokemonId, 'moves.moveId': currentEntry.moveId, 'moves.currentPP': { $gt: 0 } },
+    { $inc: { 'moves.$.currentPP': -1 } },
+  );
+
+  // Mark the entry resolved and write events to the turn log
+  battle.turnQueue[idx].resolved = true;
+
+  let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+  if (!logEntry) {
+    battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+    logEntry = battle.turnLog[battle.turnLog.length - 1];
+  }
+  for (const event of moveEvents) {
+    logEntry.events.push(event);
+  }
+  battle.markModified('turnLog');
+
+  battle.currentTargetIndex = idx + 1;
+
+  // When the last actor resolves, apply end-of-round status damage and start the next round
   if (battle.currentTargetIndex >= battle.turnQueue.length) {
-    battle.phase = 'end_of_round';
+    await applyEndOfRound(battle);
   }
 
   battle.lastUpdatedAt = new Date();
@@ -679,6 +904,54 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
     data:  { phase: battle.phase, currentTargetIndex: battle.currentTargetIndex },
     error: null,
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/battles/:id/advance-round
+// DM only — called after the DM has reviewed the end-of-round log.
+// Clears the turnQueue, increments turnNumber, and resets phase to
+// 'move_submission' so the next round can begin.
+// ---------------------------------------------------------------------------
+router.post('/:id/advance-round', async (req: Request, res: Response): Promise<void> => {
+  const { role } = req.user!;
+  if (role !== 'dm' && role !== 'admin') {
+    res.status(403).json({ data: null, error: 'DM only' });
+    return;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    res.status(400).json({ data: null, error: 'Invalid battle ID' });
+    return;
+  }
+
+  const battle = await Battle.findById(req.params.id);
+  if (!battle) {
+    res.status(404).json({ data: null, error: 'Battle not found' });
+    return;
+  }
+  if (battle.status !== 'active') {
+    res.status(400).json({ data: null, error: 'Battle is not active' });
+    return;
+  }
+  if (battle.phase !== 'end_of_round') {
+    res.status(400).json({ data: null, error: 'Battle is not at end of round' });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign || campaign._id.toString() !== battle.campaignId.toString()) {
+    res.status(403).json({ data: null, error: 'Not your campaign' });
+    return;
+  }
+
+  battle.set('turnQueue', []);
+  battle.currentTargetIndex = 0;
+  battle.turnNumber        += 1;
+  battle.phase              = 'move_submission';
+  battle.lastUpdatedAt      = new Date();
+  await battle.save();
+
+  res.json({ data: { turnNumber: battle.turnNumber, phase: battle.phase }, error: null });
 });
 
 // ---------------------------------------------------------------------------
