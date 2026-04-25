@@ -27,6 +27,8 @@ type ActivePokemonInfo = {
   speciesName: string;
   currentHp: number;
   maxHp: number | null;
+  statusCondition: string | null;
+  isConfused: boolean;
 };
 
 type PlayerSideEntry = {
@@ -127,6 +129,32 @@ const PHASE_LABELS: Record<string, string> = {
   targeting:       'Targeting',
   end_of_round:    'End of Round',
 };
+
+const CONDITION_BADGES: Record<string, { label: string; cls: string }> = {
+  burn:      { label: 'BRN', cls: 'bg-orange-100 text-orange-800' },
+  paralysis: { label: 'PAR', cls: 'bg-yellow-100 text-yellow-800' },
+  sleep:     { label: 'SLP', cls: 'bg-blue-100   text-blue-800'   },
+  freeze:    { label: 'FRZ', cls: 'bg-cyan-100   text-cyan-800'   },
+  poison:    { label: 'PSN', cls: 'bg-purple-100 text-purple-800' },
+  toxic:     { label: 'TOX', cls: 'bg-fuchsia-100 text-fuchsia-800' },
+  confusion: { label: 'CNF', cls: 'bg-pink-100   text-pink-800'   },
+};
+
+function StatusBadge({ info }: { info: ActivePokemonInfo }) {
+  const badges: { label: string; cls: string }[] = [];
+  if (info.statusCondition && CONDITION_BADGES[info.statusCondition]) {
+    badges.push(CONDITION_BADGES[info.statusCondition]);
+  }
+  if (info.isConfused) badges.push(CONDITION_BADGES.confusion);
+  if (badges.length === 0) return null;
+  return (
+    <span className="flex gap-1">
+      {badges.map((b, i) => (
+        <span key={i} className={`text-xs font-bold px-1.5 py-0.5 rounded ${b.cls}`}>{b.label}</span>
+      ))}
+    </span>
+  );
+}
 
 function apiError(err: unknown, fallback: string): string {
   if (
@@ -230,7 +258,7 @@ export default function BattlePage() {
       .then(res => { if (!cancelled) setActivePokemonDetail(res.data.data); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [activePokemonId, token]);
+  }, [activePokemonId, token, battle?.turnNumber]);
 
   // Reset target selection whenever it becomes a new actor's turn
   const currentTargetIndex = battle?.currentTargetIndex;
@@ -570,11 +598,14 @@ export default function BattlePage() {
             <CardContent className="flex flex-col gap-3">
               {/* Active Pokémon summary */}
               {activePokemonDetail && (
-                <p className="text-sm text-muted-foreground">
-                  {activePokemonDetail.nickname ?? activePokemonDetail.species.name}
-                  {' '}Lv.{activePokemonDetail.level}
-                  {' · '}HP {activePokemonDetail.currentHp}/{activePokemonDetail.maxHp}
-                </p>
+                <div className="flex items-center gap-2 flex-wrap text-sm text-muted-foreground">
+                  <span>
+                    {activePokemonDetail.nickname ?? activePokemonDetail.species.name}
+                    {' '}Lv.{activePokemonDetail.level}
+                    {' · '}HP {activePokemonDetail.currentHp}/{activePokemonDetail.maxHp}
+                  </span>
+                  {myEntry?.activePokemonInfo && <StatusBadge info={myEntry.activePokemonInfo} />}
+                </div>
               )}
 
               {alreadySubmitted ? (
@@ -764,8 +795,11 @@ export default function BattlePage() {
                             ].join(' ')}
                           >
                             <span>{info.name}</span>
-                            <span className="text-muted-foreground text-xs">
-                              HP {info.currentHp}{info.maxHp != null ? `/${info.maxHp}` : ''}
+                            <span className="flex items-center gap-2">
+                              <span className="text-muted-foreground text-xs">
+                                HP {info.currentHp}{info.maxHp != null ? `/${info.maxHp}` : ''}
+                              </span>
+                              <StatusBadge info={info} />
                             </span>
                           </button>
                         );
@@ -867,12 +901,21 @@ export default function BattlePage() {
                     e => e.actorId === entry.userId && e.actorType === 'player'
                   );
                   return (
-                    <li key={entry.userId} className="flex items-center justify-between text-sm">
+                    <li key={entry.userId} className="flex items-center justify-between gap-2 text-sm">
                       <span className="font-medium">{entry.username}</span>
                       <span className="flex items-center gap-2 text-muted-foreground">
-                        {entry.activePokemonId
-                          ? 'Pokémon out'
-                          : 'No Pokémon out'}
+                        {entry.activePokemonInfo ? (
+                          <>
+                            <span className="text-xs">
+                              {entry.activePokemonInfo.name}
+                              {' · '}HP {entry.activePokemonInfo.currentHp}
+                              {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
+                            </span>
+                            <StatusBadge info={entry.activePokemonInfo} />
+                          </>
+                        ) : (
+                          <span className="text-xs">No Pokémon out</span>
+                        )}
                         {battle.status === 'active' && battle.phase === 'move_submission' && (
                           <span className={`text-xs px-1.5 py-0.5 rounded-full ${
                             submitted
@@ -902,14 +945,22 @@ export default function BattlePage() {
             ) : (
               <ul className="flex flex-col gap-3">
                 {battle.enemySide.map(entry => (
-                  <li key={entry.npcId} className="flex items-center justify-between text-sm">
+                  <li key={entry.npcId} className="flex items-center justify-between gap-2 text-sm">
                     <span className="font-medium">
-                      {entry.activePokemonInfo?.name ?? 'No Pokémon out'}
+                      {entry.activePokemonInfo?.name ?? entry.npcName}
                     </span>
-                    <span className="text-muted-foreground text-xs">
-                      {entry.activePokemonInfo
-                        ? `HP ${entry.activePokemonInfo.currentHp}${entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}`
-                        : 'No Pokémon out'}
+                    <span className="flex items-center gap-2">
+                      {entry.activePokemonInfo ? (
+                        <>
+                          <span className="text-muted-foreground text-xs">
+                            HP {entry.activePokemonInfo.currentHp}
+                            {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
+                          </span>
+                          <StatusBadge info={entry.activePokemonInfo} />
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">No Pokémon out</span>
+                      )}
                     </span>
                   </li>
                 ))}

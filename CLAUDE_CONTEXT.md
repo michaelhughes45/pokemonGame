@@ -196,6 +196,7 @@ nickname, level, exp, currentHp, nature, gender, heldItem,
 moves ([{ moveId, currentPP, maxPP }] max 4),
 evs ({ hp:0, atk:0, def:0, spatk:0, spdef:0, speed:0 } — zeroes until Phase 5),
 statusCondition (null|'burn'|'paralysis'|'sleep'|'freeze'|'poison'|'toxic'),
+statusCounter (Number | null) — sleep turns remaining (1–3 on inflict) and toxic damage scaling counter (increments each round),
 volatileStatus ([{ condition, turnsRemaining }]),
 evolutionOverrides ([{ condition, value }]),
 isInParty (Boolean), partySlot (1–6 or null),
@@ -384,7 +385,7 @@ pokemonGame/
 - [x] **3.4** Targeting phase + NPC management — POST /api/battles/:id/submit-target; speed-sorted turnQueue drives sequential targeting prompts; state endpoint enriched with activePokemonInfo (name, HP, maxHp) on both sides; Npc model + full CRUD (GET/POST /api/dm/npcs, POST /api/dm/npcs/:id/pokemon, GET /api/dm/npcs/:id/party); battle creation accepts npcIds; DM panel NpcCard + NPC checkboxes in CreateBattleCard; BattlePage DM NPC send-out + move submission UI; targeting card for players (pick targets) and DM (pick NPC targets); DELETE /api/battles/:id (DM only); bug fix: checkAndAdvance now requires all playerSide entries to have activePokemonId before advancing to targeting
 - [x] **3.5** Turn resolution — @smogon/calc runs on target selection per actor (random damage roll, 1/24 crit rate, 1.5× crit multiplier, weather passed to calc, fallback formula if species/move unrecognised); end-of-round burn/poison/toxic damage (1/8 maxHp) applied after last actor resolves; PP deducted from attacker; phase parks at end_of_round awaiting DM
 - [x] **3.6** Turn log + DM advance — events written to turnLog on each resolution; Battle Log card visible to all (most recent turn at top, older turns dimmed); end_of_round card shows DM an "Advance to Next Round" button and players a waiting message; POST /api/battles/:id/advance-round (DM only) clears turnQueue, increments turnNumber, resets to move_submission
-- [ ] **3.7** Status conditions — burn, paralysis, sleep, poison, toxic, confusion
+- [x] **3.7** Status conditions — `STATUS_MOVES` table (~60 moves), `applyStatusEffect` with type immunity checks, `checkStatusBlock` (paralysis 25% skip, freeze 20% thaw, sleep counter-based Gen 5+ wake-on-wake-turn), `checkConfusion` (50% self-hit, typeless physical formula), `autoSkipBlockedActors` loop auto-resolves blocked actors without client input, toxic scales `counter/16 × maxHp` each round, burn/poison flat 1/8; `statusCounter` field added to Pokemon model; StatusBadge UI (BRN/PAR/SLP/FRZ/PSN/TOX/CNF) shown on move submission, targeting, and side cards; status blocking applies only to move execution (not full turn) to preserve future item-use hook
 - [ ] **3.8** Weather — rain/sun/sandstorm/hail, @smogon/calc receives weather field
 - [ ] **3.9** Items in battle — healing + status cure usable as turn action
 - [ ] **3.10** Switching — switch active Pokémon, ability triggers on entry; enforce playerPokemonLimit (track usedPokemonIds, block send-out if limit reached and all used Pokémon still alive)
@@ -406,8 +407,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 3.7 — Status conditions (burn, paralysis, sleep, poison, toxic, confusion)
-- **Just finished:** 3.6 — Turn log + DM advance-round button. Tagged v3.6.
+- **Starting:** 3.8 — Weather (rain, sun, sandstorm, hail; @smogon/calc receives weather field)
+- **Just finished:** 3.7 — Status conditions. Tagged v3.7.
 - **Known issues / blockers:** None
 
 ---

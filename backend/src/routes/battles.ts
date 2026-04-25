@@ -28,7 +28,7 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
 
   // All actors submitted — fetch Pokémon documents for speed calculation
   const pokemonIds = battle.turnQueue.map(e => e.activePokemonId);
-  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'speciesId level nature').lean();
+  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'speciesId level nature statusCondition').lean();
   const speciesIds = [...new Set(pokemons.map(p => p.speciesId))];
   const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
 
@@ -38,9 +38,10 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
   const withSpeed = battle.turnQueue.map(entry => {
     const poke  = pokemonMap.get(entry.activePokemonId.toString());
     const cache = poke ? cacheMap.get(poke.speciesId) : null;
-    const speed = poke && cache
+    const rawSpeed = poke && cache
       ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).speed
       : 0;
+    const speed = poke?.statusCondition === 'paralysis' ? Math.floor(rawSpeed * 0.5) : rawSpeed;
     return { entry, speed };
   });
 
@@ -52,6 +53,8 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
   battle.set('turnQueue', withSpeed.map(x => x.entry));
   battle.phase              = 'targeting';
   battle.currentTargetIndex = 0;
+
+  await autoSkipBlockedActors(battle);
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +76,280 @@ function toCalcWeather(weather: IBattle['weather']): string | undefined {
     rain: 'Rain', sun: 'Sun', sandstorm: 'Sand', hail: 'Hail', snow: 'Snow',
   };
   return map[weather];
+}
+
+// Map our statusCondition strings to the StatusName values @smogon/calc expects.
+function toCalcStatus(status: string | null | undefined): string | undefined {
+  if (!status) return undefined;
+  const map: Record<string, string> = {
+    burn: 'brn', paralysis: 'par', poison: 'psn', toxic: 'tox', sleep: 'slp', freeze: 'frz',
+  };
+  return map[status];
+}
+
+type StatusMoveEffect = {
+  status: 'burn' | 'paralysis' | 'sleep' | 'freeze' | 'poison' | 'toxic' | 'confusion';
+  chance: number; // 0–1
+};
+
+// Moves that inflict a status condition, either as their primary effect (chance 1)
+// or as a secondary effect on damage moves.  Keyed by PokeAPI move slug.
+const STATUS_MOVES: Record<string, StatusMoveEffect> = {
+  // Paralysis
+  'thunder-wave':  { status: 'paralysis', chance: 1 },
+  'glare':         { status: 'paralysis', chance: 1 },
+  'stun-spore':    { status: 'paralysis', chance: 1 },
+  'nuzzle':        { status: 'paralysis', chance: 1 },
+  'zap-cannon':    { status: 'paralysis', chance: 1 },
+  'body-slam':     { status: 'paralysis', chance: 0.3 },
+  'thunder':       { status: 'paralysis', chance: 0.3 },
+  'thunderbolt':   { status: 'paralysis', chance: 0.1 },
+  'discharge':     { status: 'paralysis', chance: 0.3 },
+  'spark':         { status: 'paralysis', chance: 0.3 },
+  'volt-tackle':   { status: 'paralysis', chance: 0.1 },
+  'bounce':        { status: 'paralysis', chance: 0.3 },
+  // Burn
+  'will-o-wisp':   { status: 'burn', chance: 1 },
+  'ember':         { status: 'burn', chance: 0.1 },
+  'flamethrower':  { status: 'burn', chance: 0.1 },
+  'fire-blast':    { status: 'burn', chance: 0.1 },
+  'fire-punch':    { status: 'burn', chance: 0.1 },
+  'flame-wheel':   { status: 'burn', chance: 0.1 },
+  'blaze-kick':    { status: 'burn', chance: 0.1 },
+  'heat-wave':     { status: 'burn', chance: 0.1 },
+  'sacred-fire':   { status: 'burn', chance: 0.5 },
+  'scald':         { status: 'burn', chance: 0.3 },
+  'lava-plume':    { status: 'burn', chance: 0.3 },
+  'magma-storm':   { status: 'burn', chance: 0.3 },
+  // Toxic / Poison
+  'toxic':         { status: 'toxic',  chance: 1 },
+  'poison-powder': { status: 'poison', chance: 1 },
+  'poison-gas':    { status: 'poison', chance: 1 },
+  'poison-sting':  { status: 'poison', chance: 0.3 },
+  'poison-jab':    { status: 'poison', chance: 0.3 },
+  'gunk-shot':     { status: 'poison', chance: 0.3 },
+  'cross-poison':  { status: 'poison', chance: 0.1 },
+  'sludge':        { status: 'poison', chance: 0.3 },
+  'sludge-bomb':   { status: 'poison', chance: 0.3 },
+  'sludge-wave':   { status: 'poison', chance: 0.1 },
+  // Sleep
+  'hypnosis':      { status: 'sleep', chance: 1 },
+  'sleep-powder':  { status: 'sleep', chance: 1 },
+  'spore':         { status: 'sleep', chance: 1 },
+  'lovely-kiss':   { status: 'sleep', chance: 1 },
+  'sing':          { status: 'sleep', chance: 1 },
+  'grass-whistle': { status: 'sleep', chance: 1 },
+  'dark-void':     { status: 'sleep', chance: 1 },
+  // Freeze
+  'ice-beam':      { status: 'freeze', chance: 0.1 },
+  'blizzard':      { status: 'freeze', chance: 0.1 },
+  'ice-punch':     { status: 'freeze', chance: 0.1 },
+  'freeze-dry':    { status: 'freeze', chance: 0.1 },
+  'aurora-beam':   { status: 'freeze', chance: 0.1 },
+  'powder-snow':   { status: 'freeze', chance: 0.1 },
+  // Confusion
+  'confuse-ray':   { status: 'confusion', chance: 1 },
+  'supersonic':    { status: 'confusion', chance: 1 },
+  'sweet-kiss':    { status: 'confusion', chance: 1 },
+  'teeter-dance':  { status: 'confusion', chance: 1 },
+  'flatter':       { status: 'confusion', chance: 1 },
+  'swagger':       { status: 'confusion', chance: 1 },
+  'dynamicpunch':  { status: 'confusion', chance: 1 },
+  'hurricane':     { status: 'confusion', chance: 0.3 },
+  'dizzy-punch':   { status: 'confusion', chance: 0.2 },
+  'confusion':     { status: 'confusion', chance: 0.1 },
+  'psybeam':       { status: 'confusion', chance: 0.1 },
+  'water-pulse':   { status: 'confusion', chance: 0.2 },
+};
+
+// Checks whether a Pokémon is blocked by its status condition this turn.
+// Handles the sleep counter (decrement/wake-up), freeze thaw roll (20%),
+// and paralysis skip roll (25%). Applies any state changes directly to the DB.
+// Only sleep, freeze, and paralysis block move execution — burn/poison/toxic do not.
+async function checkStatusBlock(
+  pokemonId:       mongoose.Types.ObjectId,
+  statusCondition: string | null,
+  statusCounter:   number | null,
+  displayName:     string,
+): Promise<{ blocked: boolean; events: string[] }> {
+  if (statusCondition === 'paralysis') {
+    if (Math.random() >= 0.25) return { blocked: false, events: [] };
+    return { blocked: true, events: [`${displayName} is fully paralyzed! It can't move!`] };
+  }
+
+  if (statusCondition === 'freeze') {
+    if (Math.random() < 0.2) {
+      await Pokemon.updateOne({ _id: pokemonId }, { $set: { statusCondition: null, statusCounter: null } });
+      return { blocked: false, events: [`${displayName} thawed out!`] };
+    }
+    return { blocked: true, events: [`${displayName} is frozen solid!`] };
+  }
+
+  if (statusCondition === 'sleep') {
+    // Fall back to a fresh random counter if one was never set (e.g. manually applied in DB)
+    const counter    = statusCounter !== null && statusCounter > 0 ? statusCounter : Math.floor(Math.random() * 3) + 1;
+    const newCounter = counter - 1;
+    if (newCounter <= 0) {
+      await Pokemon.updateOne({ _id: pokemonId }, { $set: { statusCondition: null, statusCounter: null } });
+      return { blocked: false, events: [`${displayName} woke up!`] };
+    }
+    await Pokemon.updateOne({ _id: pokemonId }, { $set: { statusCounter: newCounter } });
+    return { blocked: true, events: [`${displayName} is fast asleep! Zzzz...`] };
+  }
+
+  return { blocked: false, events: [] };
+}
+
+// Starting from battle.currentTargetIndex, auto-skips consecutive actors whose
+// move is blocked by sleep, freeze, or paralysis. Stops at the first actor that
+// can move (or when the queue is exhausted, in which case applyEndOfRound fires).
+// Called at two points: when the phase first becomes 'targeting' (checkAndAdvance)
+// and after each actor resolves in submit-target — so blocked actors never need
+// client input and the battle advances automatically past them.
+async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise<void> {
+  while (battle.currentTargetIndex < battle.turnQueue.length) {
+    const entry = battle.turnQueue[battle.currentTargetIndex];
+
+    const poke = await Pokemon.findById(
+      entry.activePokemonId,
+      'nickname speciesId statusCondition statusCounter',
+    ).lean();
+    if (!poke || !poke.statusCondition) break; // no status — this actor moves normally
+
+    const cache       = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
+    const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+
+    const { blocked, events } = await checkStatusBlock(
+      poke._id as mongoose.Types.ObjectId,
+      poke.statusCondition,
+      poke.statusCounter,
+      displayName,
+    );
+
+    // Log events before the break check — wake-up and thaw emit events with blocked:false
+    if (events.length > 0) {
+      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+      if (!logEntry) {
+        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+        logEntry = battle.turnLog[battle.turnLog.length - 1];
+      }
+      for (const event of events) logEntry.events.push(event);
+      battle.markModified('turnLog');
+    }
+
+    if (!blocked) break; // this actor moves normally — stop skipping
+
+    battle.turnQueue[battle.currentTargetIndex].resolved = true;
+    battle.currentTargetIndex++;
+  }
+
+  if (battle.currentTargetIndex >= battle.turnQueue.length) {
+    await applyEndOfRound(battle);
+  }
+}
+
+// Checks and processes confusion for the given Pokémon at the start of their move.
+// Decrements the confusion counter each turn; on the last turn, the roll still fires
+// and snap-out is announced afterward (matching Gen 8+ behavior).
+// Returns hitSelf:true when the Pokémon hurts itself — in that case the caller should
+// skip resolveMove and PP deduction entirely.
+async function checkConfusion(
+  pokemonId: mongoose.Types.ObjectId,
+): Promise<{ hitSelf: boolean; events: string[] }> {
+  const poke = await Pokemon.findById(
+    pokemonId,
+    'nickname speciesId level nature currentHp volatileStatus',
+  ).lean();
+  if (!poke) return { hitSelf: false, events: [] };
+
+  const confIdx = (poke.volatileStatus ?? []).findIndex(v => v.condition === 'confusion');
+  if (confIdx === -1) return { hitSelf: false, events: [] };
+
+  const cache       = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name baseStats').lean();
+  const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+
+  const newTurns   = poke.volatileStatus[confIdx].turnsRemaining - 1;
+  const didSnapOut = newTurns <= 0;
+
+  if (didSnapOut) {
+    await Pokemon.updateOne({ _id: pokemonId }, { $pull: { volatileStatus: { condition: 'confusion' } } });
+  } else {
+    await Pokemon.updateOne(
+      { _id: pokemonId, 'volatileStatus.condition': 'confusion' },
+      { $set: { 'volatileStatus.$.turnsRemaining': newTurns } },
+    );
+  }
+
+  const events: string[] = [];
+
+  // 50% self-hit (skip if cache is missing — can't calculate damage without base stats)
+  if (Math.random() < 0.5 && cache) {
+    const stats  = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature);
+    // Standard Gen 5+ confusion damage: 40-power typeless physical, own Atk vs own Def, no crit
+    const damage = Math.max(1, Math.floor(((2 * poke.level / 5 + 2) * 40 * stats.atk / stats.def) / 50 + 2));
+    const newHp  = Math.max(0, poke.currentHp - damage);
+    await Pokemon.updateOne({ _id: pokemonId }, { $set: { currentHp: newHp } });
+    events.push(`${displayName} hurt itself in its confusion! (${damage} damage, ${newHp} HP remaining)`);
+    if (didSnapOut) events.push(`${displayName} snapped out of its confusion!`);
+    return { hitSelf: true, events };
+  }
+
+  if (didSnapOut) events.push(`${displayName} snapped out of its confusion!`);
+  return { hitSelf: false, events };
+}
+
+// Attempts to apply a status effect to a target Pokémon.
+// Checks: target already has a status, target is already confused (for confusion),
+// and type-based immunity (Electric immune to paralysis, Fire to burn, etc.).
+// For sleep: sets a random 1–3 turn counter. For toxic: sets counter to 1 (first tick).
+// For confusion: sets a random 2–5 turn counter in volatileStatus.
+async function applyStatusEffect(
+  targetId: mongoose.Types.ObjectId,
+  effect:   StatusMoveEffect,
+): Promise<string[]> {
+  const target = await Pokemon.findById(
+    targetId,
+    'nickname speciesId statusCondition volatileStatus currentHp',
+  ).lean();
+  if (!target || target.currentHp <= 0) return [];
+
+  const isConfusion = effect.status === 'confusion';
+
+  if (!isConfusion && target.statusCondition) return [];
+  if (isConfusion && target.volatileStatus.some(v => v.condition === 'confusion')) return [];
+
+  const cache = await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name types').lean();
+  const types = (cache?.types ?? []) as string[];
+  const displayName = target.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+
+  const isImmune = (
+    (effect.status === 'paralysis' && types.includes('electric')) ||
+    (effect.status === 'burn'      && types.includes('fire'))     ||
+    ((effect.status === 'poison' || effect.status === 'toxic') &&
+      (types.includes('poison') || types.includes('steel')))      ||
+    (effect.status === 'freeze'    && types.includes('ice'))
+  );
+  if (isImmune) return [];
+
+  if (isConfusion) {
+    const turnsRemaining = Math.floor(Math.random() * 4) + 2; // 2–5 turns
+    await Pokemon.updateOne(
+      { _id: targetId },
+      { $push: { volatileStatus: { condition: 'confusion', turnsRemaining } } },
+    );
+    return [`${displayName} became confused!`];
+  }
+
+  const update: Record<string, unknown> = { statusCondition: effect.status };
+  if (effect.status === 'sleep') update.statusCounter = Math.floor(Math.random() * 3) + 1;
+  if (effect.status === 'toxic') update.statusCounter = 1;
+  await Pokemon.updateOne({ _id: targetId }, { $set: update });
+
+  const labels: Record<string, string> = {
+    burn: 'burned', paralysis: 'paralyzed', sleep: 'fell asleep',
+    freeze: 'was frozen solid', poison: 'was poisoned', toxic: 'was badly poisoned',
+  };
+  return [`${displayName} ${labels[effect.status]}!`];
 }
 
 // Resolve a single move from one attacker against one target.
@@ -112,7 +389,7 @@ async function resolveMove(
 
   // Status moves and unrecognised moves deal no damage
   if (!moveData || !moveData.power) {
-    const implNote = moveData && !moveData.implemented ? ' (effect not yet implemented)' : '';
+    const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) ? ' (effect not yet implemented)' : '';
     return {
       damage: 0,
       events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`],
@@ -134,6 +411,7 @@ async function resolveMove(
       evs:    zeroes,
       ivs:    zeroes,
       curHP:  attacker.currentHp,
+      status: toCalcStatus(attacker.statusCondition) as any,
     });
 
     const calcTarget = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string), {
@@ -186,7 +464,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
   if (allActiveIds.length > 0) {
     const activePokemons = await Pokemon.find(
       { _id: { $in: allActiveIds }, currentHp: { $gt: 0 } },
-      'speciesId level nature currentHp statusCondition nickname',
+      'speciesId level nature currentHp statusCondition statusCounter nickname',
     ).lean();
 
     const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
@@ -209,10 +487,22 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 
       const maxHp   = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
       const pokeName = poke.nickname ?? slugToDisplayName(cache.name as string);
-      const damage   = Math.max(1, Math.floor(maxHp / 8));
-      const newHp    = Math.max(0, poke.currentHp - damage);
 
-      await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+      // Toxic damage scales each round: counter/16 × maxHp (counter starts at 1, caps at 15).
+      // Burn and poison deal a flat 1/8 maxHp.
+      let damage: number;
+      const update: Record<string, unknown> = {};
+      if (poke.statusCondition === 'toxic') {
+        const counter = poke.statusCounter ?? 1;
+        damage = Math.max(1, Math.floor(maxHp * counter / 16));
+        update.statusCounter = Math.min(counter + 1, 15);
+      } else {
+        damage = Math.max(1, Math.floor(maxHp / 8));
+      }
+      const newHp = Math.max(0, poke.currentHp - damage);
+      update.currentHp = newHp;
+
+      await Pokemon.updateOne({ _id: poke._id }, { $set: update });
       statusEvents.push(
         `${pokeName} is hurt by its ${poke.statusCondition}! (${damage} damage, ${newHp} HP remaining)`,
       );
@@ -854,28 +1144,42 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
   // Fill targets and immediately resolve damage (sequential speed-order design)
   battle.turnQueue[idx].targets = targets.map(t => new mongoose.Types.ObjectId(t));
 
-  const moveEvents: string[] = [];
-  for (const targetId of targets) {
-    const { damage, events } = await resolveMove(
-      currentEntry.activePokemonId,
-      new mongoose.Types.ObjectId(targetId),
-      currentEntry.moveId,
-      battle.weather,
-    );
-    moveEvents.push(...events);
+  // Confusion check: 50% chance the Pokémon hurts itself instead of using its move.
+  // If hitSelf, skip resolveMove and PP deduction — confusion self-hits don't cost PP.
+  const { hitSelf, events: confusionEvents } = await checkConfusion(currentEntry.activePokemonId);
+  const moveEvents: string[] = [...confusionEvents];
 
-    if (damage > 0) {
-      const currentHp = targetHpMap.get(targetId) ?? 0;
-      const newHp     = Math.max(0, currentHp - damage);
-      await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+  if (!hitSelf) {
+    const moveEffect = STATUS_MOVES[currentEntry.moveId];
+
+    for (const targetId of targets) {
+      const { damage, events } = await resolveMove(
+        currentEntry.activePokemonId,
+        new mongoose.Types.ObjectId(targetId),
+        currentEntry.moveId,
+        battle.weather,
+      );
+      moveEvents.push(...events);
+
+      if (damage > 0) {
+        const currentHp = targetHpMap.get(targetId) ?? 0;
+        const newHp     = Math.max(0, currentHp - damage);
+        await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+      }
+
+      // Secondary status effect — rolled per target so multi-target moves work correctly
+      if (moveEffect && Math.random() < moveEffect.chance) {
+        const statusEvents = await applyStatusEffect(new mongoose.Types.ObjectId(targetId), moveEffect);
+        moveEvents.push(...statusEvents);
+      }
     }
-  }
 
-  // Deduct 1 PP from the attacker's move slot (floor at 0)
-  await Pokemon.updateOne(
-    { _id: currentEntry.activePokemonId, 'moves.moveId': currentEntry.moveId, 'moves.currentPP': { $gt: 0 } },
-    { $inc: { 'moves.$.currentPP': -1 } },
-  );
+    // Deduct 1 PP from the attacker's move slot (floor at 0)
+    await Pokemon.updateOne(
+      { _id: currentEntry.activePokemonId, 'moves.moveId': currentEntry.moveId, 'moves.currentPP': { $gt: 0 } },
+      { $inc: { 'moves.$.currentPP': -1 } },
+    );
+  }
 
   // Mark the entry resolved and write events to the turn log
   battle.turnQueue[idx].resolved = true;
@@ -891,11 +1195,7 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
   battle.markModified('turnLog');
 
   battle.currentTargetIndex = idx + 1;
-
-  // When the last actor resolves, apply end-of-round status damage and start the next round
-  if (battle.currentTargetIndex >= battle.turnQueue.length) {
-    await applyEndOfRound(battle);
-  }
+  await autoSkipBlockedActors(battle);
 
   battle.lastUpdatedAt = new Date();
   await battle.save();
@@ -1025,7 +1325,7 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
   const activePokemons = allActivePokemonIds.length > 0
     ? await Pokemon.find(
         { _id: { $in: allActivePokemonIds } },
-        'nickname speciesId currentHp level nature'
+        'nickname speciesId currentHp level nature statusCondition volatileStatus'
       ).lean()
     : [];
 
@@ -1048,11 +1348,13 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
       ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp
       : null;
     return {
-      _id:         poke._id.toString(),
-      name:        poke.nickname ?? speciesName,
+      _id:             poke._id.toString(),
+      name:            poke.nickname ?? speciesName,
       speciesName,
-      currentHp:   poke.currentHp,
+      currentHp:       poke.currentHp,
       maxHp,
+      statusCondition: poke.statusCondition ?? null,
+      isConfused:      poke.volatileStatus.some(v => v.condition === 'confusion'),
     };
   };
 

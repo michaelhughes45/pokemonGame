@@ -35,6 +35,7 @@ type IPokemon = {
   moves: PokemonMove[];
   evs: StatSpread;
   statusCondition: 'burn' | 'paralysis' | 'sleep' | 'freeze' | 'poison' | 'toxic' | null;
+  statusCounter: number | null;
   volatileStatus: VolatileStatus[];
   evolutionOverrides: EvolutionOverride[];
   isInParty: boolean;
@@ -77,6 +78,7 @@ const PokemonSchema = new Schema<IPokemon>(
       enum: ['burn', 'paralysis', 'sleep', 'freeze', 'poison', 'toxic', null],
       default: null,
     },
+    statusCounter: { type: Number, default: null },
     volatileStatus: [
       {
         condition:      { type: String, required: true },
