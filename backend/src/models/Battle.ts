@@ -63,6 +63,8 @@ export type IBattle = {
   // Index into the speed-sorted turnQueue pointing at who picks targets next
   currentTargetIndex: number;
   weather: 'rain' | 'sun' | 'sandstorm' | 'hail' | 'snow' | null;
+  // null = no countdown (DM-set indefinite); number counts down each round
+  weatherTurnsRemaining: number | null;
   fieldConditions: FieldCondition[];
   turnLog: TurnLogEntry[];
   catchAttempts: CatchAttempt[];
@@ -129,6 +131,8 @@ const BattleSchema = new Schema<IBattle>(
       enum:    ['rain', 'sun', 'sandstorm', 'hail', 'snow', null],
       default: null,
     },
+
+    weatherTurnsRemaining: { type: Number, default: null },
 
     fieldConditions: [
       {

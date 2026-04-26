@@ -78,6 +78,9 @@ Auth guards live in Express middleware — verify JWT on every protected route, 
 - **Rare Candy implemented** — increments level by 1 (cap 100), currentHp rises by the same amount as maxHp increase (matches main games)
 - **Flutes implemented** — `poke-flute`, `blue-flute`, `green-flute` cure sleep; `yellow-flute` cures confusion (volatile status)
 - **levelUpMoves cached on species** — `PokedexCache` stores `levelUpMoves: [{ moveId, level }]` (minimum level across all game versions). DM give-pokemon and starter selection use this to assign the last 4 learnable moves at the target level. Old cache entries auto-refresh on next give-pokemon call
+- **No-target moves skip the target picker** — `WEATHER_MOVES` and `SELF_TARGETING_MOVES` tables in `battles.ts` define moves that don't hit an opposing Pokémon. The state endpoint returns `noTargetMoveIds: string[]`; the frontend shows a "Use [Move]" button instead of the enemy picker. The backend accepts an empty `targets: []` array for these moves.
+- **Weather move interaction rules** — using a weather move while the same weather is active: no effect. Using a weather move while a different weather is active: both cancel (weather clears to null). No active weather: sets the new weather for 5 turns.
+- **`weatherTurnsRemaining` null vs number** — `null` means DM-set indefinite weather (no countdown); a number counts down each round and auto-clears at 0.
 - **No terrain system** — weather only (rain, sun, sandstorm, hail, snow)
 - **Physical board handles movement** — the app does not track position or adjacency. Players select targets manually; adjacency is self-reported from the physical table, not enforced by the app
 - **Two-phase turn structure** — move_submission phase collects all actor moves first; targeting phase resolves them sequentially in speed order. This matches the physical miniatures flow where intent is declared before targets are chosen
@@ -362,6 +365,9 @@ pokemonGame/
 - Mongoose DocumentArray vs plain array TS conflicts: cast to explicit local types after `.lean()` (e.g. `const entries = (doc.field ?? []) as MyType[]`) rather than fighting Mongoose's inferred generics
 - Stat formula extracted to `backend/src/lib/statCalc.ts` — import `computeStats` from there, do not duplicate it in route files
 - Item effects live in `backend/src/routes/items.ts` (ITEM_EFFECTS table); item→pocket mapping lives in `backend/src/lib/itemData.ts` (getPocket)
+- Move classification tables in `battles.ts`: `STATUS_MOVES` (status-inflicting), `WEATHER_MOVES` (field weather), `SELF_TARGETING_MOVES` (no enemy target), `NO_TARGET_MOVE_IDS` (union of weather + self — sent to client via state endpoint)
+- `applyEndOfRound` uses a `runningHp` map so stacked damage sources (e.g. burn + sandstorm on the same Pokémon) each read from the updated HP rather than the original snapshot
+- `checkConfusion` always emits a leading `"[Name] is confused..."` event before the outcome (self-hit or move proceeds), so the turn log narrates the full sequence
 
 ---
 
@@ -385,8 +391,8 @@ pokemonGame/
 - [x] **3.4** Targeting phase + NPC management — POST /api/battles/:id/submit-target; speed-sorted turnQueue drives sequential targeting prompts; state endpoint enriched with activePokemonInfo (name, HP, maxHp) on both sides; Npc model + full CRUD (GET/POST /api/dm/npcs, POST /api/dm/npcs/:id/pokemon, GET /api/dm/npcs/:id/party); battle creation accepts npcIds; DM panel NpcCard + NPC checkboxes in CreateBattleCard; BattlePage DM NPC send-out + move submission UI; targeting card for players (pick targets) and DM (pick NPC targets); DELETE /api/battles/:id (DM only); bug fix: checkAndAdvance now requires all playerSide entries to have activePokemonId before advancing to targeting
 - [x] **3.5** Turn resolution — @smogon/calc runs on target selection per actor (random damage roll, 1/24 crit rate, 1.5× crit multiplier, weather passed to calc, fallback formula if species/move unrecognised); end-of-round burn/poison/toxic damage (1/8 maxHp) applied after last actor resolves; PP deducted from attacker; phase parks at end_of_round awaiting DM
 - [x] **3.6** Turn log + DM advance — events written to turnLog on each resolution; Battle Log card visible to all (most recent turn at top, older turns dimmed); end_of_round card shows DM an "Advance to Next Round" button and players a waiting message; POST /api/battles/:id/advance-round (DM only) clears turnQueue, increments turnNumber, resets to move_submission
-- [x] **3.7** Status conditions — `STATUS_MOVES` table (~60 moves), `applyStatusEffect` with type immunity checks, `checkStatusBlock` (paralysis 25% skip, freeze 20% thaw, sleep counter-based Gen 5+ wake-on-wake-turn), `checkConfusion` (50% self-hit, typeless physical formula), `autoSkipBlockedActors` loop auto-resolves blocked actors without client input, toxic scales `counter/16 × maxHp` each round, burn/poison flat 1/8; `statusCounter` field added to Pokemon model; StatusBadge UI (BRN/PAR/SLP/FRZ/PSN/TOX/CNF) shown on move submission, targeting, and side cards; status blocking applies only to move execution (not full turn) to preserve future item-use hook
-- [ ] **3.8** Weather — rain/sun/sandstorm/hail, @smogon/calc receives weather field
+- [x] **3.7** Status conditions — `STATUS_MOVES` table (~60 moves), `applyStatusEffect` with type immunity checks, `checkStatusBlock` (paralysis 25% skip, freeze 20% thaw, sleep counter-based Gen 5+ wake-on-wake-turn), `checkConfusion` (50% self-hit, typeless physical formula), `autoSkipBlockedActors` loop auto-resolves blocked actors without client input, toxic scales `counter/16 × maxHp` each round, burn/poison flat 1/8; `statusCounter` field added to Pokemon model; StatusBadge UI (BRN/PAR/SLP/FRZ/PSN/TOX/CNF) shown on move submission, targeting, and side cards; status blocking applies only to move execution (not full turn) to preserve future item-use hook; `checkConfusion` emits leading "is confused..." narration before outcome
+- [x] **3.8** Weather — `weatherTurnsRemaining` field on Battle; `WEATHER_MOVES` table (sunny-day, rain-dance, sandstorm, hail, snowscape, chilly-reception) sets weather for 5 turns during turn resolution; same weather = no effect, different weather = both cancel; DM manual override via POST /api/battles/:id/weather (indefinite or countdown); sandstorm/hail deal 1/16 maxHp end-of-round to non-immune types (Rock/Steel/Ground immune to sand, Ice immune to hail); weather countdown auto-clears with flavor message; `SELF_TARGETING_MOVES` table covers stat boosts + recovery moves — no enemy target required, "Use [Move]" button shown instead of target picker; `noTargetMoveIds` returned in state endpoint; `runningHp` map fixes stacked end-of-round damage bug; WeatherBadge UI with colored pill + turn countdown
 - [ ] **3.9** Items in battle — healing + status cure usable as turn action
 - [ ] **3.10** Switching — switch active Pokémon, ability triggers on entry; enforce playerPokemonLimit (track usedPokemonIds, block send-out if limit reached and all used Pokémon still alive)
 - [ ] **3.11** Faint & battle end — faint prompt, EXP distributed to full party (Gen 6+ Exp. Share), EV award deferred ★ first playable game
@@ -407,8 +413,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 3.8 — Weather (rain, sun, sandstorm, hail; @smogon/calc receives weather field)
-- **Just finished:** 3.7 — Status conditions. Tagged v3.7.
+- **Starting:** 3.9 — Items in battle (healing + status cure usable as turn action)
+- **Just finished:** 3.8 — Weather. Tagged v3.8.
 - **Known issues / blockers:** None
 
 ---

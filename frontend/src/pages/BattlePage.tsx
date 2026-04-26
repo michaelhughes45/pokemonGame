@@ -75,6 +75,8 @@ type BattleState = {
   turnQueue: TurnQueueEntry[];
   currentTargetIndex: number;
   weather: string | null;
+  weatherTurnsRemaining: number | null;
+  noTargetMoveIds: string[];
   playerPokemonLimit: number | null;
   turnLog: TurnLogEntry[];
   lastUpdatedAt: string;
@@ -156,6 +158,26 @@ function StatusBadge({ info }: { info: ActivePokemonInfo }) {
   );
 }
 
+const WEATHER_CONFIG: Record<string, { label: string; cls: string }> = {
+  rain:      { label: 'Rain',      cls: 'bg-blue-100 text-blue-800'    },
+  sun:       { label: 'Harsh Sun', cls: 'bg-amber-100 text-amber-800'  },
+  sandstorm: { label: 'Sandstorm', cls: 'bg-orange-100 text-orange-800' },
+  hail:      { label: 'Hail',      cls: 'bg-cyan-100 text-cyan-800'    },
+  snow:      { label: 'Snow',      cls: 'bg-slate-100 text-slate-700'  },
+};
+
+function WeatherBadge({ battle }: { battle: BattleState }) {
+  if (!battle.weather) return null;
+  const cfg = WEATHER_CONFIG[battle.weather];
+  if (!cfg) return <span className="text-sm text-muted-foreground">Weather: {battle.weather}</span>;
+  const turns = battle.weatherTurnsRemaining !== null ? ` · ${battle.weatherTurnsRemaining}t` : '';
+  return (
+    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${cfg.cls}`}>
+      {cfg.label}{turns}
+    </span>
+  );
+}
+
 function apiError(err: unknown, fallback: string): string {
   if (
     err &&
@@ -205,6 +227,9 @@ export default function BattlePage() {
   const [npcParties,          setNpcParties]          = useState<Record<string, NpcPartyPokemon[]>>({});
   const [partyLoading,        setPartyLoading]        = useState<string | null>(null);
   const [expandedSendOut,     setExpandedSendOut]     = useState<string | null>(null);
+  const [weatherInput,        setWeatherInput]        = useState('');
+  const [weatherTurns,        setWeatherTurns]        = useState('');
+  const [weatherActionError,  setWeatherActionError]  = useState('');
 
   // Polling loop — fetches full battle state every 3 seconds
   useEffect(() => {
@@ -326,6 +351,10 @@ export default function BattlePage() {
       ?.activePokemonInfo?.name ?? 'NPC';
   })();
 
+  const isNoTargetMove = currentTargetEntry
+    ? (battle?.noTargetMoveIds ?? []).includes(currentTargetEntry.moveId)
+    : false;
+
   // Valid targets the current actor can choose from (opposing side, active and alive)
   const opposingTargets: ActivePokemonInfo[] = (() => {
     if (!currentTargetEntry || !battle) return [];
@@ -437,6 +466,42 @@ export default function BattlePage() {
     }
   }
 
+  async function handleSetWeather() {
+    if (!id || submitting) return;
+    setSubmitting(true);
+    setWeatherActionError('');
+    try {
+      const weather = weatherInput || null;
+      const turnsRemaining = weatherTurns ? parseInt(weatherTurns, 10) : null;
+      await axios.post(
+        `${API}/api/battles/${id}/weather`,
+        { weather, turnsRemaining },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setWeatherInput('');
+      setWeatherTurns('');
+    } catch (err: unknown) {
+      setWeatherActionError(apiError(err, 'Failed to set weather.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleNoTargetMove() {
+    if (!id || submitting) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(`${API}/api/battles/${id}/submit-target`, { targets: [] }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to submit move.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function handleSubmitTarget() {
     if (!id || selectedTargets.length === 0) return;
     setSubmitting(true);
@@ -515,7 +580,12 @@ export default function BattlePage() {
             {battle.playerPokemonLimit !== null && (
               <p>Pokémon limit per player: {battle.playerPokemonLimit}</p>
             )}
-            {battle.weather && <p>Weather: {battle.weather}</p>}
+            {battle.weather && (
+              <div className="flex items-center gap-2">
+                <span className="text-muted-foreground">Weather:</span>
+                <WeatherBadge battle={battle} />
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -768,62 +838,72 @@ export default function BattlePage() {
                     <span className="font-medium text-foreground">
                       {formatMove(currentTargetEntry.moveId)}
                     </span>
-                    {' '}— select one or more targets below.
+                    {isNoTargetMove ? '.' : ' — select one or more targets below.'}
                   </p>
 
-                  {opposingTargets.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">No valid targets available.</p>
-                  ) : (
-                    <div className="flex flex-col gap-2">
-                      {opposingTargets.map(info => {
-                        const selected = selectedTargets.includes(info._id);
-                        return (
-                          <button
-                            key={info._id}
-                            onClick={() =>
-                              setSelectedTargets(prev =>
-                                prev.includes(info._id)
-                                  ? prev.filter(t => t !== info._id)
-                                  : [...prev, info._id]
-                              )
-                            }
-                            className={[
-                              'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                              selected
-                                ? 'border-primary bg-primary/10 font-medium'
-                                : 'hover:bg-accent cursor-pointer',
-                            ].join(' ')}
-                          >
-                            <span>{info.name}</span>
-                            <span className="flex items-center gap-2">
-                              <span className="text-muted-foreground text-xs">
-                                HP {info.currentHp}{info.maxHp != null ? `/${info.maxHp}` : ''}
+                  {!isNoTargetMove && (
+                    opposingTargets.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">No valid targets available.</p>
+                    ) : (
+                      <div className="flex flex-col gap-2">
+                        {opposingTargets.map(info => {
+                          const selected = selectedTargets.includes(info._id);
+                          return (
+                            <button
+                              key={info._id}
+                              onClick={() =>
+                                setSelectedTargets(prev =>
+                                  prev.includes(info._id)
+                                    ? prev.filter(t => t !== info._id)
+                                    : [...prev, info._id]
+                                )
+                              }
+                              className={[
+                                'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                selected
+                                  ? 'border-primary bg-primary/10 font-medium'
+                                  : 'hover:bg-accent cursor-pointer',
+                              ].join(' ')}
+                            >
+                              <span>{info.name}</span>
+                              <span className="flex items-center gap-2">
+                                <span className="text-muted-foreground text-xs">
+                                  HP {info.currentHp}{info.maxHp != null ? `/${info.maxHp}` : ''}
+                                </span>
+                                <StatusBadge info={info} />
                               </span>
-                              <StatusBadge info={info} />
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )
                   )}
 
                   {actionError && <p className="text-sm text-destructive">{actionError}</p>}
 
-                  <Button
-                    onClick={handleSubmitTarget}
-                    disabled={selectedTargets.length === 0 || submitting}
-                    className="w-full min-h-11"
-                  >
-                    {submitting
-                      ? 'Confirming…'
-                      : `Confirm Target${selectedTargets.length !== 1 ? 's' : ''}`}
-                  </Button>
+                  {isNoTargetMove ? (
+                    <Button
+                      onClick={handleNoTargetMove}
+                      disabled={submitting}
+                      className="w-full min-h-11"
+                    >
+                      {submitting ? 'Confirming…' : `Use ${formatMove(currentTargetEntry.moveId)}`}
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleSubmitTarget}
+                      disabled={selectedTargets.length === 0 || submitting}
+                      className="w-full min-h-11"
+                    >
+                      {submitting ? 'Confirming…' : `Confirm Target${selectedTargets.length !== 1 ? 's' : ''}`}
+                    </Button>
+                  )}
                 </>
               ) : (
                 <p className="text-sm text-center text-muted-foreground py-2">
                   Waiting for{' '}
                   <span className="font-medium text-foreground">{targetActorDisplayName}</span>
-                  {' '}to pick targets…
+                  {isNoTargetMove ? ' to use their move…' : ' to pick targets…'}
                 </p>
               )}
             </CardContent>
@@ -850,6 +930,40 @@ export default function BattlePage() {
                   >
                     {submitting ? 'Advancing…' : 'Advance to Next Round'}
                   </Button>
+                  <div className="flex flex-col gap-2 pt-2 border-t">
+                    <p className="text-sm text-muted-foreground">Set weather for next round:</p>
+                    <div className="flex gap-2">
+                      <select
+                        value={weatherInput}
+                        onChange={e => setWeatherInput(e.target.value)}
+                        className="flex-1 rounded-md border px-3 py-2 text-sm bg-background"
+                      >
+                        <option value="">— clear —</option>
+                        <option value="rain">Rain</option>
+                        <option value="sun">Harsh Sun</option>
+                        <option value="sandstorm">Sandstorm</option>
+                        <option value="hail">Hail</option>
+                        <option value="snow">Snow</option>
+                      </select>
+                      <input
+                        type="number"
+                        min={1}
+                        placeholder="turns"
+                        value={weatherTurns}
+                        onChange={e => setWeatherTurns(e.target.value)}
+                        className="w-20 rounded-md border px-3 py-2 text-sm bg-background"
+                      />
+                      <Button
+                        onClick={handleSetWeather}
+                        disabled={submitting}
+                        variant="secondary"
+                        className="min-h-11"
+                      >
+                        Set
+                      </Button>
+                    </div>
+                    {weatherActionError && <p className="text-sm text-destructive">{weatherActionError}</p>}
+                  </div>
                 </>
               ) : (
                 <p className="text-sm text-center text-muted-foreground py-2">

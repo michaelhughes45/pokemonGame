@@ -162,6 +162,44 @@ const STATUS_MOVES: Record<string, StatusMoveEffect> = {
   'water-pulse':   { status: 'confusion', chance: 0.2 },
 };
 
+// Moves that change field weather.  These have no target — they affect the whole
+// battle.  The target the player submits is ignored during resolution.
+type WeatherMoveEffect = {
+  weather: NonNullable<IBattle['weather']>;
+  startMessage: string;
+};
+const WEATHER_MOVES: Record<string, WeatherMoveEffect> = {
+  'sunny-day':        { weather: 'sun',       startMessage: 'The sunlight turned harsh!' },
+  'rain-dance':       { weather: 'rain',       startMessage: 'It started to rain!' },
+  'sandstorm':        { weather: 'sandstorm',  startMessage: 'A sandstorm kicked up!' },
+  'hail':             { weather: 'hail',       startMessage: 'It started to hail!' },
+  'snowscape':        { weather: 'snow',       startMessage: 'It started to snow!' },
+  'chilly-reception': { weather: 'snow',       startMessage: 'It started to snow!' },
+};
+
+// Moves that target only the user (stat boosts, recovery, etc.).
+// These require no enemy target — submitting an empty targets array is valid.
+const SELF_TARGETING_MOVES = new Set([
+  // Stat boosts
+  'swords-dance', 'calm-mind', 'nasty-plot', 'bulk-up', 'iron-defense',
+  'amnesia', 'agility', 'barrier', 'cosmic-power', 'growth', 'harden',
+  'withdraw', 'defense-curl', 'coil', 'quiver-dance', 'shift-gear',
+  'dragon-dance', 'shell-smash', 'geomancy', 'rock-polish', 'autotomize',
+  'charge', 'focus-energy',
+  // Recovery
+  'recover', 'soft-boiled', 'roost', 'moonlight', 'morning-sun',
+  'synthesis', 'rest', 'slack-off', 'milk-drink', 'heal-order', 'shores-up',
+  // Other self-targeting
+  'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
+]);
+
+// All move IDs that require no enemy target selection.
+// Sent to the client via the state endpoint so the UI can skip the target picker.
+const NO_TARGET_MOVE_IDS = new Set([
+  ...Object.keys(WEATHER_MOVES),
+  ...SELF_TARGETING_MOVES,
+]);
+
 // Checks whether a Pokémon is blocked by its status condition this turn.
 // Handles the sleep counter (decrement/wake-up), freeze thaw roll (20%),
 // and paralysis skip roll (25%). Applies any state changes directly to the DB.
@@ -280,7 +318,7 @@ async function checkConfusion(
     );
   }
 
-  const events: string[] = [];
+  const events: string[] = [`${displayName} is confused...`];
 
   // 50% self-hit (skip if cache is missing — can't calculate damage without base stats)
   if (Math.random() < 0.5 && cache) {
@@ -389,7 +427,7 @@ async function resolveMove(
 
   // Status moves and unrecognised moves deal no damage
   if (!moveData || !moveData.power) {
-    const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) ? ' (effect not yet implemented)' : '';
+    const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) && !(moveId in WEATHER_MOVES) && !SELF_TARGETING_MOVES.has(moveId) ? ' (effect not yet implemented)' : '';
     return {
       damage: 0,
       events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`],
@@ -452,9 +490,8 @@ async function resolveMove(
   };
 }
 
-// Apply end-of-round effects (burn/poison/toxic damage) and reset the battle
-// to move_submission for the next round.  Called after the last actor in the
-// turnQueue resolves their move.
+// Apply end-of-round effects (burn/poison/toxic damage, weather damage,
+// weather countdown) and park the battle at end_of_round.
 async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void> {
   const allActiveIds = [
     ...battle.playerSide.map(e => e.activePokemonId),
@@ -469,12 +506,15 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 
     const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
     const caches     = speciesIds.length > 0
-      ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats').lean()
+      ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats types').lean()
       : [];
     const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
 
-    const statusEvents: string[] = [];
+    // Track running HP so stacked end-of-round damage sources don't overwrite each other.
+    const runningHp = new Map(activePokemons.map(p => [p._id.toString(), p.currentHp]));
+    const allEvents: string[] = [];
 
+    // --- Status damage (burn / poison / toxic) ---
     for (const poke of activePokemons) {
       if (
         poke.statusCondition !== 'burn' &&
@@ -485,7 +525,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       const cache = cacheMap.get(poke.speciesId);
       if (!cache) continue;
 
-      const maxHp   = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
+      const maxHp    = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
       const pokeName = poke.nickname ?? slugToDisplayName(cache.name as string);
 
       // Toxic damage scales each round: counter/16 × maxHp (counter starts at 1, caps at 15).
@@ -499,25 +539,79 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       } else {
         damage = Math.max(1, Math.floor(maxHp / 8));
       }
-      const newHp = Math.max(0, poke.currentHp - damage);
+
+      const currentHp = runningHp.get(poke._id.toString()) ?? poke.currentHp;
+      const newHp     = Math.max(0, currentHp - damage);
       update.currentHp = newHp;
+      runningHp.set(poke._id.toString(), newHp);
 
       await Pokemon.updateOne({ _id: poke._id }, { $set: update });
-      statusEvents.push(
-        `${pokeName} is hurt by its ${poke.statusCondition}! (${damage} damage, ${newHp} HP remaining)`,
-      );
+      allEvents.push(`${pokeName} is hurt by its ${poke.statusCondition}! (${damage} damage, ${newHp} HP remaining)`);
     }
 
-    if (statusEvents.length > 0) {
+    // --- Weather damage (sandstorm / hail) ---
+    if (battle.weather === 'sandstorm' || battle.weather === 'hail') {
+      const SANDSTORM_IMMUNE = new Set(['rock', 'steel', 'ground']);
+      const HAIL_IMMUNE      = new Set(['ice']);
+      const immuneSet        = battle.weather === 'sandstorm' ? SANDSTORM_IMMUNE : HAIL_IMMUNE;
+
+      for (const poke of activePokemons) {
+        const cache = cacheMap.get(poke.speciesId);
+        if (!cache) continue;
+
+        const pokeTypes = (cache.types as string[]) ?? [];
+        if (pokeTypes.some(t => immuneSet.has(t))) continue;
+
+        const maxHp     = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
+        const damage    = Math.max(1, Math.floor(maxHp / 16));
+        const currentHp = runningHp.get(poke._id.toString()) ?? poke.currentHp;
+        const newHp     = Math.max(0, currentHp - damage);
+        const pokeName  = poke.nickname ?? slugToDisplayName(cache.name as string);
+
+        runningHp.set(poke._id.toString(), newHp);
+        await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+
+        const verb = battle.weather === 'sandstorm' ? 'buffeted by the sandstorm' : 'pelted by hail';
+        allEvents.push(`${pokeName} is ${verb}! (${damage} damage, ${newHp} HP remaining)`);
+      }
+    }
+
+    if (allEvents.length > 0) {
       let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
       if (!logEntry) {
         battle.turnLog.push({ turn: battle.turnNumber, events: [] });
         logEntry = battle.turnLog[battle.turnLog.length - 1];
       }
-      for (const event of statusEvents) {
-        logEntry.events.push(event);
-      }
+      for (const event of allEvents) logEntry.events.push(event);
       battle.markModified('turnLog');
+    }
+  }
+
+  // --- Weather countdown ---
+  if (battle.weatherTurnsRemaining !== null) {
+    const WEATHER_END: Record<string, string> = {
+      rain: 'The rain stopped.',
+      sun: 'The harsh sunlight faded.',
+      sandstorm: 'The sandstorm subsided.',
+      hail: 'The hail stopped.',
+      snow: 'The snow stopped.',
+    };
+
+    const newTurns = battle.weatherTurnsRemaining - 1;
+    if (newTurns <= 0) {
+      const endMessage = battle.weather ? WEATHER_END[battle.weather] : 'The weather cleared.';
+      battle.weather               = null;
+      battle.weatherTurnsRemaining = null;
+
+      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+      if (!logEntry) {
+        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+        logEntry = battle.turnLog[battle.turnLog.length - 1];
+      }
+      logEntry.events.push(endMessage);
+      battle.markModified('turnLog');
+    } else {
+      battle.weatherTurnsRemaining = newTurns;
     }
   }
 
@@ -1068,8 +1162,8 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
     return;
   }
 
-  if (!Array.isArray(targets) || targets.length === 0) {
-    res.status(400).json({ data: null, error: 'targets must be a non-empty array of Pokémon IDs' });
+  if (!Array.isArray(targets)) {
+    res.status(400).json({ data: null, error: 'targets must be an array of Pokémon IDs' });
     return;
   }
 
@@ -1113,6 +1207,13 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
     }
   }
 
+  // No-target moves (weather, self-buff, recovery) submit an empty array — that's valid.
+  // Any other move must have at least one target.
+  if (targets.length === 0 && !NO_TARGET_MOVE_IDS.has(currentEntry.moveId)) {
+    res.status(400).json({ data: null, error: 'targets must be a non-empty array of Pokémon IDs' });
+    return;
+  }
+
   // Opposing side: players target enemies; NPCs target players
   const isPlayerActor = currentEntry.actorType === 'player';
   const validTargetIds = isPlayerActor
@@ -1150,27 +1251,61 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
   const moveEvents: string[] = [...confusionEvents];
 
   if (!hitSelf) {
-    const moveEffect = STATUS_MOVES[currentEntry.moveId];
+    const moveEffect   = STATUS_MOVES[currentEntry.moveId];
+    const weatherEffect = WEATHER_MOVES[currentEntry.moveId];
 
-    for (const targetId of targets) {
-      const { damage, events } = await resolveMove(
-        currentEntry.activePokemonId,
-        new mongoose.Types.ObjectId(targetId),
-        currentEntry.moveId,
-        battle.weather,
-      );
-      moveEvents.push(...events);
+    if (weatherEffect) {
+      // Weather move: set field weather, no damage, no target needed
+      const attacker = await Pokemon.findById(currentEntry.activePokemonId, 'nickname speciesId').lean();
+      const atkCache  = attacker
+        ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name').lean()
+        : null;
+      const attackerName = attacker?.nickname ?? (atkCache ? slugToDisplayName(atkCache.name as string) : 'Pokémon');
+      const moveName     = slugToDisplayName(currentEntry.moveId);
 
-      if (damage > 0) {
-        const currentHp = targetHpMap.get(targetId) ?? 0;
-        const newHp     = Math.max(0, currentHp - damage);
-        await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+      if (battle.weather === weatherEffect.weather) {
+        // Same weather already active — no effect, no counter reset
+        moveEvents.push(`${attackerName} used ${moveName}! But it had no effect...`);
+      } else if (battle.weather) {
+        // Different weather active — cancel both
+        battle.weather               = null;
+        battle.weatherTurnsRemaining = null;
+        moveEvents.push(`${attackerName} used ${moveName}! The weather cleared!`);
+      } else {
+        // No weather — start new weather
+        battle.weather               = weatherEffect.weather;
+        battle.weatherTurnsRemaining = 5;
+        moveEvents.push(`${attackerName} used ${moveName}! ${weatherEffect.startMessage}`);
       }
+    } else if (SELF_TARGETING_MOVES.has(currentEntry.moveId)) {
+      // Self-targeting move: log usage only (stat changes / recovery not yet implemented)
+      const attacker = await Pokemon.findById(currentEntry.activePokemonId, 'nickname speciesId').lean();
+      const atkCache  = attacker
+        ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name').lean()
+        : null;
+      const attackerName = attacker?.nickname ?? (atkCache ? slugToDisplayName(atkCache.name as string) : 'Pokémon');
+      moveEvents.push(`${attackerName} used ${slugToDisplayName(currentEntry.moveId)}!`);
+    } else {
+      for (const targetId of targets) {
+        const { damage, events } = await resolveMove(
+          currentEntry.activePokemonId,
+          new mongoose.Types.ObjectId(targetId),
+          currentEntry.moveId,
+          battle.weather,
+        );
+        moveEvents.push(...events);
 
-      // Secondary status effect — rolled per target so multi-target moves work correctly
-      if (moveEffect && Math.random() < moveEffect.chance) {
-        const statusEvents = await applyStatusEffect(new mongoose.Types.ObjectId(targetId), moveEffect);
-        moveEvents.push(...statusEvents);
+        if (damage > 0) {
+          const currentHp = targetHpMap.get(targetId) ?? 0;
+          const newHp     = Math.max(0, currentHp - damage);
+          await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+        }
+
+        // Secondary status effect — rolled per target so multi-target moves work correctly
+        if (moveEffect && Math.random() < moveEffect.chance) {
+          const statusEvents = await applyStatusEffect(new mongoose.Types.ObjectId(targetId), moveEffect);
+          moveEvents.push(...statusEvents);
+        }
       }
     }
 
@@ -1252,6 +1387,77 @@ router.post('/:id/advance-round', async (req: Request, res: Response): Promise<v
   await battle.save();
 
   res.json({ data: { turnNumber: battle.turnNumber, phase: battle.phase }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/battles/:id/weather
+// DM only — manually set or clear weather on an active battle.
+// Body: { weather: 'rain'|'sun'|'sandstorm'|'hail'|'snow'|null, turnsRemaining?: number|null }
+// turnsRemaining null means indefinite (no countdown).
+// ---------------------------------------------------------------------------
+router.post('/:id/weather', async (req: Request, res: Response): Promise<void> => {
+  const { role } = req.user!;
+  if (role !== 'dm' && role !== 'admin') {
+    res.status(403).json({ data: null, error: 'DM only' });
+    return;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    res.status(400).json({ data: null, error: 'Invalid battle ID' });
+    return;
+  }
+
+  const battle = await Battle.findById(req.params.id);
+  if (!battle) {
+    res.status(404).json({ data: null, error: 'Battle not found' });
+    return;
+  }
+  if (battle.status !== 'active') {
+    res.status(400).json({ data: null, error: 'Battle is not active' });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign || campaign._id.toString() !== battle.campaignId.toString()) {
+    res.status(403).json({ data: null, error: 'Not your campaign' });
+    return;
+  }
+
+  const { weather, turnsRemaining = null } = req.body as {
+    weather: IBattle['weather'];
+    turnsRemaining?: number | null;
+  };
+
+  const validWeathers: Array<IBattle['weather']> = ['rain', 'sun', 'sandstorm', 'hail', 'snow', null];
+  if (!validWeathers.includes(weather)) {
+    res.status(400).json({ data: null, error: 'Invalid weather value' });
+    return;
+  }
+
+  const WEATHER_DISPLAY: Record<string, string> = {
+    rain: 'heavy rain', sun: 'harsh sunlight',
+    sandstorm: 'a sandstorm', hail: 'hail', snow: 'snow',
+  };
+
+  battle.weather               = weather;
+  battle.weatherTurnsRemaining = weather ? turnsRemaining : null;
+
+  const logMessage = weather
+    ? `The DM set the weather to ${WEATHER_DISPLAY[weather]}!`
+    : 'The weather was cleared by the DM.';
+
+  let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+  if (!logEntry) {
+    battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+    logEntry = battle.turnLog[battle.turnLog.length - 1];
+  }
+  logEntry.events.push(logMessage);
+  battle.markModified('turnLog');
+
+  battle.lastUpdatedAt = new Date();
+  await battle.save();
+
+  res.json({ data: { weather: battle.weather, weatherTurnsRemaining: battle.weatherTurnsRemaining }, error: null });
 });
 
 // ---------------------------------------------------------------------------
@@ -1380,8 +1586,9 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
   res.json({
     data: {
       ...battle,
-      playerSide: playerSideWithNames,
-      enemySide:  enemySideWithInfo,
+      playerSide:       playerSideWithNames,
+      enemySide:        enemySideWithInfo,
+      noTargetMoveIds:  [...NO_TARGET_MOVE_IDS],
     },
     error: null,
   });
