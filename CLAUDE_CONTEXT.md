@@ -368,6 +368,11 @@ pokemonGame/
 - Move classification tables in `battles.ts`: `STATUS_MOVES` (status-inflicting), `WEATHER_MOVES` (field weather), `SELF_TARGETING_MOVES` (no enemy target), `NO_TARGET_MOVE_IDS` (union of weather + self — sent to client via state endpoint)
 - `applyEndOfRound` uses a `runningHp` map so stacked damage sources (e.g. burn + sandstorm on the same Pokémon) each read from the updated HP rather than the original snapshot
 - `checkConfusion` always emits a leading `"[Name] is confused..."` event before the outcome (self-hit or move proceeds), so the turn log narrates the full sequence
+- Item actions in battle use the same `POST /api/battles/:id/submit-move` endpoint with `{ actionType: 'item', itemId, targetPokemonId }` — the backend branches on `actionType`
+- Item actions are pre-sorted before all moves (`actionType === 'item'` wins the sort in `checkAndAdvance`) matching main-game trainer-acts-first priority
+- Item actions auto-resolve in `autoSkipBlockedActors` without client input (target is pre-filled at submission time); `BATTLE_ITEM_EFFECTS` table in `battles.ts` mirrors the healing/status_cure entries from `items.ts`
+- Items are only deducted from the bag on a successful use (wrong-status items log "no effect" but are not consumed)
+- Volatile statuses (confusion) are cleared when a Pokémon is swapped out — `send-out` and `dm-send-out` wipe `volatileStatus: []` on the outgoing Pokémon. Battle-end clearing goes in milestone 3.11
 
 ---
 
@@ -393,7 +398,7 @@ pokemonGame/
 - [x] **3.6** Turn log + DM advance — events written to turnLog on each resolution; Battle Log card visible to all (most recent turn at top, older turns dimmed); end_of_round card shows DM an "Advance to Next Round" button and players a waiting message; POST /api/battles/:id/advance-round (DM only) clears turnQueue, increments turnNumber, resets to move_submission
 - [x] **3.7** Status conditions — `STATUS_MOVES` table (~60 moves), `applyStatusEffect` with type immunity checks, `checkStatusBlock` (paralysis 25% skip, freeze 20% thaw, sleep counter-based Gen 5+ wake-on-wake-turn), `checkConfusion` (50% self-hit, typeless physical formula), `autoSkipBlockedActors` loop auto-resolves blocked actors without client input, toxic scales `counter/16 × maxHp` each round, burn/poison flat 1/8; `statusCounter` field added to Pokemon model; StatusBadge UI (BRN/PAR/SLP/FRZ/PSN/TOX/CNF) shown on move submission, targeting, and side cards; status blocking applies only to move execution (not full turn) to preserve future item-use hook; `checkConfusion` emits leading "is confused..." narration before outcome
 - [x] **3.8** Weather — `weatherTurnsRemaining` field on Battle; `WEATHER_MOVES` table (sunny-day, rain-dance, sandstorm, hail, snowscape, chilly-reception) sets weather for 5 turns during turn resolution; same weather = no effect, different weather = both cancel; DM manual override via POST /api/battles/:id/weather (indefinite or countdown); sandstorm/hail deal 1/16 maxHp end-of-round to non-immune types (Rock/Steel/Ground immune to sand, Ice immune to hail); weather countdown auto-clears with flavor message; `SELF_TARGETING_MOVES` table covers stat boosts + recovery moves — no enemy target required, "Use [Move]" button shown instead of target picker; `noTargetMoveIds` returned in state endpoint; `runningHp` map fixes stacked end-of-round damage bug; WeatherBadge UI with colored pill + turn countdown
-- [ ] **3.9** Items in battle — healing + status cure usable as turn action
+- [x] **3.9** Items in battle — `actionType: 'move' | 'item'` added to TurnQueueEntry; submit-move accepts item actions `{ actionType: 'item', itemId, targetPokemonId }`; item actions sort before all moves (trainer-acts-first priority); `BATTLE_ITEM_EFFECTS` table + `resolveItemAction` helper in battles.ts; items auto-resolve in `autoSkipBlockedActors`; bag deducted only on successful use; confusion cleared on swap-out (send-out + dm-send-out); Move/Item tab UI in BattlePage with two-step item → party-target picker
 - [ ] **3.10** Switching — switch active Pokémon, ability triggers on entry; enforce playerPokemonLimit (track usedPokemonIds, block send-out if limit reached and all used Pokémon still alive)
 - [ ] **3.11** Faint & battle end — faint prompt, EXP distributed to full party (Gen 6+ Exp. Share), EV award deferred ★ first playable game
 - [ ] **4.1** Wild battles & catch — catch formula, Pokémon lands in PC with zeroed EVs
@@ -413,9 +418,9 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 3.9 — Items in battle (healing + status cure usable as turn action)
-- **Just finished:** 3.8 — Weather. Tagged v3.8.
-- **Known issues / blockers:** None
+- **Starting:** 3.10 — Switching (switch active Pokémon during battle; enforce playerPokemonLimit)
+- **Just finished:** 3.9 — Items in battle. Tagged v3.9.
+- **Known issues / blockers:** Volatile status (confusion) clear on battle end deferred to 3.11
 
 ---
 

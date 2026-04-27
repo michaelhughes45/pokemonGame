@@ -1,9 +1,10 @@
 import { Router, Request, Response } from 'express';
 import mongoose, { HydratedDocument } from 'mongoose';
-import { Battle, IBattle } from '../models/Battle';
+import { Battle, IBattle, TurnQueueEntry } from '../models/Battle';
 import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
 import { Pokemon } from '../models/Pokemon';
+import { Item } from '../models/Item';
 import { PokedexCache } from '../models/PokedexCache';
 import { Npc } from '../models/Npc';
 import { computeStats, BaseStats } from '../lib/statCalc';
@@ -45,8 +46,14 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
     return { entry, speed };
   });
 
-  // Highest speed goes first; ties keep submission order (stable sort)
-  withSpeed.sort((a, b) => b.speed - a.speed);
+  // Item actions always go before moves (trainer acts first, like the main games).
+  // Within the same tier, highest Speed goes first; ties keep submission order.
+  withSpeed.sort((a, b) => {
+    const aItem = a.entry.actionType === 'item' ? 1 : 0;
+    const bItem = b.entry.actionType === 'item' ? 1 : 0;
+    if (aItem !== bItem) return bItem - aItem;
+    return b.speed - a.speed;
+  });
 
   // battle.set() is the proper Mongoose API for replacing a field — it wraps
   // the value in a DocumentArray and marks the path modified automatically.
@@ -200,6 +207,42 @@ const NO_TARGET_MOVE_IDS = new Set([
   ...SELF_TARGETING_MOVES,
 ]);
 
+// Item effects for healing and status_cure items usable in battle.
+// Mirrors the relevant entries in items.ts ITEM_EFFECTS.
+type BattleItemEffect =
+  | { kind: 'hp_flat';      amount: number }
+  | { kind: 'hp_full' }
+  | { kind: 'hp_full_cure' }
+  | { kind: 'revive';       amount: 'half' | 'full' }
+  | { kind: 'status_cure';  cures: string[] | 'all' };
+
+const BATTLE_ITEM_EFFECTS: Record<string, BattleItemEffect> = {
+  'potion':         { kind: 'hp_flat',     amount: 20 },
+  'super-potion':   { kind: 'hp_flat',     amount: 60 },
+  'hyper-potion':   { kind: 'hp_flat',     amount: 120 },
+  'max-potion':     { kind: 'hp_full' },
+  'full-restore':   { kind: 'hp_full_cure' },
+  'revive':         { kind: 'revive',      amount: 'half' },
+  'max-revive':     { kind: 'revive',      amount: 'full' },
+  'oran-berry':     { kind: 'hp_flat',     amount: 10 },
+  'sitrus-berry':   { kind: 'hp_flat',     amount: 25 },
+  'antidote':       { kind: 'status_cure', cures: ['poison', 'toxic'] },
+  'parlyz-heal':    { kind: 'status_cure', cures: ['paralysis'] },
+  'burn-heal':      { kind: 'status_cure', cures: ['burn'] },
+  'ice-heal':       { kind: 'status_cure', cures: ['freeze'] },
+  'awakening':      { kind: 'status_cure', cures: ['sleep'] },
+  'full-heal':      { kind: 'status_cure', cures: 'all' },
+  'cheri-berry':    { kind: 'status_cure', cures: ['paralysis'] },
+  'chesto-berry':   { kind: 'status_cure', cures: ['sleep'] },
+  'pecha-berry':    { kind: 'status_cure', cures: ['poison', 'toxic'] },
+  'rawst-berry':    { kind: 'status_cure', cures: ['burn'] },
+  'aspear-berry':   { kind: 'status_cure', cures: ['freeze'] },
+  'lum-berry':      { kind: 'status_cure', cures: 'all' },
+  'poke-flute':     { kind: 'status_cure', cures: ['sleep'] },
+  'blue-flute':     { kind: 'status_cure', cures: ['sleep'] },
+  'green-flute':    { kind: 'status_cure', cures: ['sleep'] },
+};
+
 // Checks whether a Pokémon is blocked by its status condition this turn.
 // Handles the sleep counter (decrement/wake-up), freeze thaw roll (20%),
 // and paralysis skip roll (25%). Applies any state changes directly to the DB.
@@ -238,6 +281,127 @@ async function checkStatusBlock(
   return { blocked: false, events: [] };
 }
 
+// Applies a battle item action (already submitted with target pre-filled).
+// Looks up the effect, updates the target Pokémon's HP/status, deducts the item
+// from the bag (only on a successful use), and returns turn-log event strings.
+async function resolveItemAction(entry: TurnQueueEntry): Promise<string[]> {
+  const events: string[] = [];
+  const { itemId, targets, actorId } = entry;
+
+  if (!itemId || targets.length === 0) return events;
+
+  const effect = BATTLE_ITEM_EFFECTS[itemId];
+  if (!effect) return events;
+
+  const targetId = targets[0];
+
+  const pokemon = await Pokemon.findById(
+    targetId,
+    'nickname speciesId level nature currentHp statusCondition',
+  ).lean();
+  if (!pokemon) return events;
+
+  const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId }, 'name baseStats').lean();
+  const displayName = pokemon.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+  const maxHp = cache
+    ? computeStats(cache.baseStats as BaseStats, pokemon.level, pokemon.nature).hp
+    : pokemon.currentHp;
+
+  const user = await User.findById(actorId, 'username').lean();
+  const userName = user?.username ?? 'Trainer';
+  const itemName = slugToDisplayName(itemId);
+
+  let wasUsed = false;
+
+  if (effect.kind === 'hp_flat') {
+    if (pokemon.currentHp <= 0) {
+      events.push(`${userName} tried to use ${itemName} on ${displayName}, but it had fainted!`);
+    } else if (pokemon.currentHp >= maxHp) {
+      events.push(`${userName} used ${itemName} on ${displayName}, but its HP was already full!`);
+    } else {
+      const restored = Math.min(effect.amount, maxHp - pokemon.currentHp);
+      await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: pokemon.currentHp + restored } });
+      events.push(`${userName} used ${itemName} on ${displayName}! Restored ${restored} HP.`);
+      wasUsed = true;
+    }
+  } else if (effect.kind === 'hp_full') {
+    if (pokemon.currentHp <= 0) {
+      events.push(`${userName} tried to use ${itemName} on ${displayName}, but it had fainted!`);
+    } else if (pokemon.currentHp >= maxHp) {
+      events.push(`${userName} used ${itemName} on ${displayName}, but its HP was already full!`);
+    } else {
+      await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: maxHp } });
+      events.push(`${userName} used ${itemName} on ${displayName}! HP fully restored.`);
+      wasUsed = true;
+    }
+  } else if (effect.kind === 'hp_full_cure') {
+    if (pokemon.currentHp <= 0) {
+      events.push(`${userName} tried to use ${itemName} on ${displayName}, but it had fainted!`);
+    } else {
+      const updates: Partial<{ currentHp: number; statusCondition: null; statusCounter: null }> = {};
+      const parts: string[] = [];
+      if (pokemon.currentHp < maxHp) {
+        updates.currentHp = maxHp;
+        parts.push('HP fully restored');
+      }
+      if (pokemon.statusCondition) {
+        updates.statusCondition = null;
+        updates.statusCounter   = null;
+        parts.push('status cleared');
+      }
+      if (parts.length === 0) {
+        events.push(`${userName} used ${itemName} on ${displayName}, but there was nothing to restore!`);
+      } else {
+        await Pokemon.updateOne({ _id: targetId }, { $set: updates });
+        events.push(`${userName} used ${itemName} on ${displayName}! ${parts.join(', ')}.`);
+        wasUsed = true;
+      }
+    }
+  } else if (effect.kind === 'revive') {
+    if (pokemon.currentHp > 0) {
+      events.push(`${userName} tried to use ${itemName} on ${displayName}, but it hadn't fainted!`);
+    } else {
+      const restoreHp = effect.amount === 'full' ? maxHp : Math.floor(maxHp / 2);
+      await Pokemon.updateOne(
+        { _id: targetId },
+        { $set: { currentHp: restoreHp, statusCondition: null, statusCounter: null } },
+      );
+      events.push(`${userName} used ${itemName}! ${displayName} was revived with ${restoreHp} HP.`);
+      wasUsed = true;
+    }
+  } else if (effect.kind === 'status_cure') {
+    if (!pokemon.statusCondition) {
+      events.push(`${userName} used ${itemName} on ${displayName}, but it had no status condition!`);
+    } else {
+      const cures = effect.cures;
+      const canCure = cures === 'all' || (cures as string[]).includes(pokemon.statusCondition);
+      if (!canCure) {
+        events.push(`${userName} used ${itemName} on ${displayName}, but it had no effect!`);
+      } else {
+        await Pokemon.updateOne(
+          { _id: targetId },
+          { $set: { statusCondition: null, statusCounter: null } },
+        );
+        events.push(`${userName} used ${itemName} on ${displayName}! ${pokemon.statusCondition} was cured.`);
+        wasUsed = true;
+      }
+    }
+  }
+
+  if (wasUsed) {
+    const item = await Item.findOne({ ownerId: actorId, itemId });
+    if (item) {
+      if (item.quantity <= 1) {
+        await Item.deleteOne({ _id: item._id });
+      } else {
+        await Item.updateOne({ _id: item._id }, { $inc: { quantity: -1 } });
+      }
+    }
+  }
+
+  return events;
+}
+
 // Starting from battle.currentTargetIndex, auto-skips consecutive actors whose
 // move is blocked by sleep, freeze, or paralysis. Stops at the first actor that
 // can move (or when the queue is exhausted, in which case applyEndOfRound fires).
@@ -247,6 +411,23 @@ async function checkStatusBlock(
 async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise<void> {
   while (battle.currentTargetIndex < battle.turnQueue.length) {
     const entry = battle.turnQueue[battle.currentTargetIndex];
+
+    // Item actions are fully specified at submission time — auto-resolve without client input.
+    if (entry.actionType === 'item') {
+      const itemEvents = await resolveItemAction(entry as unknown as TurnQueueEntry);
+      if (itemEvents.length > 0) {
+        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+        if (!logEntry) {
+          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+          logEntry = battle.turnLog[battle.turnLog.length - 1];
+        }
+        for (const ev of itemEvents) logEntry.events.push(ev);
+        battle.markModified('turnLog');
+      }
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      continue;
+    }
 
     const poke = await Pokemon.findById(
       entry.activePokemonId,
@@ -830,6 +1011,12 @@ router.post('/:id/send-out', async (req: Request, res: Response): Promise<void> 
     }
   }
 
+  // Clear volatile statuses (confusion, etc.) on the outgoing Pokémon
+  const outgoingId = playerEntry.activePokemonId;
+  if (outgoingId && outgoingId.toString() !== pokemonId) {
+    await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
+  }
+
   playerEntry.activePokemonId = pokeId;
   if (!alreadyUsed) {
     playerEntry.usedPokemonIds.push(pokeId);
@@ -894,6 +1081,12 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
     return;
   }
 
+  // Clear volatile statuses (confusion, etc.) on the outgoing Pokémon
+  const outgoingNpcId = npcEntry.activePokemonId;
+  if (outgoingNpcId && outgoingNpcId.toString() !== pokemonId) {
+    await Pokemon.updateOne({ _id: outgoingNpcId }, { $set: { volatileStatus: [] } });
+  }
+
   npcEntry.activePokemonId = pokeId;
   battle.lastUpdatedAt     = new Date();
   await battle.save();
@@ -903,22 +1096,24 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
 
 // ---------------------------------------------------------------------------
 // POST /api/battles/:id/submit-move
-// Player — submits their move choice for the current round.
-// Validates that the move is on the active Pokémon and has PP remaining.
-// After adding to turnQueue, calls checkAndAdvance: if all actors have now
-// submitted the phase automatically transitions to 'targeting'.
-// Body: { moveId: string }
+// Player — submits their action for the current round.
+// actionType 'move': body { moveId }
+// actionType 'item': body { actionType: 'item', itemId, targetPokemonId }
+//   Item actions are self-targeted (own party Pokémon) — target is pre-filled
+//   so they skip the enemy targeting picker entirely.
 // ---------------------------------------------------------------------------
 router.post('/:id/submit-move', async (req: Request, res: Response): Promise<void> => {
-  const { moveId } = req.body as { moveId: string };
+  const { actionType = 'move', moveId, itemId, targetPokemonId } =
+    req.body as {
+      actionType?: 'move' | 'item';
+      moveId?: string;
+      itemId?: string;
+      targetPokemonId?: string;
+    };
   const userId = new mongoose.Types.ObjectId(req.user!.userId);
 
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
     res.status(400).json({ data: null, error: 'Invalid battle ID' });
-    return;
-  }
-  if (!moveId) {
-    res.status(400).json({ data: null, error: 'moveId is required' });
     return;
   }
 
@@ -954,6 +1149,59 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
     return;
   }
 
+  // ---- item action ----
+  if (actionType === 'item') {
+    if (!itemId || !targetPokemonId) {
+      res.status(400).json({ data: null, error: 'itemId and targetPokemonId are required for item actions' });
+      return;
+    }
+    if (!mongoose.Types.ObjectId.isValid(targetPokemonId)) {
+      res.status(400).json({ data: null, error: 'Invalid targetPokemonId' });
+      return;
+    }
+
+    const item = await Item.findOne({ ownerId: userId, itemId }).lean();
+    if (!item) {
+      res.status(400).json({ data: null, error: 'Item not found in your bag' });
+      return;
+    }
+    if (item.pocket !== 'healing' && item.pocket !== 'status_cure') {
+      res.status(400).json({ data: null, error: 'That item cannot be used in battle' });
+      return;
+    }
+
+    const targetObjId = new mongoose.Types.ObjectId(targetPokemonId);
+    const targetPokemon = await Pokemon.findOne({ _id: targetObjId, ownerId: userId, isInParty: true }).lean();
+    if (!targetPokemon) {
+      res.status(400).json({ data: null, error: 'Target Pokémon not found in your party' });
+      return;
+    }
+
+    battle.turnQueue.push({
+      actorId:         userId,
+      actorType:       'player',
+      activePokemonId: playerEntry.activePokemonId,
+      actionType:      'item',
+      moveId:          '',
+      itemId,
+      targets:         [targetObjId],
+      resolved:        false,
+    });
+
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    return;
+  }
+
+  // ---- move action ----
+  if (!moveId) {
+    res.status(400).json({ data: null, error: 'moveId is required' });
+    return;
+  }
+
   const pokemon = await Pokemon.findOne({ _id: playerEntry.activePokemonId }).lean();
   if (!pokemon) {
     res.status(404).json({ data: null, error: 'Active Pokémon not found' });
@@ -973,6 +1221,7 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
     actorId:         userId,
     actorType:       'player',
     activePokemonId: playerEntry.activePokemonId,
+    actionType:      'move',
     moveId,
     targets:         [],
     resolved:        false,
@@ -1055,6 +1304,7 @@ router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<
     actorId:         new mongoose.Types.ObjectId(npcId),
     actorType:       'npc',
     activePokemonId: npcEntry.activePokemonId,
+    actionType:      'move',
     moveId,
     targets:         [],
     resolved:        false,

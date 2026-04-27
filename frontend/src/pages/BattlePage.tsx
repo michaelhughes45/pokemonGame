@@ -4,6 +4,7 @@ import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
 
 const API = import.meta.env.VITE_API_URL;
 
@@ -15,9 +16,17 @@ type TurnQueueEntry = {
   actorId: string;
   actorType: 'player' | 'npc';
   activePokemonId: string;
+  actionType: 'move' | 'item';
   moveId: string;
   targets: string[];
   resolved: boolean;
+};
+
+type BagItem = {
+  _id: string;
+  itemId: string;
+  quantity: number;
+  pocket: string;
 };
 
 // Joined by the state endpoint — name and HP for whatever Pokémon is currently active
@@ -230,6 +239,9 @@ export default function BattlePage() {
   const [weatherInput,        setWeatherInput]        = useState('');
   const [weatherTurns,        setWeatherTurns]        = useState('');
   const [weatherActionError,  setWeatherActionError]  = useState('');
+  const [bagItems,            setBagItems]            = useState<BagItem[]>([]);
+  const [actionTab,           setActionTab]           = useState<'move' | 'item'>('move');
+  const [selectedItemId,      setSelectedItemId]      = useState<string | null>(null);
 
   // Polling loop — fetches full battle state every 3 seconds
   useEffect(() => {
@@ -266,6 +278,23 @@ export default function BattlePage() {
       .then(res => setParty(res.data.data ?? []))
       .catch(() => {});
   }, [token, user?.role]);
+
+  // Fetch healing + status_cure items for players; re-runs each new round so quantities stay fresh
+  useEffect(() => {
+    if (!token || user?.role === 'dm' || user?.role === 'admin') return;
+    axios.get(`${API}/api/items`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(res => {
+        const all: BagItem[] = res.data.data ?? [];
+        setBagItems(all.filter(i => i.pocket === 'healing' || i.pocket === 'status_cure'));
+      })
+      .catch(() => {});
+  }, [token, user?.role, battle?.turnNumber]);
+
+  // Reset item selection and tab at the start of each new round
+  useEffect(() => {
+    setActionTab('move');
+    setSelectedItemId(null);
+  }, [battle?.turnNumber]);
 
   // Fetch active Pokémon detail (moves, type data) when activePokemonId becomes known
   const myEntry = battle?.playerSide.find(e => e.userId === user?.id);
@@ -408,6 +437,24 @@ export default function BattlePage() {
       });
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to submit move.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleSubmitItem(itemId: string, targetPokemonId: string) {
+    if (!id) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(
+        `${API}/api/battles/${id}/submit-move`,
+        { actionType: 'item', itemId, targetPokemonId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setSelectedItemId(null);
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to use item.'));
     } finally {
       setSubmitting(false);
     }
@@ -657,16 +704,15 @@ export default function BattlePage() {
           </Card>
         )}
 
-        {/* Player: move submission */}
+        {/* Player: action submission (move or item) */}
         {!isDm && battle.status === 'active' && battle.phase === 'move_submission' && myEntry?.activePokemonId && (
           <Card>
             <CardHeader>
               <CardTitle className="text-base">
-                {alreadySubmitted ? 'Move Submitted' : 'Choose a Move'}
+                {alreadySubmitted ? 'Action Submitted' : 'Choose an Action'}
               </CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-3">
-              {/* Active Pokémon summary */}
               {activePokemonDetail && (
                 <div className="flex items-center gap-2 flex-wrap text-sm text-muted-foreground">
                   <span>
@@ -680,41 +726,105 @@ export default function BattlePage() {
 
               {alreadySubmitted ? (
                 <p className="text-sm text-center text-muted-foreground py-2">
-                  Move submitted — waiting for other trainers…
+                  Action submitted — waiting for other trainers…
                 </p>
               ) : (
                 <>
                   {actionError && <p className="text-sm text-destructive">{actionError}</p>}
-                  {activePokemonDetail ? (
-                    <div className="grid grid-cols-2 gap-2">
-                      {activePokemonDetail.moves.map(slot => {
-                        const detail = moveDetailMap.get(slot.moveId);
-                        const noPP   = slot.currentPP <= 0;
-                        return (
-                          <button
-                            key={slot.moveId}
-                            onClick={() => !noPP && !submitting && handleSubmitMove(slot.moveId)}
-                            disabled={noPP || submitting}
-                            className={[
-                              'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                              noPP
-                                ? 'opacity-40 cursor-not-allowed bg-muted'
-                                : 'hover:bg-accent cursor-pointer',
-                            ].join(' ')}
-                          >
-                            <span className="font-medium">{formatMove(slot.moveId)}</span>
-                            <span className="text-muted-foreground text-xs mt-0.5">
-                              {detail?.type ? `${detail.type} · ` : ''}
-                              {detail?.power != null ? `Pwr ${detail.power} · ` : ''}
-                              PP {slot.currentPP}/{slot.maxPP}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">Loading moves…</p>
-                  )}
+                  <Tabs value={actionTab} onValueChange={v => { setActionTab(v as 'move' | 'item'); setSelectedItemId(null); }}>
+                    <TabsList>
+                      <TabsTrigger value="move">Move</TabsTrigger>
+                      <TabsTrigger value="item">Item</TabsTrigger>
+                    </TabsList>
+
+                    <TabsContent value="move">
+                      {activePokemonDetail ? (
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                          {activePokemonDetail.moves.map(slot => {
+                            const detail = moveDetailMap.get(slot.moveId);
+                            const noPP   = slot.currentPP <= 0;
+                            return (
+                              <button
+                                key={slot.moveId}
+                                onClick={() => !noPP && !submitting && handleSubmitMove(slot.moveId)}
+                                disabled={noPP || submitting}
+                                className={[
+                                  'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                  noPP
+                                    ? 'opacity-40 cursor-not-allowed bg-muted'
+                                    : 'hover:bg-accent cursor-pointer',
+                                ].join(' ')}
+                              >
+                                <span className="font-medium">{formatMove(slot.moveId)}</span>
+                                <span className="text-muted-foreground text-xs mt-0.5">
+                                  {detail?.type ? `${detail.type} · ` : ''}
+                                  {detail?.power != null ? `Pwr ${detail.power} · ` : ''}
+                                  PP {slot.currentPP}/{slot.maxPP}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-muted-foreground mt-2">Loading moves…</p>
+                      )}
+                    </TabsContent>
+
+                    <TabsContent value="item">
+                      {selectedItemId == null ? (
+                        bagItems.length === 0 ? (
+                          <p className="text-sm text-muted-foreground mt-2">No usable items in bag.</p>
+                        ) : (
+                          <div className="flex flex-col gap-2 mt-2">
+                            {bagItems.map(item => (
+                              <button
+                                key={item.itemId}
+                                onClick={() => setSelectedItemId(item.itemId)}
+                                className="flex justify-between items-center rounded-md border px-4 py-3 text-sm text-left hover:bg-accent cursor-pointer min-h-11"
+                              >
+                                <span className="font-medium">{formatMove(item.itemId)}</span>
+                                <span className="text-muted-foreground text-xs">×{item.quantity}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )
+                      ) : (
+                        <div className="flex flex-col gap-2 mt-2">
+                          <div className="flex items-center gap-2 mb-1">
+                            <button
+                              onClick={() => setSelectedItemId(null)}
+                              className="text-xs text-muted-foreground hover:text-foreground min-h-11 pr-2"
+                            >
+                              ← Back
+                            </button>
+                            <span className="text-sm font-medium">Use {formatMove(selectedItemId)} on:</span>
+                          </div>
+                          {party.map(p => {
+                            const fainted = p.currentHp <= 0;
+                            return (
+                              <button
+                                key={p._id}
+                                onClick={() => !submitting && handleSubmitItem(selectedItemId, p._id)}
+                                disabled={submitting}
+                                className={[
+                                  'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left min-h-11',
+                                  submitting ? 'opacity-40 cursor-not-allowed' : 'hover:bg-accent cursor-pointer',
+                                ].join(' ')}
+                              >
+                                <span className="font-medium">{pokemonLabel(p)}</span>
+                                <span className="text-muted-foreground text-xs">
+                                  Lv.{p.level}
+                                  {' · '}
+                                  {fainted ? 'Fainted' : `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`}
+                                  {p.statusCondition ? ` · ${p.statusCondition}` : ''}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </TabsContent>
+                  </Tabs>
                 </>
               )}
             </CardContent>
