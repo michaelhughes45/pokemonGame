@@ -21,11 +21,13 @@ export type TurnQueueEntry = {
   actorId: mongoose.Types.ObjectId;
   actorType: 'player' | 'npc';
   activePokemonId: mongoose.Types.ObjectId;
-  actionType: 'move' | 'item';
+  actionType: 'move' | 'item' | 'switch';
   moveId: string;
   // Present only when actionType === 'item'
   itemId?: string;
-  // Empty [] during move_submission for moves; pre-filled for item actions
+  // Present only when actionType === 'switch'
+  switchToPokemonId?: mongoose.Types.ObjectId;
+  // Empty [] during move_submission for moves; pre-filled for item/switch actions
   targets: mongoose.Types.ObjectId[];
   resolved: boolean;
 };
@@ -120,10 +122,11 @@ const BattleSchema = new Schema<IBattle>(
         actorId:         { type: Schema.Types.ObjectId, required: true },
         actorType:       { type: String, enum: ['player', 'npc'], required: true },
         activePokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', required: true },
-        actionType:      { type: String, enum: ['move', 'item'], default: 'move' },
-        moveId:          { type: String, default: '' },
-        itemId:          { type: String, default: null },
-        targets:         [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
+        actionType:        { type: String, enum: ['move', 'item', 'switch'], default: 'move' },
+        moveId:            { type: String, default: '' },
+        itemId:            { type: String, default: null },
+        switchToPokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
+        targets:           [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
         resolved:        { type: Boolean, default: false },
         _id:             false,
       },

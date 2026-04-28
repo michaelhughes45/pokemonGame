@@ -16,7 +16,7 @@ type TurnQueueEntry = {
   actorId: string;
   actorType: 'player' | 'npc';
   activePokemonId: string;
-  actionType: 'move' | 'item';
+  actionType: 'move' | 'item' | 'switch';
   moveId: string;
   targets: string[];
   resolved: boolean;
@@ -47,6 +47,8 @@ type PlayerSideEntry = {
   usedPokemonIds: string[];
   fainted: string[];
   activePokemonInfo: ActivePokemonInfo | null;
+  usedPokemonCount: number;
+  pokemonLimitReached: boolean;
 };
 
 type EnemySideEntry = {
@@ -240,7 +242,7 @@ export default function BattlePage() {
   const [weatherTurns,        setWeatherTurns]        = useState('');
   const [weatherActionError,  setWeatherActionError]  = useState('');
   const [bagItems,            setBagItems]            = useState<BagItem[]>([]);
-  const [actionTab,           setActionTab]           = useState<'move' | 'item'>('move');
+  const [actionTab,           setActionTab]           = useState<'move' | 'item' | 'switch'>('move');
   const [selectedItemId,      setSelectedItemId]      = useState<string | null>(null);
 
   // Polling loop — fetches full battle state every 3 seconds
@@ -290,7 +292,7 @@ export default function BattlePage() {
       .catch(() => {});
   }, [token, user?.role, battle?.turnNumber]);
 
-  // Reset item selection and tab at the start of each new round
+  // Reset action tab and item selection at the start of each new round
   useEffect(() => {
     setActionTab('move');
     setSelectedItemId(null);
@@ -455,6 +457,23 @@ export default function BattlePage() {
       setSelectedItemId(null);
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to use item.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleSubmitSwitch(switchToPokemonId: string) {
+    if (!id) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(
+        `${API}/api/battles/${id}/submit-move`,
+        { actionType: 'switch', switchToPokemonId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to submit switch.'));
     } finally {
       setSubmitting(false);
     }
@@ -731,10 +750,11 @@ export default function BattlePage() {
               ) : (
                 <>
                   {actionError && <p className="text-sm text-destructive">{actionError}</p>}
-                  <Tabs value={actionTab} onValueChange={v => { setActionTab(v as 'move' | 'item'); setSelectedItemId(null); }}>
+                  <Tabs value={actionTab} onValueChange={v => { setActionTab(v as 'move' | 'item' | 'switch'); setSelectedItemId(null); }}>
                     <TabsList>
                       <TabsTrigger value="move">Move</TabsTrigger>
                       <TabsTrigger value="item">Item</TabsTrigger>
+                      <TabsTrigger value="switch">Switch</TabsTrigger>
                     </TabsList>
 
                     <TabsContent value="move">
@@ -818,6 +838,50 @@ export default function BattlePage() {
                                   {fainted ? 'Fainted' : `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`}
                                   {p.statusCondition ? ` · ${p.statusCondition}` : ''}
                                 </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </TabsContent>
+
+                    <TabsContent value="switch">
+                      {battle.playerPokemonLimit !== null && myEntry && (
+                        <p className="text-sm text-muted-foreground mt-2">
+                          {myEntry.usedPokemonCount} / {battle.playerPokemonLimit} Pokémon used this battle
+                        </p>
+                      )}
+                      {party.length === 0 ? (
+                        <p className="text-sm text-muted-foreground mt-2">No Pokémon in your party.</p>
+                      ) : (
+                        <div className="flex flex-col gap-2 mt-2">
+                          {party.map(p => {
+                            const isActive      = p._id === myEntry?.activePokemonId;
+                            const fainted       = p.currentHp <= 0;
+                            const alreadyUsed   = myEntry?.usedPokemonIds.includes(p._id) ?? false;
+                            const limitBlocked  = !alreadyUsed && (myEntry?.pokemonLimitReached ?? false);
+                            const disabled      = isActive || fainted || limitBlocked || submitting;
+
+                            let subLabel: string;
+                            if (isActive)       subLabel = 'Active';
+                            else if (fainted)   subLabel = 'Fainted';
+                            else if (limitBlocked) subLabel = 'Limit reached';
+                            else subLabel = `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`;
+
+                            return (
+                              <button
+                                key={p._id}
+                                onClick={() => !disabled && handleSubmitSwitch(p._id)}
+                                disabled={disabled}
+                                className={[
+                                  'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                  disabled
+                                    ? 'opacity-40 cursor-not-allowed bg-muted'
+                                    : 'hover:bg-accent cursor-pointer',
+                                ].join(' ')}
+                              >
+                                <span className="font-medium">{pokemonLabel(p)}</span>
+                                <span className="text-muted-foreground text-xs">{subLabel}</span>
                               </button>
                             );
                           })}

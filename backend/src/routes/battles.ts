@@ -46,12 +46,13 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
     return { entry, speed };
   });
 
-  // Item actions always go before moves (trainer acts first, like the main games).
+  // Priority tiers: items (2) → switches (1) → moves (0).
+  // Items act first (trainer acts first, like the main games), switches before moves.
   // Within the same tier, highest Speed goes first; ties keep submission order.
+  const actionPriority = (t: string) => (t === 'item' ? 2 : t === 'switch' ? 1 : 0);
   withSpeed.sort((a, b) => {
-    const aItem = a.entry.actionType === 'item' ? 1 : 0;
-    const bItem = b.entry.actionType === 'item' ? 1 : 0;
-    if (aItem !== bItem) return bItem - aItem;
+    const diff = actionPriority(b.entry.actionType) - actionPriority(a.entry.actionType);
+    if (diff !== 0) return diff;
     return b.speed - a.speed;
   });
 
@@ -402,6 +403,51 @@ async function resolveItemAction(entry: TurnQueueEntry): Promise<string[]> {
   return events;
 }
 
+// Resolves a switch action: recalls the outgoing Pokémon (clearing its volatile
+// statuses), sets the incoming Pokémon as active, and adds it to usedPokemonIds.
+// Returns turn-log event strings.
+async function resolveSwitch(
+  battle: HydratedDocument<IBattle>,
+  entry:  TurnQueueEntry,
+): Promise<string[]> {
+  if (!entry.switchToPokemonId) return [];
+
+  const playerEntry = battle.playerSide.find(
+    e => e.userId.toString() === entry.actorId.toString(),
+  );
+  if (!playerEntry) return [];
+
+  const outgoingId = playerEntry.activePokemonId;
+  const incomingId = entry.switchToPokemonId;
+  const events: string[] = [];
+
+  if (outgoingId) {
+    await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
+    const outgoing  = await Pokemon.findById(outgoingId, 'nickname speciesId').lean();
+    const outCache  = outgoing
+      ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name').lean()
+      : null;
+    const outName   = outgoing?.nickname ?? (outCache ? slugToDisplayName(outCache.name as string) : 'Pokémon');
+    events.push(`${outName} was recalled!`);
+  }
+
+  playerEntry.activePokemonId = incomingId;
+
+  const alreadyUsed = playerEntry.usedPokemonIds.some(id => id.toString() === incomingId.toString());
+  if (!alreadyUsed) {
+    playerEntry.usedPokemonIds.push(incomingId);
+  }
+
+  const incoming = await Pokemon.findById(incomingId, 'nickname speciesId').lean();
+  const inCache  = incoming
+    ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean()
+    : null;
+  const inName   = incoming?.nickname ?? (inCache ? slugToDisplayName(inCache.name as string) : 'Pokémon');
+  events.push(`${inName} was sent out!`);
+
+  return events;
+}
+
 // Starting from battle.currentTargetIndex, auto-skips consecutive actors whose
 // move is blocked by sleep, freeze, or paralysis. Stops at the first actor that
 // can move (or when the queue is exhausted, in which case applyEndOfRound fires).
@@ -422,6 +468,23 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
           logEntry = battle.turnLog[battle.turnLog.length - 1];
         }
         for (const ev of itemEvents) logEntry.events.push(ev);
+        battle.markModified('turnLog');
+      }
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      continue;
+    }
+
+    // Switch actions are fully specified at submission time — auto-resolve without client input.
+    if (entry.actionType === 'switch') {
+      const switchEvents = await resolveSwitch(battle, entry as unknown as TurnQueueEntry);
+      if (switchEvents.length > 0) {
+        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+        if (!logEntry) {
+          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+          logEntry = battle.turnLog[battle.turnLog.length - 1];
+        }
+        for (const ev of switchEvents) logEntry.events.push(ev);
         battle.markModified('turnLog');
       }
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
@@ -1103,12 +1166,13 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
 //   so they skip the enemy targeting picker entirely.
 // ---------------------------------------------------------------------------
 router.post('/:id/submit-move', async (req: Request, res: Response): Promise<void> => {
-  const { actionType = 'move', moveId, itemId, targetPokemonId } =
+  const { actionType = 'move', moveId, itemId, targetPokemonId, switchToPokemonId } =
     req.body as {
-      actionType?: 'move' | 'item';
+      actionType?: 'move' | 'item' | 'switch';
       moveId?: string;
       itemId?: string;
       targetPokemonId?: string;
+      switchToPokemonId?: string;
     };
   const userId = new mongoose.Types.ObjectId(req.user!.userId);
 
@@ -1186,6 +1250,62 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
       itemId,
       targets:         [targetObjId],
       resolved:        false,
+    });
+
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    return;
+  }
+
+  // ---- switch action ----
+  if (actionType === 'switch') {
+    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) {
+      res.status(400).json({ data: null, error: 'A valid switchToPokemonId is required for switch actions' });
+      return;
+    }
+
+    const switchToId = new mongoose.Types.ObjectId(switchToPokemonId);
+
+    if (playerEntry.activePokemonId?.toString() === switchToPokemonId) {
+      res.status(400).json({ data: null, error: 'That Pokémon is already active' });
+      return;
+    }
+
+    const switchTarget = await Pokemon.findOne({
+      _id:       switchToId,
+      ownerId:   userId,
+      ownerType: 'player',
+      isInParty: true,
+    }).lean();
+    if (!switchTarget) {
+      res.status(404).json({ data: null, error: 'Pokémon not found in your party' });
+      return;
+    }
+    if (switchTarget.currentHp <= 0) {
+      res.status(400).json({ data: null, error: 'That Pokémon has fainted' });
+      return;
+    }
+
+    const alreadyUsed = playerEntry.usedPokemonIds.some(id => id.toString() === switchToPokemonId);
+    if (!alreadyUsed && battle.playerPokemonLimit !== null) {
+      if (playerEntry.usedPokemonIds.length >= battle.playerPokemonLimit) {
+        res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' });
+        return;
+      }
+    }
+
+    battle.turnQueue.push({
+      actorId:           userId,
+      actorType:         'player',
+      activePokemonId:   playerEntry.activePokemonId!,
+      actionType:        'switch',
+      moveId:            '',
+      switchToPokemonId: switchToId,
+      targets:           [],
+      resolved:          false,
     });
 
     await checkAndAdvance(battle);
@@ -1816,8 +1936,11 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
 
   const playerSideWithNames = battle.playerSide.map(entry => ({
     ...entry,
-    username:          usernameMap.get(entry.userId.toString()) ?? 'Unknown',
-    activePokemonInfo: buildInfo(entry.activePokemonId),
+    username:            usernameMap.get(entry.userId.toString()) ?? 'Unknown',
+    activePokemonInfo:   buildInfo(entry.activePokemonId),
+    usedPokemonCount:    entry.usedPokemonIds.length,
+    pokemonLimitReached: battle.playerPokemonLimit !== null
+      && entry.usedPokemonIds.length >= battle.playerPokemonLimit,
   }));
 
   // Join NPC names so the frontend can label enemy slots without extra requests

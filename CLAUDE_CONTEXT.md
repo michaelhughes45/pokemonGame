@@ -372,7 +372,11 @@ pokemonGame/
 - Item actions are pre-sorted before all moves (`actionType === 'item'` wins the sort in `checkAndAdvance`) matching main-game trainer-acts-first priority
 - Item actions auto-resolve in `autoSkipBlockedActors` without client input (target is pre-filled at submission time); `BATTLE_ITEM_EFFECTS` table in `battles.ts` mirrors the healing/status_cure entries from `items.ts`
 - Items are only deducted from the bag on a successful use (wrong-status items log "no effect" but are not consumed)
-- Volatile statuses (confusion) are cleared when a Pokémon is swapped out — `send-out` and `dm-send-out` wipe `volatileStatus: []` on the outgoing Pokémon. Battle-end clearing goes in milestone 3.11
+- Volatile statuses (confusion) are cleared when a Pokémon is swapped out — `send-out`, `dm-send-out`, and `resolveSwitch` all wipe `volatileStatus: []` on the outgoing Pokémon. Battle-end clearing goes in milestone 3.11
+- Switch actions use the same `POST /api/battles/:id/submit-move` endpoint with `{ actionType: 'switch', switchToPokemonId }`; the target is pre-filled so switches auto-resolve in `autoSkipBlockedActors` like items do
+- Priority tiers in `checkAndAdvance` sort: items (2) → switches (1) → moves (0); within each tier speed order applies
+- `usedPokemonIds` on each `playerSide` entry tracks distinct Pokémon sent into the battle. Switching back to a previously-used Pokémon is always free; only introducing a brand-new Pokémon costs a slot against `playerPokemonLimit`
+- State endpoint returns `usedPokemonCount` (derived from `usedPokemonIds.length`) and `pokemonLimitReached` (computed boolean) per player entry so the frontend does not need to recompute them
 
 ---
 
@@ -399,7 +403,7 @@ pokemonGame/
 - [x] **3.7** Status conditions — `STATUS_MOVES` table (~60 moves), `applyStatusEffect` with type immunity checks, `checkStatusBlock` (paralysis 25% skip, freeze 20% thaw, sleep counter-based Gen 5+ wake-on-wake-turn), `checkConfusion` (50% self-hit, typeless physical formula), `autoSkipBlockedActors` loop auto-resolves blocked actors without client input, toxic scales `counter/16 × maxHp` each round, burn/poison flat 1/8; `statusCounter` field added to Pokemon model; StatusBadge UI (BRN/PAR/SLP/FRZ/PSN/TOX/CNF) shown on move submission, targeting, and side cards; status blocking applies only to move execution (not full turn) to preserve future item-use hook; `checkConfusion` emits leading "is confused..." narration before outcome
 - [x] **3.8** Weather — `weatherTurnsRemaining` field on Battle; `WEATHER_MOVES` table (sunny-day, rain-dance, sandstorm, hail, snowscape, chilly-reception) sets weather for 5 turns during turn resolution; same weather = no effect, different weather = both cancel; DM manual override via POST /api/battles/:id/weather (indefinite or countdown); sandstorm/hail deal 1/16 maxHp end-of-round to non-immune types (Rock/Steel/Ground immune to sand, Ice immune to hail); weather countdown auto-clears with flavor message; `SELF_TARGETING_MOVES` table covers stat boosts + recovery moves — no enemy target required, "Use [Move]" button shown instead of target picker; `noTargetMoveIds` returned in state endpoint; `runningHp` map fixes stacked end-of-round damage bug; WeatherBadge UI with colored pill + turn countdown
 - [x] **3.9** Items in battle — `actionType: 'move' | 'item'` added to TurnQueueEntry; submit-move accepts item actions `{ actionType: 'item', itemId, targetPokemonId }`; item actions sort before all moves (trainer-acts-first priority); `BATTLE_ITEM_EFFECTS` table + `resolveItemAction` helper in battles.ts; items auto-resolve in `autoSkipBlockedActors`; bag deducted only on successful use; confusion cleared on swap-out (send-out + dm-send-out); Move/Item tab UI in BattlePage with two-step item → party-target picker
-- [ ] **3.10** Switching — switch active Pokémon, ability triggers on entry; enforce playerPokemonLimit (track usedPokemonIds, block send-out if limit reached and all used Pokémon still alive)
+- [x] **3.10** Switching — `actionType: 'switch'` + `switchToPokemonId` added to TurnQueueEntry; submit-move accepts switch actions; switches sort between items (2) and moves (0) at priority tier 1; `resolveSwitch` recalls outgoing Pokémon (clears volatileStatus), sets new activePokemonId, updates usedPokemonIds; switches auto-resolve in `autoSkipBlockedActors`; playerPokemonLimit enforced at submission (new Pokémon blocked if limit reached, previously-used Pokémon always free); state endpoint returns `usedPokemonCount` + `pokemonLimitReached` per player; Switch tab UI in BattlePage with limit counter and per-Pokémon blocking
 - [ ] **3.11** Faint & battle end — faint prompt, EXP distributed to full party (Gen 6+ Exp. Share), EV award deferred ★ first playable game
 - [ ] **4.1** Wild battles & catch — catch formula, Pokémon lands in PC with zeroed EVs
 - [ ] **4.2** Evolution engine — level-up check, override rules respected
@@ -418,8 +422,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 3.10 — Switching (switch active Pokémon during battle; enforce playerPokemonLimit)
-- **Just finished:** 3.9 — Items in battle. Tagged v3.9.
+- **Starting:** 3.11 — Faint & battle end (faint prompt, EXP distributed to full party Gen 6+ style, first playable game)
+- **Just finished:** 3.10 — Switching. Tagged v3.10.
 - **Known issues / blockers:** Volatile status (confusion) clear on battle end deferred to 3.11
 
 ---
