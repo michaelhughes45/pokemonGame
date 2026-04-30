@@ -412,30 +412,50 @@ async function resolveSwitch(
 ): Promise<string[]> {
   if (!entry.switchToPokemonId) return [];
 
-  const playerEntry = battle.playerSide.find(
-    e => e.userId.toString() === entry.actorId.toString(),
-  );
-  if (!playerEntry) return [];
-
-  const outgoingId = playerEntry.activePokemonId;
   const incomingId = entry.switchToPokemonId;
   const events: string[] = [];
 
-  if (outgoingId) {
-    await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
-    const outgoing  = await Pokemon.findById(outgoingId, 'nickname speciesId').lean();
-    const outCache  = outgoing
-      ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name').lean()
-      : null;
-    const outName   = outgoing?.nickname ?? (outCache ? slugToDisplayName(outCache.name as string) : 'Pokémon');
-    events.push(`${outName} was recalled!`);
-  }
+  if (entry.actorType === 'npc') {
+    const npcEntry = battle.enemySide.find(
+      e => e.npcId.toString() === entry.actorId.toString(),
+    );
+    if (!npcEntry) return [];
 
-  playerEntry.activePokemonId = incomingId;
+    const outgoingId = npcEntry.activePokemonId;
+    if (outgoingId) {
+      await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
+      const outgoing = await Pokemon.findById(outgoingId, 'nickname speciesId').lean();
+      const outCache = outgoing
+        ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name').lean()
+        : null;
+      const outName  = outgoing?.nickname ?? (outCache ? slugToDisplayName(outCache.name as string) : 'Pokémon');
+      events.push(`${outName} was recalled!`);
+    }
 
-  const alreadyUsed = playerEntry.usedPokemonIds.some(id => id.toString() === incomingId.toString());
-  if (!alreadyUsed) {
-    playerEntry.usedPokemonIds.push(incomingId);
+    npcEntry.activePokemonId = incomingId;
+  } else {
+    const playerEntry = battle.playerSide.find(
+      e => e.userId.toString() === entry.actorId.toString(),
+    );
+    if (!playerEntry) return [];
+
+    const outgoingId = playerEntry.activePokemonId;
+    if (outgoingId) {
+      await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
+      const outgoing  = await Pokemon.findById(outgoingId, 'nickname speciesId').lean();
+      const outCache  = outgoing
+        ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name').lean()
+        : null;
+      const outName   = outgoing?.nickname ?? (outCache ? slugToDisplayName(outCache.name as string) : 'Pokémon');
+      events.push(`${outName} was recalled!`);
+    }
+
+    playerEntry.activePokemonId = incomingId;
+
+    const alreadyUsed = playerEntry.usedPokemonIds.some(id => id.toString() === incomingId.toString());
+    if (!alreadyUsed) {
+      playerEntry.usedPokemonIds.push(incomingId);
+    }
   }
 
   const incoming = await Pokemon.findById(incomingId, 'nickname speciesId').lean();
@@ -494,9 +514,17 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
 
     const poke = await Pokemon.findById(
       entry.activePokemonId,
-      'nickname speciesId statusCondition statusCounter',
+      'nickname speciesId statusCondition statusCounter currentHp',
     ).lean();
-    if (!poke || !poke.statusCondition) break; // no status — this actor moves normally
+
+    // Skip actors whose Pokémon fainted earlier this round (hit by a faster actor)
+    if (!poke || poke.currentHp <= 0) {
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      continue;
+    }
+
+    if (!poke.statusCondition) break; // no status — this actor moves normally
 
     const cache       = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
     const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
@@ -734,6 +762,168 @@ async function resolveMove(
   };
 }
 
+// Checks every active Pokémon on both sides for HP ≤ 0. For each fainted
+// Pokémon: logs the faint event, clears volatile statuses, pushes the ID into
+// the side's fainted[] array, and nulls activePokemonId on that entry.
+// Returns faint event strings so the caller can append them to the turn log.
+async function applyFaints(battle: HydratedDocument<IBattle>): Promise<string[]> {
+  const events: string[] = [];
+
+  for (const entry of battle.playerSide) {
+    if (!entry.activePokemonId) continue;
+    const poke = await Pokemon.findById(
+      entry.activePokemonId, 'currentHp nickname speciesId',
+    ).lean();
+    if (!poke || poke.currentHp > 0) continue;
+
+    const cache       = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
+    const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+    events.push(`${displayName} fainted!`);
+
+    await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { volatileStatus: [] } });
+    entry.fainted.push(entry.activePokemonId);
+    entry.activePokemonId = null;
+    battle.markModified('playerSide');
+  }
+
+  for (const entry of battle.enemySide) {
+    if (!entry.activePokemonId) continue;
+    const poke = await Pokemon.findById(
+      entry.activePokemonId, 'currentHp nickname speciesId',
+    ).lean();
+    if (!poke || poke.currentHp > 0) continue;
+
+    const cache       = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
+    const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+    events.push(`${displayName} fainted!`);
+
+    await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { volatileStatus: [] } });
+    entry.fainted.push(entry.activePokemonId);
+    entry.activePokemonId = null;
+    battle.markModified('enemySide');
+  }
+
+  return events;
+}
+
+// Awards EXP to every Pokémon in each player's party after a player-side victory.
+// Gen 6+ Exp. Share: active battlers (usedPokemonIds) get full EXP; benched
+// Pokémon get half. Simplified formula: base_exp = sum of (enemy_level × 5) for
+// all fainted enemies — replaced by the real per-species yield in Phase 5.
+// The expAwarded flag prevents double-awarding if this is called more than once.
+async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[]> {
+  if (battle.expAwarded) return [];
+  battle.expAwarded = true;
+
+  const events: string[] = [];
+
+  const allFaintedEnemyIds = battle.enemySide.flatMap(e => e.fainted);
+  if (allFaintedEnemyIds.length === 0) return events;
+
+  const faintedEnemies = await Pokemon.find(
+    { _id: { $in: allFaintedEnemyIds } },
+    'level',
+  ).lean();
+  const totalBaseExp = faintedEnemies.reduce((sum, p) => sum + p.level * 5, 0);
+  if (totalBaseExp === 0) return events;
+
+  const playerUserIds  = battle.playerSide.map(e => e.userId);
+  const allPartyPokemon = await Pokemon.find(
+    { ownerId: { $in: playerUserIds }, ownerType: 'player', isInParty: true },
+    '_id ownerId nickname speciesId',
+  ).lean();
+
+  const speciesIds = [...new Set(allPartyPokemon.map(p => p.speciesId))];
+  const caches     = speciesIds.length > 0
+    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name').lean()
+    : [];
+  const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+  for (const playerEntry of battle.playerSide) {
+    const usedIds      = new Set(playerEntry.usedPokemonIds.map(id => id.toString()));
+    const partyPokemon = allPartyPokemon.filter(
+      p => p.ownerId.toString() === playerEntry.userId.toString(),
+    );
+
+    for (const poke of partyPokemon) {
+      const isActive = usedIds.has(poke._id.toString());
+      const expGain  = isActive ? totalBaseExp : Math.floor(totalBaseExp / 2);
+      if (expGain > 0) {
+        await Pokemon.updateOne({ _id: poke._id }, { $inc: { exp: expGain } });
+        const cache = cacheMap.get(poke.speciesId);
+        const name  = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+        events.push(`${name} gained ${expGain} EXP${isActive ? '' : ' (Exp. Share)'}!`);
+      }
+    }
+  }
+
+  return events;
+}
+
+// Checks whether one side of the battle has been fully eliminated.
+//
+// Enemy side eliminated: no NPC has an active Pokémon AND no NPC party Pokémon
+// have HP > 0 (the DM has no one left to send out).
+//
+// Player side eliminated: no player has an active Pokémon AND every player has
+// exhausted all sendable options (previously-used Pokémon still alive are always
+// sendable; new ones require the limit not to be reached).
+//
+// When a winner is found, sets battle.status = 'complete' and battle.endedAt,
+// then returns the result event string(s) for the turn log.
+async function checkBattleEnd(battle: HydratedDocument<IBattle>): Promise<string[]> {
+  if (battle.status !== 'active') return [];
+
+  // --- Enemy side ---
+  const hasActiveEnemy = battle.enemySide.some(e => e.activePokemonId !== null);
+  let enemySideEliminated = false;
+  if (!hasActiveEnemy && battle.enemySide.length > 0) {
+    const npcIds = battle.enemySide.map(e => e.npcId);
+    const healthyEnemyCount = await Pokemon.countDocuments({
+      ownerId:   { $in: npcIds },
+      ownerType: 'npc',
+      currentHp: { $gt: 0 },
+    });
+    enemySideEliminated = healthyEnemyCount === 0;
+  }
+
+  // --- Player side ---
+  const hasActivePlayer = battle.playerSide.some(e => e.activePokemonId !== null);
+  let playerSideEliminated = false;
+  if (!hasActivePlayer && battle.playerSide.length > 0) {
+    const results = await Promise.all(
+      battle.playerSide.map(async entry => {
+        const usedIds      = new Set(entry.usedPokemonIds.map(id => id.toString()));
+        const limitReached = battle.playerPokemonLimit !== null
+          && entry.usedPokemonIds.length >= battle.playerPokemonLimit;
+
+        const healthyParty = await Pokemon.find(
+          { ownerId: entry.userId, ownerType: 'player', isInParty: true, currentHp: { $gt: 0 } },
+          '_id',
+        ).lean();
+
+        if (healthyParty.length === 0) return true;
+        const canSendAny = healthyParty.some(
+          p => usedIds.has(p._id.toString()) || !limitReached,
+        );
+        return !canSendAny;
+      }),
+    );
+    playerSideEliminated = results.every(Boolean);
+  }
+
+  if (!enemySideEliminated && !playerSideEliminated) return [];
+
+  battle.status  = 'complete';
+  battle.endedAt = new Date();
+
+  if (enemySideEliminated) {
+    const expEvents = await distributeExp(battle);
+    return ['All enemies have been defeated! The players win!', ...expEvents];
+  }
+  return ['All players have been defeated!'];
+}
+
 // Apply end-of-round effects (burn/poison/toxic damage, weather damage,
 // weather countdown) and park the battle at end_of_round.
 async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void> {
@@ -859,8 +1049,22 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
     }
   }
 
-  // All moves resolved — hold at end_of_round so the DM can read the log
-  // before advancing. The advance-round endpoint handles the actual reset.
+  // Detect faints and check for battle end after end-of-round damage
+  const eorFaintEvents = await applyFaints(battle);
+  const eorEndEvents   = await checkBattleEnd(battle);
+  if (eorFaintEvents.length > 0 || eorEndEvents.length > 0) {
+    let eorLog = battle.turnLog.find(t => t.turn === battle.turnNumber);
+    if (!eorLog) {
+      battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+      eorLog = battle.turnLog[battle.turnLog.length - 1];
+    }
+    for (const ev of eorFaintEvents) eorLog.events.push(ev);
+    for (const ev of eorEndEvents)   eorLog.events.push(ev);
+    battle.markModified('turnLog');
+  }
+
+  // Hold at end_of_round so the DM can read the log before advancing.
+  // The advance-round endpoint handles the actual reset.
   battle.phase = 'end_of_round';
 }
 
@@ -1356,8 +1560,9 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
 
 // ---------------------------------------------------------------------------
 // POST /api/battles/:id/dm-submit-move
-// DM only — submits a move on behalf of an NPC.
-// Body: { npcId: string, moveId: string }
+// DM only — submits a move or switch on behalf of an NPC.
+// Body (move):   { npcId, moveId }
+// Body (switch): { npcId, actionType: 'switch', switchToPokemonId }
 // ---------------------------------------------------------------------------
 router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<void> => {
   const { role } = req.user!;
@@ -1366,14 +1571,19 @@ router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<
     return;
   }
 
-  const { npcId, moveId } = req.body as { npcId: string; moveId: string };
+  const { npcId, moveId, actionType = 'move', switchToPokemonId } = req.body as {
+    npcId: string;
+    moveId?: string;
+    actionType?: 'move' | 'switch';
+    switchToPokemonId?: string;
+  };
 
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
     res.status(400).json({ data: null, error: 'Invalid battle ID' });
     return;
   }
-  if (!npcId || !moveId) {
-    res.status(400).json({ data: null, error: 'npcId and moveId are required' });
+  if (!npcId) {
+    res.status(400).json({ data: null, error: 'npcId is required' });
     return;
   }
 
@@ -1392,16 +1602,68 @@ router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<
     res.status(404).json({ data: null, error: 'NPC not found in this battle' });
     return;
   }
-  if (!npcEntry.activePokemonId) {
-    res.status(400).json({ data: null, error: 'NPC has not sent out a Pokémon yet' });
-    return;
-  }
 
   const alreadySubmitted = battle.turnQueue.some(
     e => e.actorId.toString() === npcId && e.actorType === 'npc'
   );
   if (alreadySubmitted) {
     res.status(400).json({ data: null, error: 'This NPC has already submitted a move this turn' });
+    return;
+  }
+
+  // ---- switch action ----
+  if (actionType === 'switch') {
+    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) {
+      res.status(400).json({ data: null, error: 'A valid switchToPokemonId is required for switch actions' });
+      return;
+    }
+    if (npcEntry.activePokemonId?.toString() === switchToPokemonId) {
+      res.status(400).json({ data: null, error: 'That Pokémon is already active' });
+      return;
+    }
+
+    const npc = await Npc.findById(npcId, 'party').lean();
+    if (!npc || !npc.party.some((id: mongoose.Types.ObjectId) => id.toString() === switchToPokemonId)) {
+      res.status(400).json({ data: null, error: 'That Pokémon is not in this NPC\'s party' });
+      return;
+    }
+
+    const switchTarget = await Pokemon.findById(switchToPokemonId, 'currentHp').lean();
+    if (!switchTarget) {
+      res.status(404).json({ data: null, error: 'Switch target Pokémon not found' });
+      return;
+    }
+    if (switchTarget.currentHp <= 0) {
+      res.status(400).json({ data: null, error: 'Cannot switch to a fainted Pokémon' });
+      return;
+    }
+
+    const activePokemonId = npcEntry.activePokemonId ?? new mongoose.Types.ObjectId(switchToPokemonId);
+    battle.turnQueue.push({
+      actorId:           new mongoose.Types.ObjectId(npcId),
+      actorType:         'npc',
+      activePokemonId,
+      actionType:        'switch',
+      switchToPokemonId: new mongoose.Types.ObjectId(switchToPokemonId),
+      targets:           [],
+      resolved:          false,
+    });
+
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    return;
+  }
+
+  // ---- move action ----
+  if (!moveId) {
+    res.status(400).json({ data: null, error: 'moveId is required for move actions' });
+    return;
+  }
+  if (!npcEntry.activePokemonId) {
+    res.status(400).json({ data: null, error: 'NPC has not sent out a Pokémon yet' });
     return;
   }
 
@@ -1564,6 +1826,12 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
 
   const currentEntry = battle.turnQueue[idx];
 
+  // Items and switches auto-resolve before targeting; if one somehow reaches here it's a bug
+  if (!currentEntry.moveId) {
+    res.status(400).json({ data: null, error: 'Current action does not require target selection' });
+    return;
+  }
+
   // Verify the caller is the correct actor for this turn
   if (currentEntry.actorType === 'player') {
     if (currentEntry.actorId.toString() !== userId) {
@@ -1697,10 +1965,20 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
   for (const event of moveEvents) {
     logEntry.events.push(event);
   }
+
+  // Detect faints caused by this move and check whether the battle has ended
+  const faintEvents = await applyFaints(battle);
+  const endEvents   = await checkBattleEnd(battle);
+  for (const ev of faintEvents) logEntry.events.push(ev);
+  for (const ev of endEvents)   logEntry.events.push(ev);
+
   battle.markModified('turnLog');
 
   battle.currentTargetIndex = idx + 1;
-  await autoSkipBlockedActors(battle);
+  // Skip further resolution if the battle ended mid-round
+  if (endEvents.length === 0) {
+    await autoSkipBlockedActors(battle);
+  }
 
   battle.lastUpdatedAt = new Date();
   await battle.save();

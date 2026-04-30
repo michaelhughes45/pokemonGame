@@ -22,7 +22,7 @@ export type TurnQueueEntry = {
   actorType: 'player' | 'npc';
   activePokemonId: mongoose.Types.ObjectId;
   actionType: 'move' | 'item' | 'switch';
-  moveId: string;
+  moveId?: string;
   // Present only when actionType === 'item'
   itemId?: string;
   // Present only when actionType === 'switch'

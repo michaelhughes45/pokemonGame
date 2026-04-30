@@ -238,6 +238,7 @@ export default function BattlePage() {
   const [npcParties,          setNpcParties]          = useState<Record<string, NpcPartyPokemon[]>>({});
   const [partyLoading,        setPartyLoading]        = useState<string | null>(null);
   const [expandedSendOut,     setExpandedSendOut]     = useState<string | null>(null);
+  const [npcActionTab,        setNpcActionTab]        = useState<Record<string, 'move' | 'switch'>>({});
   const [weatherInput,        setWeatherInput]        = useState('');
   const [weatherTurns,        setWeatherTurns]        = useState('');
   const [weatherActionError,  setWeatherActionError]  = useState('');
@@ -517,6 +518,19 @@ export default function BattlePage() {
     } finally { setSubmitting(false); }
   }
 
+  async function handleDmSubmitSwitch(npcId: string, switchToPokemonId: string) {
+    if (!id) return;
+    setSubmitting(true); setActionError('');
+    try {
+      await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
+        { npcId, actionType: 'switch', switchToPokemonId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to submit switch.'));
+    } finally { setSubmitting(false); }
+  }
+
   async function handleAdvanceRound() {
     if (!id) return;
     setSubmitting(true);
@@ -654,6 +668,20 @@ export default function BattlePage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Battle complete banner */}
+        {battle.status === 'complete' && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Battle Complete</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground">
+                This battle has ended. See the battle log below for the full summary.
+              </p>
+            </CardContent>
+          </Card>
+        )}
 
         {/* DM: start battle */}
         {isDm && battle.status === 'waiting' && (
@@ -961,30 +989,65 @@ export default function BattlePage() {
                         {entry.activePokemonInfo?.name ?? 'Pokémon'} — move submitted
                       </p>
                     ) : activePokemon ? (
-                      <div className="flex flex-col gap-2">
-                        <p className="text-sm text-muted-foreground">
-                          {entry.activePokemonInfo?.name ?? activePokemon.nickname ?? activePokemon.speciesName} — choose a move:
-                        </p>
-                        <div className="grid grid-cols-2 gap-2">
-                          {activePokemon.moves.map(slot => {
-                            const noPP = slot.currentPP <= 0;
-                            return (
-                              <button
-                                key={slot.moveId}
-                                onClick={() => !noPP && !submitting && handleDmSubmitMove(entry.npcId, slot.moveId)}
-                                disabled={noPP || submitting}
-                                className={[
-                                  'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                                  noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
-                                ].join(' ')}
-                              >
-                                <span className="font-medium">{formatMove(slot.moveId)}</span>
-                                <span className="text-muted-foreground text-xs mt-0.5">PP {slot.currentPP}/{slot.maxPP}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
+                      <Tabs
+                        value={npcActionTab[entry.npcId] ?? 'move'}
+                        onValueChange={v => setNpcActionTab(prev => ({ ...prev, [entry.npcId]: v as 'move' | 'switch' }))}
+                      >
+                        <TabsList>
+                          <TabsTrigger value="move">Move</TabsTrigger>
+                          <TabsTrigger value="switch">Switch</TabsTrigger>
+                        </TabsList>
+
+                        <TabsContent value="move">
+                          <p className="text-sm text-muted-foreground mb-2">
+                            {entry.activePokemonInfo?.name ?? activePokemon.nickname ?? activePokemon.speciesName} — choose a move:
+                          </p>
+                          <div className="grid grid-cols-2 gap-2">
+                            {activePokemon.moves.map(slot => {
+                              const noPP = slot.currentPP <= 0;
+                              return (
+                                <button
+                                  key={slot.moveId}
+                                  onClick={() => !noPP && !submitting && handleDmSubmitMove(entry.npcId, slot.moveId)}
+                                  disabled={noPP || submitting}
+                                  className={[
+                                    'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                    noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                  ].join(' ')}
+                                >
+                                  <span className="font-medium">{formatMove(slot.moveId)}</span>
+                                  <span className="text-muted-foreground text-xs mt-0.5">PP {slot.currentPP}/{slot.maxPP}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </TabsContent>
+
+                        <TabsContent value="switch">
+                          <p className="text-sm text-muted-foreground mb-2">Switch out for:</p>
+                          <div className="flex flex-col gap-2">
+                            {party.filter(p => p._id !== entry.activePokemonId).map(p => {
+                              const fainted  = p.currentHp <= 0;
+                              return (
+                                <button
+                                  key={p._id}
+                                  onClick={() => !fainted && !submitting && handleDmSubmitSwitch(entry.npcId, p._id)}
+                                  disabled={fainted || submitting}
+                                  className={[
+                                    'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors',
+                                    fainted ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                  ].join(' ')}
+                                >
+                                  <span className="font-medium">{p.nickname ?? p.speciesName}</span>
+                                  <span className="text-muted-foreground text-xs">
+                                    Lv.{p.level} · {fainted ? 'Fainted' : `HP ${p.currentHp}`}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </TabsContent>
+                      </Tabs>
                     ) : (
                       <p className="text-sm text-muted-foreground">Loading party…</p>
                     )}
@@ -1148,8 +1211,8 @@ export default function BattlePage() {
           </Card>
         )}
 
-        {/* Battle Log — visible to everyone once events exist */}
-        {battle.status === 'active' && battle.turnLog.length > 0 && (
+        {/* Battle Log — visible to everyone once events exist, including after battle ends */}
+        {battle.status !== 'waiting' && battle.turnLog.length > 0 && (
           <Card>
             <CardHeader><CardTitle className="text-base">Battle Log</CardTitle></CardHeader>
             <CardContent>
