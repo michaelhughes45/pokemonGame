@@ -9,6 +9,15 @@ import { PokedexCache } from '../models/PokedexCache';
 import { Npc } from '../models/Npc';
 import { computeStats, BaseStats } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field, Generations } from '@smogon/calc';
+import { fetchSpecies } from '../lib/pokeapi';
+
+const NATURES = [
+  'Hardy','Lonely','Brave','Adamant','Naughty',
+  'Bold','Docile','Relaxed','Impish','Lax',
+  'Timid','Hasty','Serious','Jolly','Naive',
+  'Modest','Mild','Quiet','Bashful','Rash',
+  'Calm','Gentle','Sassy','Careful','Quirky',
+];
 
 const router = Router();
 
@@ -49,7 +58,7 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
   // Priority tiers: items (2) → switches (1) → moves (0).
   // Items act first (trainer acts first, like the main games), switches before moves.
   // Within the same tier, highest Speed goes first; ties keep submission order.
-  const actionPriority = (t: string) => (t === 'item' ? 2 : t === 'switch' ? 1 : 0);
+  const actionPriority = (t: string) => (t === 'item' || t === 'catch' ? 2 : t === 'switch' ? 1 : 0);
   withSpeed.sort((a, b) => {
     const diff = actionPriority(b.entry.actionType) - actionPriority(a.entry.actionType);
     if (diff !== 0) return diff;
@@ -417,7 +426,7 @@ async function resolveSwitch(
 
   if (entry.actorType === 'npc') {
     const npcEntry = battle.enemySide.find(
-      e => e.npcId.toString() === entry.actorId.toString(),
+      e => e.npcId?.toString() === entry.actorId.toString(),
     );
     if (!npcEntry) return [];
 
@@ -468,6 +477,134 @@ async function resolveSwitch(
   return events;
 }
 
+// ---------------------------------------------------------------------------
+// Catch mechanics
+// ---------------------------------------------------------------------------
+
+// Static ball catch-rate multipliers. Context-dependent balls (quick, timer,
+// nest, net) are computed at resolution time using battle/Pokémon state.
+const BALL_MODIFIERS: Record<string, number> = {
+  'ultra-ball':  2.0,
+  'great-ball':  1.5,
+  'dive-ball':   2.0,
+  'dusk-ball':   2.0,
+  'dream-ball':  4.0,
+  'beast-ball':  0.1,
+};
+
+function statusCatchModifier(status: string | null): number {
+  if (status === 'sleep' || status === 'freeze') return 2.5;
+  if (['paralysis', 'burn', 'poison', 'toxic'].includes(status ?? '')) return 1.5;
+  return 1.0;
+}
+
+async function resolveCatchAction(
+  battle: HydratedDocument<IBattle>,
+  entry:  TurnQueueEntry,
+): Promise<string[]> {
+  const events: string[] = [];
+  const { itemId, targets, actorId } = entry;
+  if (!itemId || targets.length === 0) return events;
+
+  const wildPoke = await Pokemon.findById(
+    targets[0],
+    'nickname speciesId level nature currentHp statusCondition',
+  ).lean();
+  if (!wildPoke || wildPoke.currentHp <= 0) {
+    events.push('The wild Pokémon has already fainted!');
+    return events;
+  }
+
+  const cache       = await PokedexCache.findOne({ pokeApiId: wildPoke.speciesId }, 'name baseStats catchRate types').lean();
+  const speciesName = cache ? slugToDisplayName(cache.name as string) : 'Wild Pokémon';
+  const displayName = wildPoke.nickname ?? speciesName;
+  const user        = await User.findById(actorId, 'username').lean();
+  const userName    = user?.username ?? 'Trainer';
+  const ballName    = slugToDisplayName(itemId);
+
+  events.push(`${userName} threw a ${ballName} at ${displayName}!`);
+
+  const maxHp = cache
+    ? computeStats(cache.baseStats as BaseStats, wildPoke.level, wildPoke.nature).hp
+    : wildPoke.currentHp;
+
+  let caught = false;
+
+  if (itemId === 'master-ball') {
+    caught = true;
+  } else {
+    let ballMod = BALL_MODIFIERS[itemId] ?? 1.0;
+    if (itemId === 'quick-ball') ballMod = battle.turnNumber === 1 ? 5.0 : 1.0;
+    if (itemId === 'timer-ball') ballMod = Math.min(4.0, 1 + 0.3 * battle.turnNumber);
+    if (itemId === 'nest-ball')  ballMod = Math.max(1.0, Math.min(4.0, (41 - wildPoke.level) / 10));
+    if (itemId === 'net-ball') {
+      const types = (cache?.types ?? []) as string[];
+      ballMod = types.some(t => t === 'water' || t === 'bug') ? 3.0 : 1.0;
+    }
+
+    const hpModifier = (3 * maxHp - 2 * wildPoke.currentHp) / (3 * maxHp);
+    const statusMod  = statusCatchModifier(wildPoke.statusCondition);
+    const catchRate  = (cache?.catchRate as number) ?? 45;
+    const catchValue = Math.min(255, Math.floor(catchRate * ballMod * hpModifier * statusMod));
+
+    let shakes = 0;
+    for (let i = 0; i < 3; i++) {
+      if (Math.random() < catchValue / 255) shakes++;
+      else break;
+    }
+    caught = shakes === 3;
+
+    if (!caught) {
+      const shakeMessages = [
+        'Oh no! The Pokémon broke free!',
+        'Darn! It appeared to be caught!',
+        'Aargh! Almost had it!',
+      ];
+      events.push(shakeMessages[shakes] ?? 'The Pokémon broke free!');
+    }
+  }
+
+  // Log the attempt on the battle document
+  battle.catchAttempts.push({
+    playerId:  new mongoose.Types.ObjectId(actorId.toString()),
+    pokemonId: new mongoose.Types.ObjectId(targets[0].toString()),
+    result:    caught ? 'caught' : 'failed',
+  });
+  battle.markModified('catchAttempts');
+
+  // Consume the Pokéball regardless of outcome
+  await Item.updateOne({ ownerId: actorId, itemId }, { $inc: { quantity: -1 } });
+  await Item.deleteMany({ ownerId: actorId, itemId, quantity: { $lte: 0 } });
+
+  if (caught) {
+    await Pokemon.updateOne(
+      { _id: targets[0] },
+      {
+        $set: {
+          ownerType:        'player',
+          ownerId:          actorId,
+          isInParty:        false,
+          partySlot:        null,
+          caughtAt:         new Date(),
+          caughtByPlayerId: actorId,
+        },
+      },
+    );
+    // Remove from the active slot so checkBattleEnd sees no active enemy
+    const enemyEntry = battle.enemySide.find(
+      e => e.activePokemonId?.toString() === targets[0].toString(),
+    );
+    if (enemyEntry) {
+      enemyEntry.fainted.push(new mongoose.Types.ObjectId(targets[0].toString()));
+      enemyEntry.activePokemonId = null;
+      battle.markModified('enemySide');
+    }
+    events.push(`Gotcha! ${displayName} was caught! It was transferred to your PC.`);
+  }
+
+  return events;
+}
+
 // Starting from battle.currentTargetIndex, auto-skips consecutive actors whose
 // move is blocked by sleep, freeze, or paralysis. Stops at the first actor that
 // can move (or when the queue is exhausted, in which case applyEndOfRound fires).
@@ -490,6 +627,51 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
         for (const ev of itemEvents) logEntry.events.push(ev);
         battle.markModified('turnLog');
       }
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      continue;
+    }
+
+    // Catch actions are fully specified at submission time — auto-resolve, then check if battle ended.
+    if (entry.actionType === 'catch') {
+      const catchEvents = await resolveCatchAction(battle, entry as unknown as TurnQueueEntry);
+      if (catchEvents.length > 0) {
+        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+        if (!logEntry) {
+          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+          logEntry = battle.turnLog[battle.turnLog.length - 1];
+        }
+        for (const ev of catchEvents) logEntry.events.push(ev);
+        battle.markModified('turnLog');
+      }
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      const endEvents = await checkBattleEnd(battle);
+      if (endEvents.length > 0) {
+        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+        if (!logEntry) {
+          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+          logEntry = battle.turnLog[battle.turnLog.length - 1];
+        }
+        for (const ev of endEvents) logEntry.events.push(ev);
+        battle.markModified('turnLog');
+      }
+      if (battle.status === 'complete') break;
+      continue;
+    }
+
+    // Run actions resolve in speed order but require no targeting input.
+    if (entry.actionType === 'run') {
+      const poke  = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
+      const cache = poke ? await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean() : null;
+      const name  = poke?.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+      if (!logEntry) {
+        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+        logEntry = battle.turnLog[battle.turnLog.length - 1];
+      }
+      logEntry.events.push(`${name} dashes away to reposition!`);
+      battle.markModified('turnLog');
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       continue;
@@ -878,13 +1060,21 @@ async function checkBattleEnd(battle: HydratedDocument<IBattle>): Promise<string
   const hasActiveEnemy = battle.enemySide.some(e => e.activePokemonId !== null);
   let enemySideEliminated = false;
   if (!hasActiveEnemy && battle.enemySide.length > 0) {
-    const npcIds = battle.enemySide.map(e => e.npcId);
-    const healthyEnemyCount = await Pokemon.countDocuments({
-      ownerId:   { $in: npcIds },
-      ownerType: 'npc',
-      currentHp: { $gt: 0 },
-    });
-    enemySideEliminated = healthyEnemyCount === 0;
+    const npcIds = battle.enemySide
+      .map(e => e.npcId)
+      .filter((id): id is mongoose.Types.ObjectId => id != null);
+    if (npcIds.length > 0) {
+      // NPC battle: check whether any NPC still has healthy Pokémon to send out
+      const healthyEnemyCount = await Pokemon.countDocuments({
+        ownerId:   { $in: npcIds },
+        ownerType: 'npc',
+        currentHp: { $gt: 0 },
+      });
+      enemySideEliminated = healthyEnemyCount === 0;
+    } else {
+      // Wild battle: no active Pokémon and no NPC party to fall back to
+      enemySideEliminated = true;
+    }
   }
 
   // --- Player side ---
@@ -919,6 +1109,13 @@ async function checkBattleEnd(battle: HydratedDocument<IBattle>): Promise<string
 
   if (enemySideEliminated) {
     const expEvents = await distributeExp(battle);
+    if (battle.type === 'wild') {
+      const wasCaught = battle.catchAttempts.some(a => a.result === 'caught');
+      // "Gotcha!" already logged by resolveCatchAction; just add EXP events for a catch
+      return wasCaught
+        ? expEvents
+        : ['The wild Pokémon was defeated!', ...expEvents];
+    }
     return ['All enemies have been defeated! The players win!', ...expEvents];
   }
   return ['All players have been defeated!'];
@@ -1082,11 +1279,16 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 // builder is built in milestone 4.3/4.4.
 // ---------------------------------------------------------------------------
 router.post('/', async (req: Request, res: Response): Promise<void> => {
-  const { type, playerIds, npcIds = [], playerPokemonLimit = null } = req.body as {
+  const {
+    type, playerIds, npcIds = [], playerPokemonLimit = null,
+    wildPokemon, wildCatchable = true,
+  } = req.body as {
     type: string;
     playerIds: string[];
     npcIds?: string[];
     playerPokemonLimit?: number | null;
+    wildPokemon?: { speciesId: number; level: number };
+    wildCatchable?: boolean;
   };
 
   if (!['pve', 'wild', 'pvp'].includes(type)) {
@@ -1144,6 +1346,88 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
     }
   }
 
+  // --- Wild battle: generate the wild Pokémon document ---
+  type EnemySlot = { npcId?: mongoose.Types.ObjectId; activePokemonId: mongoose.Types.ObjectId | null; fainted: mongoose.Types.ObjectId[] };
+  let enemySide: EnemySlot[];
+
+  if (type === 'wild') {
+    if (!wildPokemon?.speciesId || !wildPokemon?.level) {
+      res.status(400).json({ data: null, error: 'wildPokemon { speciesId, level } is required for wild battles' });
+      return;
+    }
+    const level = Number(wildPokemon.level);
+    if (!Number.isInteger(level) || level < 1 || level > 100) {
+      res.status(400).json({ data: null, error: 'level must be an integer between 1 and 100' });
+      return;
+    }
+
+    // Fetch species from cache or PokeAPI
+    let species = await PokedexCache.findOne({ pokeApiId: wildPokemon.speciesId }).lean();
+    if (!species) {
+      try {
+        const fetched = await fetchSpecies(wildPokemon.speciesId);
+        const created = await PokedexCache.create(fetched);
+        species = created.toObject();
+      } catch {
+        res.status(400).json({ data: null, error: `Species #${wildPokemon.speciesId} not found` });
+        return;
+      }
+    }
+
+    const nature = NATURES[Math.floor(Math.random() * NATURES.length)];
+
+    const genderRatio = (species.genderRatio as number) ?? -1;
+    let gender: 'male' | 'female' | 'none';
+    if (genderRatio === -1) {
+      gender = 'none';
+    } else {
+      gender = Math.random() < genderRatio / 8 ? 'female' : 'male';
+    }
+
+    const learnable = ((species.levelUpMoves ?? []) as Array<{ moveId: string; level: number }>)
+      .filter(m => m.level <= level)
+      .slice(-4);
+    const moveList = ((species.moves ?? []) as Array<{ name: string; pp: number | null }>);
+    const moves = learnable.map(m => {
+      const md = moveList.find(mv => mv.name === m.moveId);
+      const pp = md?.pp ?? 5;
+      return { moveId: m.moveId, currentPP: pp, maxPP: pp };
+    });
+
+    const stats = computeStats(species.baseStats as BaseStats, level, nature);
+
+    const wildPoke = await Pokemon.create({
+      speciesId:        species.pokeApiId,
+      ownerId:          new mongoose.Types.ObjectId(req.user!.userId),
+      ownerType:        'wild',
+      nickname:         null,
+      level,
+      exp:              0,
+      currentHp:        stats.hp,
+      nature,
+      gender,
+      heldItem:         null,
+      moves,
+      evs:              { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 },
+      statusCondition:  null,
+      statusCounter:    null,
+      volatileStatus:   [],
+      evolutionOverrides: [],
+      isInParty:        false,
+      partySlot:        null,
+      caughtAt:         null,
+      caughtByPlayerId: null,
+    });
+
+    enemySide = [{ activePokemonId: wildPoke._id as mongoose.Types.ObjectId, fainted: [] }];
+  } else {
+    enemySide = npcIds.map(id => ({
+      npcId:           new mongoose.Types.ObjectId(id),
+      activePokemonId: null,
+      fainted:         [],
+    }));
+  }
+
   const battle = await Battle.create({
     campaignId: campaign._id,
     type,
@@ -1155,11 +1439,8 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
       usedPokemonIds:  [],
       fainted:         [],
     })),
-    enemySide: npcIds.map(id => ({
-      npcId:           new mongoose.Types.ObjectId(id),
-      activePokemonId: null,
-      fainted:         [],
-    })),
+    enemySide,
+    wildCatchable:      type === 'wild' ? wildCatchable : true,
     playerPokemonLimit: playerPokemonLimit ?? null,
     lastUpdatedAt:      new Date(),
   });
@@ -1327,7 +1608,7 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
     return;
   }
 
-  const npcEntry = battle.enemySide.find(e => e.npcId.toString() === npcId);
+  const npcEntry = battle.enemySide.find(e => e.npcId?.toString() === npcId);
   if (!npcEntry) {
     res.status(404).json({ data: null, error: 'NPC not found in this battle' });
     return;
@@ -1372,7 +1653,7 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
 router.post('/:id/submit-move', async (req: Request, res: Response): Promise<void> => {
   const { actionType = 'move', moveId, itemId, targetPokemonId, switchToPokemonId } =
     req.body as {
-      actionType?: 'move' | 'item' | 'switch';
+      actionType?: 'move' | 'item' | 'switch' | 'catch' | 'run';
       moveId?: string;
       itemId?: string;
       targetPokemonId?: string;
@@ -1453,6 +1734,76 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
       moveId:          '',
       itemId,
       targets:         [targetObjId],
+      resolved:        false,
+    });
+
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    return;
+  }
+
+  // ---- run action ----
+  if (actionType === 'run') {
+    battle.turnQueue.push({
+      actorId:         userId,
+      actorType:       'player',
+      activePokemonId: playerEntry.activePokemonId,
+      actionType:      'run',
+      moveId:          '',
+      targets:         [],
+      resolved:        false,
+    });
+
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    return;
+  }
+
+  // ---- catch action ----
+  if (actionType === 'catch') {
+    if (battle.type !== 'wild') {
+      res.status(400).json({ data: null, error: 'Catch actions are only valid in wild battles' });
+      return;
+    }
+    if (!battle.wildCatchable) {
+      res.status(400).json({ data: null, error: 'This wild Pokémon cannot be caught' });
+      return;
+    }
+    if (!itemId) {
+      res.status(400).json({ data: null, error: 'itemId (Poké Ball) is required for catch actions' });
+      return;
+    }
+
+    const ballItem = await Item.findOne({ ownerId: userId, itemId }).lean();
+    if (!ballItem || ballItem.quantity < 1) {
+      res.status(400).json({ data: null, error: 'You do not have that Poké Ball' });
+      return;
+    }
+    if (ballItem.pocket !== 'pokeballs') {
+      res.status(400).json({ data: null, error: 'That item is not a Poké Ball' });
+      return;
+    }
+
+    const wildEntry = battle.enemySide.find(e => !e.npcId && e.activePokemonId != null);
+    if (!wildEntry?.activePokemonId) {
+      res.status(400).json({ data: null, error: 'No active wild Pokémon to catch' });
+      return;
+    }
+
+    battle.turnQueue.push({
+      actorId:         userId,
+      actorType:       'player',
+      activePokemonId: playerEntry.activePokemonId,
+      actionType:      'catch',
+      moveId:          '',
+      itemId,
+      targets:         [wildEntry.activePokemonId],
       resolved:        false,
     });
 
@@ -1597,7 +1948,11 @@ router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<
     return;
   }
 
-  const npcEntry = battle.enemySide.find(e => e.npcId.toString() === npcId);
+  // For NPC battles match by npcId; for wild battles the DM passes the
+  // wild Pokémon's activePokemonId in the npcId field.
+  const npcEntry = battle.type === 'wild'
+    ? battle.enemySide.find(e => e.activePokemonId?.toString() === npcId)
+    : battle.enemySide.find(e => e.npcId?.toString() === npcId);
   if (!npcEntry) {
     res.status(404).json({ data: null, error: 'NPC not found in this battle' });
     return;
@@ -1608,6 +1963,12 @@ router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<
   );
   if (alreadySubmitted) {
     res.status(400).json({ data: null, error: 'This NPC has already submitted a move this turn' });
+    return;
+  }
+
+  // Wild Pokémon cannot switch
+  if (battle.type === 'wild' && actionType === 'switch') {
+    res.status(400).json({ data: null, error: 'Wild Pokémon cannot switch' });
     return;
   }
 
@@ -2179,7 +2540,7 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
   const activePokemons = allActivePokemonIds.length > 0
     ? await Pokemon.find(
         { _id: { $in: allActivePokemonIds } },
-        'nickname speciesId currentHp level nature statusCondition volatileStatus'
+        'nickname speciesId currentHp level nature statusCondition volatileStatus moves'
       ).lean()
     : [];
 
@@ -2209,6 +2570,7 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
       maxHp,
       statusCondition: poke.statusCondition ?? null,
       isConfused:      poke.volatileStatus.some(v => v.condition === 'confusion'),
+      moves:           (poke as any).moves as Array<{ moveId: string; currentPP: number; maxPP: number }> | undefined,
     };
   };
 
@@ -2222,15 +2584,19 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
   }));
 
   // Join NPC names so the frontend can label enemy slots without extra requests
-  const npcIds  = battle.enemySide.map(e => e.npcId);
-  const npcs    = npcIds.length > 0
+  const npcIds = battle.enemySide
+    .map(e => e.npcId)
+    .filter((id): id is mongoose.Types.ObjectId => id != null);
+  const npcs = npcIds.length > 0
     ? await Npc.find({ _id: { $in: npcIds } }, 'name').lean()
     : [];
   const npcNameMap = new Map(npcs.map(n => [(n._id as mongoose.Types.ObjectId).toString(), n.name]));
 
   const enemySideWithInfo = battle.enemySide.map(entry => ({
     ...entry,
-    npcName:           npcNameMap.get(entry.npcId.toString()) ?? 'NPC',
+    npcName: entry.npcId
+      ? (npcNameMap.get(entry.npcId.toString()) ?? 'NPC')
+      : 'Wild Pokémon',
     activePokemonInfo: buildInfo(entry.activePokemonId),
   }));
 
@@ -2240,6 +2606,7 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
       playerSide:       playerSideWithNames,
       enemySide:        enemySideWithInfo,
       noTargetMoveIds:  [...NO_TARGET_MOVE_IDS],
+      wildCatchable:    battle.wildCatchable,
     },
     error: null,
   });

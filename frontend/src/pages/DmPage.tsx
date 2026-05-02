@@ -800,6 +800,13 @@ function CreateBattleCard({ token }: { token: string | null }) {
   const [loading,        setLoading]        = useState(false);
   const [error,          setError]          = useState('');
 
+  // Wild battle state
+  const [wildSpeciesId,      setWildSpeciesId]      = useState<number | null>(null);
+  const [wildSpeciesName,    setWildSpeciesName]    = useState('');
+  const [wildLevel,          setWildLevel]          = useState('');
+  const [speciesQuery,       setSpeciesQuery]       = useState('');
+  const [speciesLookupLoading, setSpeciesLookupLoading] = useState(false);
+
   const headers = { Authorization: `Bearer ${token}` };
 
   useEffect(() => {
@@ -832,6 +839,39 @@ function CreateBattleCard({ token }: { token: string | null }) {
     });
   }
 
+  async function handleSpeciesLookup() {
+    if (!speciesQuery.trim()) return;
+    setSpeciesLookupLoading(true);
+    setError('');
+    try {
+      const res = await axios.get(`${API}/api/pokedex/${speciesQuery.trim().toLowerCase()}`, { headers });
+      const s = res.data.data;
+      setWildSpeciesId(s.pokeApiId);
+      setWildSpeciesName(s.name);
+      setSpeciesQuery('');
+    } catch {
+      setError(`Species "${speciesQuery}" not found.`);
+    } finally {
+      setSpeciesLookupLoading(false);
+    }
+  }
+
+  async function handleRandomize() {
+    setSpeciesLookupLoading(true);
+    setError('');
+    try {
+      const randomId = Math.floor(Math.random() * 1025) + 1;
+      const res = await axios.get(`${API}/api/pokedex/${randomId}`, { headers });
+      const s = res.data.data;
+      setWildSpeciesId(s.pokeApiId);
+      setWildSpeciesName(s.name);
+    } catch {
+      setError('Failed to randomize species.');
+    } finally {
+      setSpeciesLookupLoading(false);
+    }
+  }
+
   async function handleSubmit(e: { preventDefault(): void }) {
     e.preventDefault();
     setError('');
@@ -839,14 +879,25 @@ function CreateBattleCard({ token }: { token: string | null }) {
       setError('Select at least one player.');
       return;
     }
+    if (battleType === 'wild') {
+      if (!wildSpeciesId) { setError('Look up or randomize a wild Pokémon species first.'); return; }
+      const lvl = Number(wildLevel);
+      if (!wildLevel.trim() || !Number.isInteger(lvl) || lvl < 1 || lvl > 100) {
+        setError('Enter a valid level (1–100).');
+        return;
+      }
+    }
     setLoading(true);
     try {
       const body: Record<string, unknown> = {
         type:      battleType,
         playerIds: Array.from(selectedPlayers),
-        npcIds:    Array.from(selectedNpcs),
+        npcIds:    battleType === 'wild' ? [] : Array.from(selectedNpcs),
       };
       if (limit.trim() !== '') body.playerPokemonLimit = Number(limit);
+      if (battleType === 'wild') {
+        body.wildPokemon = { speciesId: wildSpeciesId, level: Number(wildLevel) };
+      }
 
       const res = await axios.post(`${API}/api/battles`, body, { headers });
       navigate(`/battle/${res.data.data._id}`);
@@ -891,25 +942,77 @@ function CreateBattleCard({ token }: { token: string | null }) {
               </div>
             </div>
 
-            {/* NPC checkboxes */}
-            {npcs.length > 0 && (
-              <div className="flex flex-col gap-1.5">
-                <Label>NPCs</Label>
-                <div className="flex flex-col gap-2">
-                  {npcs.map(n => (
-                    <label key={n._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
-                      <input
-                        type="checkbox"
-                        checked={selectedNpcs.has(n._id)}
-                        onChange={() => toggleNpc(n._id)}
-                        className="h-4 w-4"
-                      />
-                      <span>{n.name}</span>
-                      <span className="text-muted-foreground text-xs">({n.partyCount} Pokémon)</span>
-                    </label>
-                  ))}
+            {/* NPC checkboxes (PvE) or wild Pokémon picker */}
+            {battleType === 'wild' ? (
+              <div className="flex flex-col gap-3">
+                <Label>Wild Pokémon</Label>
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Species name (e.g. pikachu)"
+                    value={speciesQuery}
+                    onChange={e => setSpeciesQuery(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleSpeciesLookup(); } }}
+                    className="flex-1"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleSpeciesLookup}
+                    disabled={speciesLookupLoading || !speciesQuery.trim()}
+                    className="min-h-11"
+                  >
+                    Look up
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleRandomize}
+                    disabled={speciesLookupLoading}
+                    className="min-h-11"
+                  >
+                    Random
+                  </Button>
+                </div>
+                {wildSpeciesId && (
+                  <p className="text-sm text-muted-foreground">
+                    Selected:{' '}
+                    <span className="capitalize font-medium text-foreground">{wildSpeciesName}</span>
+                    {' '}(#{wildSpeciesId})
+                  </p>
+                )}
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="wild-level">Level</Label>
+                  <Input
+                    id="wild-level"
+                    type="number"
+                    min={1}
+                    max={100}
+                    placeholder="e.g. 10"
+                    value={wildLevel}
+                    onChange={e => setWildLevel(e.target.value)}
+                  />
                 </div>
               </div>
+            ) : (
+              npcs.length > 0 && (
+                <div className="flex flex-col gap-1.5">
+                  <Label>NPCs</Label>
+                  <div className="flex flex-col gap-2">
+                    {npcs.map(n => (
+                      <label key={n._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
+                        <input
+                          type="checkbox"
+                          checked={selectedNpcs.has(n._id)}
+                          onChange={() => toggleNpc(n._id)}
+                          className="h-4 w-4"
+                        />
+                        <span>{n.name}</span>
+                        <span className="text-muted-foreground text-xs">({n.partyCount} Pokémon)</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )
             )}
 
             {/* Battle type */}

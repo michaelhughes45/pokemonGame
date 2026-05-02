@@ -17,6 +17,11 @@ The user is actively learning programming with the goal of getting a job in the 
 Treat every task as a teaching moment without being condescending. Assume the user can
 handle technical depth — just don't skip the explanation.
 
+**Token discipline:** Only read files that are directly needed for the current task.
+Do not speculatively load context "just in case". If the user says "read X", read X and
+stop — do not also read related files unprompted. When coding, read only the specific
+sections relevant to the current subtask, not entire large files upfront.
+
 ---
 
 ## Project Summary
@@ -212,22 +217,25 @@ _id (used as poll key), campaignId (ObjectId), type ('pve'|'wild'|'pvp') — who
 status ('waiting'|'active'|'complete'),
 phase ('move_submission'|'targeting'|'end_of_round') — sub-state within 'active',
 playerSide ([{ userId, activePokemonId, usedPokemonIds:[], fainted:[] }]),
-enemySide ([{ npcId, activePokemonId, fainted:[] }]),
+enemySide ([{ npcId (absent for wild), activePokemonId, fainted:[] }]),
 turnNumber,
 turnQueue ([{
-  actorId (userId or npcId),
+  actorId (userId or npcId or activePokemonId for wild),
   actorType ('player'|'npc'),
   activePokemonId,
-  moveId,
+  actionType ('move'|'item'|'switch'|'catch'|'run'),
+  moveId, itemId, switchToPokemonId,
   targets ([pokemonId]) — empty [] during move_submission, filled during targeting phase,
   resolved (Boolean)
 }]),
 currentTargetIndex (Number) — index into speed-sorted turnQueue for targeting prompts,
 weather (null|'rain'|'sun'|'sandstorm'|'hail'|'snow'),
+weatherTurnsRemaining (Number | null),
 fieldConditions ([{ condition, turnsRemaining }]),
 turnLog ([{ turn, events:[] }]),
 catchAttempts ([{ playerId, pokemonId, result }]),
 playerPokemonLimit (Number | null) — max distinct Pokémon each player may send out; null means no limit (use full party of 6),
+wildCatchable (Boolean) — false lets DM use wild Pokémon as a pure fight,
 expAwarded (Boolean), encounterId, lastUpdatedAt, createdAt, endedAt
 ```
 
@@ -381,6 +389,14 @@ pokemonGame/
 - `checkBattleEnd` guards on `battle.status !== 'active'` so it is safe to call multiple times per round without double-triggering; enemy side checks live NPC party HP in the DB; player side checks sendable party Pokémon per-entry
 - `distributeExp` uses `expAwarded` flag to prevent double-awarding; simplified formula `enemy_level × 5` per fainted enemy is a Phase 5 placeholder; active battlers (`usedPokemonIds`) get full EXP, benched get half with "(Exp. Share)" label in the turn log
 - `autoSkipBlockedActors` checks HP ≤ 0 on move actors before the status-block check — a Pokémon fainted by a faster actor is skipped rather than prompted for target selection
+- Wild battles: `enemySide` entry has no `npcId` (undefined/null); wild Pokémon created with `ownerType: 'wild'` at battle creation with random nature, gender, and last-4 level-up moves; `actorId` for the wild side is `activePokemonId` (not an npcId); DM chooses species via `/api/pokedex/:idOrName` lookup or clicks "Random" to pick a random species (1–1025)
+- `GET /api/pokedex/search?q=` route (≥2 chars) searches PokedexCache by name regex, returns up to 10 matches — used by DM species lookup in CreateBattleCard
+- Catch formula: `catchValue = min(255, floor(catchRate × ballMod × hpModifier × statusMod))`; 3 shake checks each at probability `catchValue/255`; master-ball bypasses all checks; `BALL_MODIFIERS` table in battles.ts; `statusCatchModifier` helper (sleep/freeze → 2.5×, par/burn/pois/tox → 1.5×); success transfers Pokémon ownership to player PC (ownerType:'player', caughtByPlayerId set), ball consumed, `catchAttempts` logged, wild activePokemonId nulled; catch auto-targets the wild Pokémon at submission — no targetPokemonId needed from the client
+- `wildCatchable` flag on Battle (true by default) controls whether the Ball tab and catch submission are available; DM can set it false to use wild encounters as pure fight encounters
+- Run action: `actionType: 'run'` submits with no additional fields; auto-resolves in `autoSkipBlockedActors` at priority tier 0 (speed order, same as moves); logs "[Name] dashes away to reposition!" to the turn log; no state changes — purely a physical-table repositioning signal
+- Priority tiers in `checkAndAdvance` sort updated: items/catch (2) → switches (1) → moves/run (0); within each tier speed order applies
+- Ball tab in BattlePage: shown only when `battle.type === 'wild' && battle.wildCatchable`; displays pokeball-pocket bag items; clicking one calls `handleSubmitCatch(itemId)`; pokeballs are now included in the bagItems fetch filter alongside healing + status_cure
+- Run button in BattlePage: shown for all wild battles below the action tabs; requires a two-step confirm (`Run` → `Confirm Run` + `Cancel`) before submitting; resets each new round with other action state
 
 ---
 
@@ -409,7 +425,7 @@ pokemonGame/
 - [x] **3.9** Items in battle — `actionType: 'move' | 'item'` added to TurnQueueEntry; submit-move accepts item actions `{ actionType: 'item', itemId, targetPokemonId }`; item actions sort before all moves (trainer-acts-first priority); `BATTLE_ITEM_EFFECTS` table + `resolveItemAction` helper in battles.ts; items auto-resolve in `autoSkipBlockedActors`; bag deducted only on successful use; confusion cleared on swap-out (send-out + dm-send-out); Move/Item tab UI in BattlePage with two-step item → party-target picker
 - [x] **3.10** Switching — `actionType: 'switch'` + `switchToPokemonId` added to TurnQueueEntry; submit-move accepts switch actions; switches sort between items (2) and moves (0) at priority tier 1; `resolveSwitch` recalls outgoing Pokémon (clears volatileStatus), sets new activePokemonId, updates usedPokemonIds; switches auto-resolve in `autoSkipBlockedActors`; playerPokemonLimit enforced at submission (new Pokémon blocked if limit reached, previously-used Pokémon always free); state endpoint returns `usedPokemonCount` + `pokemonLimitReached` per player; Switch tab UI in BattlePage with limit counter and per-Pokémon blocking; DM NPC switch support added (dm-submit-move accepts `actionType: 'switch'`; `resolveSwitch` handles both player and NPC sides)
 - [x] **3.11** Faint & battle end — `applyFaints` helper detects HP ≤ 0 after every move and end-of-round damage, logs faint event, clears volatile statuses, updates `fainted[]` and nulls `activePokemonId`; `checkBattleEnd` checks full NPC party HP (enemy) and sendable party Pokémon (player) to set `status: 'complete'`; `distributeExp` awards EXP to all party Pokémon (active = full, benched = half via Exp. Share), guarded by `expAwarded` flag; Battle Complete banner + turn log visible on complete battles ★ first playable game
-- [ ] **4.1** Wild battles & catch — catch formula, Pokémon lands in PC with zeroed EVs
+- [x] **4.1** Wild battles & catch — DM creates wild battles with species lookup or randomize (1–1025); wild Pokémon generated at battle creation (random nature, gender, last-4 level-up moves, computed HP via statCalc); `enemySide` entry has no npcId; catch formula (catchRate × ballMod × hpMod × statusMod, 3-shake check, master-ball bypass); success transfers Pokémon to player PC; `wildCatchable` flag; run action logs repositioning message in speed order; Ball tab + Run button (with confirm) added to player action UI
 - [ ] **4.2** Evolution engine — level-up check, override rules respected
 - [ ] **4.3** DM encounter builder — /dm/encounters, build and launch, set playerPokemonLimit per encounter ★ first real session
 - [ ] **4.4** DM NPC builder — /dm/npcs, custom party (up to 12 Pokémon) and optional AI strategy for auto-submission; NPC bag management (give items to NPCs, use in battle via Item tab in NPC Actions — requires `ownerType: 'player'|'npc'` on Item model)
@@ -426,8 +442,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 4.1 — Wild battles & catch (catch formula, Pokémon lands in PC with zeroed EVs)
-- **Just finished:** 3.11 — Faint detection, battle end, EXP distribution (Gen 6+ Exp. Share). Tagged v3.11. First playable game.
+- **Starting:** 4.2 — Evolution engine (level-up check, override rules respected)
+- **Just finished:** 4.1 — Wild battles & catch. DM species lookup + randomize, wild Pokémon generation, catch formula, run action, Ball tab + Run button UI. Tag v4.1 when committing.
 - **Known issues / blockers:** NPC items deferred to 4.4
 
 ---

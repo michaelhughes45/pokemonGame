@@ -12,7 +12,7 @@ export type PlayerSideEntry = {
 };
 
 export type EnemySideEntry = {
-  npcId: mongoose.Types.ObjectId;
+  npcId?: mongoose.Types.ObjectId;  // absent for wild battles
   activePokemonId: mongoose.Types.ObjectId | null;
   fainted: mongoose.Types.ObjectId[];
 };
@@ -21,7 +21,7 @@ export type TurnQueueEntry = {
   actorId: mongoose.Types.ObjectId;
   actorType: 'player' | 'npc';
   activePokemonId: mongoose.Types.ObjectId;
-  actionType: 'move' | 'item' | 'switch';
+  actionType: 'move' | 'item' | 'switch' | 'catch' | 'run';
   moveId?: string;
   // Present only when actionType === 'item'
   itemId?: string;
@@ -75,6 +75,8 @@ export type IBattle = {
   catchAttempts: CatchAttempt[];
   // null = no limit (use full party of 6); set by DM when launching
   playerPokemonLimit: number | null;
+  // wild battles only — false lets DM use the wild Pokémon as a pure fight
+  wildCatchable: boolean;
   expAwarded: boolean;
   encounterId: mongoose.Types.ObjectId | null;
   lastUpdatedAt: Date;
@@ -108,7 +110,7 @@ const BattleSchema = new Schema<IBattle>(
 
     enemySide: [
       {
-        npcId:           { type: Schema.Types.ObjectId, ref: 'Npc', required: true },
+        npcId:           { type: Schema.Types.ObjectId, ref: 'Npc', default: null },
         activePokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
         fainted:         [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
         _id:             false,
@@ -122,7 +124,7 @@ const BattleSchema = new Schema<IBattle>(
         actorId:         { type: Schema.Types.ObjectId, required: true },
         actorType:       { type: String, enum: ['player', 'npc'], required: true },
         activePokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', required: true },
-        actionType:        { type: String, enum: ['move', 'item', 'switch'], default: 'move' },
+        actionType:        { type: String, enum: ['move', 'item', 'switch', 'catch', 'run'], default: 'move' },
         moveId:            { type: String, default: '' },
         itemId:            { type: String, default: null },
         switchToPokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
@@ -168,6 +170,7 @@ const BattleSchema = new Schema<IBattle>(
     ],
 
     playerPokemonLimit: { type: Number, default: null },
+    wildCatchable:      { type: Boolean, default: true },
     expAwarded:         { type: Boolean, default: false },
     encounterId:        { type: Schema.Types.ObjectId, ref: 'Encounter', default: null },
     lastUpdatedAt:      { type: Date, default: Date.now },

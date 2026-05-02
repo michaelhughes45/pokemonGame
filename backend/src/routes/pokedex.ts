@@ -4,6 +4,21 @@ import { fetchSpecies } from '../lib/pokeapi';
 
 const router = Router();
 
+// Search cached species by name fragment. Returns up to 10 matches.
+// Must appear before /:idOrName so Express doesn't treat "search" as an id.
+router.get('/search', async (req: Request, res: Response): Promise<void> => {
+  const q = ((req.query.q as string) ?? '').trim();
+  if (q.length < 2) {
+    res.json({ data: [], error: null });
+    return;
+  }
+  const results = await PokedexCache
+    .find({ name: { $regex: q, $options: 'i' } }, 'pokeApiId name types')
+    .limit(10)
+    .lean();
+  res.json({ data: results, error: null });
+});
+
 router.get('/:idOrName', async (req: Request, res: Response): Promise<void> => {
   const idOrName = req.params.idOrName as string;
 

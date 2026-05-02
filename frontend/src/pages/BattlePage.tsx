@@ -16,7 +16,7 @@ type TurnQueueEntry = {
   actorId: string;
   actorType: 'player' | 'npc';
   activePokemonId: string;
-  actionType: 'move' | 'item' | 'switch';
+  actionType: 'move' | 'item' | 'switch' | 'catch' | 'run';
   moveId: string;
   targets: string[];
   resolved: boolean;
@@ -38,6 +38,7 @@ type ActivePokemonInfo = {
   maxHp: number | null;
   statusCondition: string | null;
   isConfused: boolean;
+  moves?: MoveSlot[];
 };
 
 type PlayerSideEntry = {
@@ -52,7 +53,7 @@ type PlayerSideEntry = {
 };
 
 type EnemySideEntry = {
-  npcId: string;
+  npcId?: string;  // absent for wild battles
   npcName: string;
   activePokemonId: string | null;
   fainted: string[];
@@ -89,6 +90,7 @@ type BattleState = {
   weatherTurnsRemaining: number | null;
   noTargetMoveIds: string[];
   playerPokemonLimit: number | null;
+  wildCatchable: boolean;
   turnLog: TurnLogEntry[];
   lastUpdatedAt: string;
 };
@@ -243,8 +245,9 @@ export default function BattlePage() {
   const [weatherTurns,        setWeatherTurns]        = useState('');
   const [weatherActionError,  setWeatherActionError]  = useState('');
   const [bagItems,            setBagItems]            = useState<BagItem[]>([]);
-  const [actionTab,           setActionTab]           = useState<'move' | 'item' | 'switch'>('move');
+  const [actionTab,           setActionTab]           = useState<'move' | 'item' | 'switch' | 'ball'>('move');
   const [selectedItemId,      setSelectedItemId]      = useState<string | null>(null);
+  const [runConfirmPending,   setRunConfirmPending]   = useState(false);
 
   // Polling loop — fetches full battle state every 3 seconds
   useEffect(() => {
@@ -272,7 +275,8 @@ export default function BattlePage() {
     return () => { cancelled = true; clearInterval(interval); };
   }, [id, token]);
 
-  // Fetch party for players (not DM) so they can pick which Pokémon to send out
+  // Fetch party for players (not DM) so they can pick which Pokémon to send out.
+  // Re-runs each new round so HP stays fresh (fainted Pokémon are greyed out correctly).
   useEffect(() => {
     if (!token || user?.role === 'dm' || user?.role === 'admin') return;
     axios.get(`${API}/api/pokemon/party`, {
@@ -280,7 +284,7 @@ export default function BattlePage() {
     })
       .then(res => setParty(res.data.data ?? []))
       .catch(() => {});
-  }, [token, user?.role]);
+  }, [token, user?.role, battle?.turnNumber]);
 
   // Fetch healing + status_cure items for players; re-runs each new round so quantities stay fresh
   useEffect(() => {
@@ -288,7 +292,7 @@ export default function BattlePage() {
     axios.get(`${API}/api/items`, { headers: { Authorization: `Bearer ${token}` } })
       .then(res => {
         const all: BagItem[] = res.data.data ?? [];
-        setBagItems(all.filter(i => i.pocket === 'healing' || i.pocket === 'status_cure'));
+        setBagItems(all.filter(i => i.pocket === 'healing' || i.pocket === 'status_cure' || i.pocket === 'pokeballs'));
       })
       .catch(() => {});
   }, [token, user?.role, battle?.turnNumber]);
@@ -297,6 +301,7 @@ export default function BattlePage() {
   useEffect(() => {
     setActionTab('move');
     setSelectedItemId(null);
+    setRunConfirmPending(false);
   }, [battle?.turnNumber]);
 
   // Fetch active Pokémon detail (moves, type data) when activePokemonId becomes known
@@ -329,14 +334,15 @@ export default function BattlePage() {
   const userRole = user?.role;
   useEffect(() => {
     if ((userRole !== 'dm' && userRole !== 'admin') || !battle || battle.status !== 'active') return;
+    // Only auto-fetch for NPC entries (wild entries have no npcId and need no party load)
     const uncached = battle.enemySide.filter(
-      e => e.activePokemonId && !npcParties[e.npcId]
+      e => e.npcId && e.activePokemonId && !npcParties[e.npcId]
     );
     uncached.forEach(entry => {
       axios.get(`${API}/api/dm/npcs/${entry.npcId}/party`, {
         headers: { Authorization: `Bearer ${token}` },
       })
-        .then(res => setNpcParties(prev => ({ ...prev, [entry.npcId]: res.data.data ?? [] })))
+        .then(res => setNpcParties(prev => ({ ...prev, [entry.npcId!]: res.data.data ?? [] })))
         .catch(() => {});
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -475,6 +481,41 @@ export default function BattlePage() {
       );
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to submit switch.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleSubmitCatch(itemId: string) {
+    if (!id) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(
+        `${API}/api/battles/${id}/submit-move`,
+        { actionType: 'catch', itemId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to throw Poké Ball.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleSubmitRun() {
+    if (!id) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(
+        `${API}/api/battles/${id}/submit-move`,
+        { actionType: 'run' },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setRunConfirmPending(false);
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to run.'));
     } finally {
       setSubmitting(false);
     }
@@ -721,15 +762,24 @@ export default function BattlePage() {
                 <p className="text-sm text-muted-foreground">No Pokémon in your party.</p>
               ) : (
                 party.map(p => {
-                  const fainted = p.currentHp <= 0;
+                  const fainted      = p.currentHp <= 0;
+                  const alreadyUsed  = myEntry?.usedPokemonIds.includes(p._id) ?? false;
+                  const limitBlocked = !alreadyUsed && (myEntry?.pokemonLimitReached ?? false);
+                  const disabled     = fainted || limitBlocked || submitting;
+
+                  let subLabel: string;
+                  if (fainted)            subLabel = 'Fainted';
+                  else if (limitBlocked)  subLabel = 'Limit reached';
+                  else subLabel = `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`;
+
                   return (
                     <button
                       key={p._id}
-                      onClick={() => !fainted && !submitting && handleSendOut(p._id)}
-                      disabled={fainted || submitting}
+                      onClick={() => !disabled && handleSendOut(p._id)}
+                      disabled={disabled}
                       className={[
                         'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                        fainted
+                        disabled
                           ? 'opacity-40 cursor-not-allowed bg-muted'
                           : 'hover:bg-accent cursor-pointer',
                       ].join(' ')}
@@ -738,10 +788,7 @@ export default function BattlePage() {
                       <span className="text-muted-foreground text-xs">
                         Lv.{p.level}
                         {' · '}
-                        {fainted
-                          ? 'Fainted'
-                          : `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`
-                        }
+                        {subLabel}
                       </span>
                     </button>
                   );
@@ -778,11 +825,14 @@ export default function BattlePage() {
               ) : (
                 <>
                   {actionError && <p className="text-sm text-destructive">{actionError}</p>}
-                  <Tabs value={actionTab} onValueChange={v => { setActionTab(v as 'move' | 'item' | 'switch'); setSelectedItemId(null); }}>
+                  <Tabs value={actionTab} onValueChange={v => { setActionTab(v as 'move' | 'item' | 'switch' | 'ball'); setSelectedItemId(null); }}>
                     <TabsList>
                       <TabsTrigger value="move">Move</TabsTrigger>
                       <TabsTrigger value="item">Item</TabsTrigger>
                       <TabsTrigger value="switch">Switch</TabsTrigger>
+                      {battle.type === 'wild' && battle.wildCatchable && (
+                        <TabsTrigger value="ball">Ball</TabsTrigger>
+                      )}
                     </TabsList>
 
                     <TabsContent value="move">
@@ -916,7 +966,62 @@ export default function BattlePage() {
                         </div>
                       )}
                     </TabsContent>
+
+                    {battle.type === 'wild' && battle.wildCatchable && (
+                      <TabsContent value="ball">
+                        {bagItems.filter(i => i.pocket === 'pokeballs').length === 0 ? (
+                          <p className="text-sm text-muted-foreground mt-2">No Poké Balls in bag.</p>
+                        ) : (
+                          <div className="flex flex-col gap-2 mt-2">
+                            {bagItems.filter(i => i.pocket === 'pokeballs').map(item => (
+                              <button
+                                key={item.itemId}
+                                onClick={() => !submitting && handleSubmitCatch(item.itemId)}
+                                disabled={submitting}
+                                className="flex justify-between items-center rounded-md border px-4 py-3 text-sm text-left hover:bg-accent cursor-pointer min-h-11"
+                              >
+                                <span className="font-medium">{formatMove(item.itemId)}</span>
+                                <span className="text-muted-foreground text-xs">×{item.quantity}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </TabsContent>
+                    )}
                   </Tabs>
+
+                  {battle.type === 'wild' && (
+                    <div className="pt-2 border-t">
+                      {runConfirmPending ? (
+                        <div className="flex gap-2">
+                          <Button
+                            variant="destructive"
+                            onClick={handleSubmitRun}
+                            disabled={submitting}
+                            className="flex-1 min-h-11"
+                          >
+                            {submitting ? 'Running…' : 'Confirm Run'}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            onClick={() => setRunConfirmPending(false)}
+                            disabled={submitting}
+                            className="min-h-11"
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          onClick={() => setRunConfirmPending(true)}
+                          className="w-full min-h-11"
+                        >
+                          Run
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </CardContent>
@@ -929,32 +1034,79 @@ export default function BattlePage() {
             <CardHeader><CardTitle className="text-base">NPC Actions</CardTitle></CardHeader>
             <CardContent className="flex flex-col gap-4">
               {battle.enemySide.map(entry => {
+                // For wild battles entry.npcId is absent; use activePokemonId as the actor key
+                const isWild  = !entry.npcId;
+                const actorId = entry.npcId ?? entry.activePokemonId ?? '';
                 const npcMoveSubmitted = battle.turnQueue.some(
-                  e => e.actorId === entry.npcId && e.actorType === 'npc'
+                  e => e.actorId === actorId && e.actorType === 'npc'
                 );
-                const party = npcParties[entry.npcId] ?? [];
+
+                if (isWild) {
+                  // Wild Pokémon: already active, no party to load, moves come from activePokemonInfo
+                  const wildMoves = entry.activePokemonInfo?.moves ?? [];
+                  return (
+                    <div key={actorId} className="flex flex-col gap-2 border rounded-md p-3">
+                      <p className="text-sm font-medium">
+                        Wild {entry.activePokemonInfo?.speciesName ?? entry.npcName}
+                      </p>
+                      {!entry.activePokemonId ? (
+                        <p className="text-xs text-muted-foreground">Fainted</p>
+                      ) : npcMoveSubmitted ? (
+                        <p className="text-xs text-muted-foreground">
+                          {entry.activePokemonInfo?.name ?? 'Pokémon'} — move submitted
+                        </p>
+                      ) : wildMoves.length === 0 ? (
+                        <p className="text-sm text-muted-foreground">No moves available.</p>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2">
+                          {wildMoves.map((slot: MoveSlot) => {
+                            const noPP = slot.currentPP <= 0;
+                            return (
+                              <button
+                                key={slot.moveId}
+                                onClick={() => !noPP && !submitting && handleDmSubmitMove(actorId, slot.moveId)}
+                                disabled={noPP || submitting}
+                                className={[
+                                  'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                  noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                ].join(' ')}
+                              >
+                                <span className="font-medium">{formatMove(slot.moveId)}</span>
+                                <span className="text-muted-foreground text-xs mt-0.5">PP {slot.currentPP}/{slot.maxPP}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+
+                // NPC entry — existing logic
+                const npcId      = entry.npcId!;
+                const party      = npcParties[npcId] ?? [];
                 const activePokemon = entry.activePokemonId
-                  ? party.find(p => p._id === entry.activePokemonId)
+                  ? party.find((p: NpcPartyPokemon) => p._id === entry.activePokemonId)
                   : null;
 
                 return (
-                  <div key={entry.npcId} className="flex flex-col gap-2 border rounded-md p-3">
+                  <div key={npcId} className="flex flex-col gap-2 border rounded-md p-3">
                     <p className="text-sm font-medium">{entry.npcName}</p>
 
                     {!entry.activePokemonId ? (
-                      expandedSendOut === entry.npcId ? (
+                      expandedSendOut === npcId ? (
                         <div className="flex flex-col gap-2">
-                          {partyLoading === entry.npcId ? (
+                          {partyLoading === npcId ? (
                             <p className="text-sm text-muted-foreground">Loading party…</p>
                           ) : party.length === 0 ? (
                             <p className="text-sm text-muted-foreground">No Pokémon in this NPC's party.</p>
                           ) : (
-                            party.map(p => {
+                            party.map((p: NpcPartyPokemon) => {
                               const fainted = p.currentHp <= 0;
                               return (
                                 <button
                                   key={p._id}
-                                  onClick={() => !fainted && !submitting && handleDmSendOut(entry.npcId, p._id)}
+                                  onClick={() => !fainted && !submitting && handleDmSendOut(npcId, p._id)}
                                   disabled={fainted || submitting}
                                   className={[
                                     'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors',
@@ -977,11 +1129,11 @@ export default function BattlePage() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => fetchNpcParty(entry.npcId)}
-                          disabled={partyLoading === entry.npcId}
+                          onClick={() => fetchNpcParty(npcId)}
+                          disabled={partyLoading === npcId}
                           className="w-full min-h-9"
                         >
-                          {partyLoading === entry.npcId ? 'Loading…' : 'Send Out Pokémon'}
+                          {partyLoading === npcId ? 'Loading…' : 'Send Out Pokémon'}
                         </Button>
                       )
                     ) : npcMoveSubmitted ? (
@@ -990,8 +1142,8 @@ export default function BattlePage() {
                       </p>
                     ) : activePokemon ? (
                       <Tabs
-                        value={npcActionTab[entry.npcId] ?? 'move'}
-                        onValueChange={v => setNpcActionTab(prev => ({ ...prev, [entry.npcId]: v as 'move' | 'switch' }))}
+                        value={npcActionTab[npcId] ?? 'move'}
+                        onValueChange={v => setNpcActionTab(prev => ({ ...prev, [npcId]: v as 'move' | 'switch' }))}
                       >
                         <TabsList>
                           <TabsTrigger value="move">Move</TabsTrigger>
@@ -1003,12 +1155,12 @@ export default function BattlePage() {
                             {entry.activePokemonInfo?.name ?? activePokemon.nickname ?? activePokemon.speciesName} — choose a move:
                           </p>
                           <div className="grid grid-cols-2 gap-2">
-                            {activePokemon.moves.map(slot => {
+                            {activePokemon.moves.map((slot: MoveSlot) => {
                               const noPP = slot.currentPP <= 0;
                               return (
                                 <button
                                   key={slot.moveId}
-                                  onClick={() => !noPP && !submitting && handleDmSubmitMove(entry.npcId, slot.moveId)}
+                                  onClick={() => !noPP && !submitting && handleDmSubmitMove(npcId, slot.moveId)}
                                   disabled={noPP || submitting}
                                   className={[
                                     'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
@@ -1026,12 +1178,12 @@ export default function BattlePage() {
                         <TabsContent value="switch">
                           <p className="text-sm text-muted-foreground mb-2">Switch out for:</p>
                           <div className="flex flex-col gap-2">
-                            {party.filter(p => p._id !== entry.activePokemonId).map(p => {
+                            {party.filter((p: NpcPartyPokemon) => p._id !== entry.activePokemonId).map((p: NpcPartyPokemon) => {
                               const fainted  = p.currentHp <= 0;
                               return (
                                 <button
                                   key={p._id}
-                                  onClick={() => !fainted && !submitting && handleDmSubmitSwitch(entry.npcId, p._id)}
+                                  onClick={() => !fainted && !submitting && handleDmSubmitSwitch(npcId, p._id)}
                                   disabled={fainted || submitting}
                                   className={[
                                     'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors',
@@ -1296,7 +1448,7 @@ export default function BattlePage() {
             ) : (
               <ul className="flex flex-col gap-3">
                 {battle.enemySide.map(entry => (
-                  <li key={entry.npcId} className="flex items-center justify-between gap-2 text-sm">
+                  <li key={entry.npcId ?? entry.activePokemonId ?? ''} className="flex items-center justify-between gap-2 text-sm">
                     <span className="font-medium">
                       {entry.activePokemonInfo?.name ?? entry.npcName}
                     </span>
