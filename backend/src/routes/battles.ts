@@ -7,9 +7,10 @@ import { Pokemon } from '../models/Pokemon';
 import { Item } from '../models/Item';
 import { PokedexCache } from '../models/PokedexCache';
 import { Npc } from '../models/Npc';
-import { computeStats, BaseStats } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field, Generations } from '@smogon/calc';
 import { fetchSpecies } from '../lib/pokeapi';
+import { canEvolve } from '../lib/evolution';
 
 const NATURES = [
   'Hardy','Lonely','Brave','Adamant','Naughty',
@@ -1009,20 +1010,20 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
   const totalBaseExp = faintedEnemies.reduce((sum, p) => sum + p.level * 5, 0);
   if (totalBaseExp === 0) return events;
 
-  const playerUserIds  = battle.playerSide.map(e => e.userId);
+  const playerUserIds = battle.playerSide.map(e => e.userId);
   const allPartyPokemon = await Pokemon.find(
     { ownerId: { $in: playerUserIds }, ownerType: 'player', isInParty: true },
-    '_id ownerId nickname speciesId',
+    '_id ownerId nickname speciesId level exp nature currentHp evolutionOverrides',
   ).lean();
 
   const speciesIds = [...new Set(allPartyPokemon.map(p => p.speciesId))];
-  const caches     = speciesIds.length > 0
-    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name').lean()
+  const caches = speciesIds.length > 0
+    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name expGroup baseStats').lean()
     : [];
   const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
 
   for (const playerEntry of battle.playerSide) {
-    const usedIds      = new Set(playerEntry.usedPokemonIds.map(id => id.toString()));
+    const usedIds = new Set(playerEntry.usedPokemonIds.map(id => id.toString()));
     const partyPokemon = allPartyPokemon.filter(
       p => p.ownerId.toString() === playerEntry.userId.toString(),
     );
@@ -1030,12 +1031,44 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
     for (const poke of partyPokemon) {
       const isActive = usedIds.has(poke._id.toString());
       const expGain  = isActive ? totalBaseExp : Math.floor(totalBaseExp / 2);
-      if (expGain > 0) {
-        await Pokemon.updateOne({ _id: poke._id }, { $inc: { exp: expGain } });
-        const cache = cacheMap.get(poke.speciesId);
-        const name  = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
-        events.push(`${name} gained ${expGain} EXP${isActive ? '' : ' (Exp. Share)'}!`);
+      if (expGain <= 0) continue;
+
+      const cache       = cacheMap.get(poke.speciesId);
+      const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+      events.push(`${displayName} gained ${expGain} EXP${isActive ? '' : ' (Exp. Share)'}!`);
+
+      const newExp      = (poke.exp as number) + expGain;
+      let newLevel      = poke.level as number;
+      let newHp         = poke.currentHp as number;
+      let newSpeciesId  = poke.speciesId as number;
+      const expGroup    = (cache?.expGroup as string | undefined) ?? 'medium-fast';
+      const baseStats   = cache?.baseStats as BaseStats | undefined;
+      const overrides   = (poke.evolutionOverrides ?? []) as { condition: string; value: string }[];
+
+      while (newLevel < 100 && newExp >= expForLevel(newLevel + 1, expGroup)) {
+        if (baseStats && newHp > 0) {
+          const oldMaxHp = computeStats(baseStats, newLevel, poke.nature as string).hp;
+          newLevel += 1;
+          const newMaxHp = computeStats(baseStats, newLevel, poke.nature as string).hp;
+          newHp += (newMaxHp - oldMaxHp);
+        } else {
+          newLevel += 1;
+        }
+        events.push(`${displayName} grew to level ${newLevel}!`);
+
+        const evolveIntoId = await canEvolve({ speciesId: newSpeciesId, level: newLevel, evolutionOverrides: overrides });
+        if (evolveIntoId !== null) {
+          const evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name').lean();
+          const evolvedName  = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
+          events.push(`${displayName} evolved into ${evolvedName}!`);
+          newSpeciesId = evolveIntoId;
+        }
       }
+
+      await Pokemon.updateOne(
+        { _id: poke._id },
+        { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId } },
+      );
     }
   }
 

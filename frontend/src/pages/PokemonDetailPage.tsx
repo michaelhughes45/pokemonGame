@@ -54,6 +54,7 @@ type PokemonDetail = {
   statusCondition: string | null;
   isInParty: boolean;
   partySlot: number | null;
+  evolutionOverrides: { condition: string; value: string }[];
   stats: StatSpread;
   species: {
     name: string;
@@ -211,6 +212,10 @@ export default function PokemonDetailPage() {
   const [reminderBusy, setReminderBusy]     = useState(false);
   const [reminderError, setReminderError]   = useState('');
 
+  // Evolution override state (DM only)
+  const [overrideBusy, setOverrideBusy] = useState(false);
+  const [overrideMsg,  setOverrideMsg]  = useState('');
+
   // Release state — tracks which step of the two-step confirmation we're on:
   // 'idle' | 'confirm1' (first warning) | 'confirm2' (final warning) | 'busy' (request in flight)
   type ReleaseStep = 'idle' | 'confirm1' | 'confirm2' | 'busy';
@@ -305,6 +310,42 @@ export default function PokemonDetailPage() {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Evolution override handler (DM only)
+  // ---------------------------------------------------------------------------
+  async function toggleEvolutionBlock() {
+    if (!pokemon) return;
+    const isPrevented = pokemon.evolutionOverrides.some(o => o.condition === 'prevent');
+    setOverrideBusy(true);
+    setOverrideMsg('');
+    try {
+      const method = isPrevented ? 'delete' : 'post';
+      await axios[method](
+        `${API}/api/dm/pokemon/${pokemon._id}/evolution-override`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setPokemon(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          evolutionOverrides: isPrevented
+            ? prev.evolutionOverrides.filter(o => o.condition !== 'prevent')
+            : [...prev.evolutionOverrides, { condition: 'prevent', value: '' }],
+        };
+      });
+      setOverrideMsg(isPrevented ? 'Evolution block lifted.' : 'Evolution blocked.');
+    } catch (err) {
+      setOverrideMsg(
+        axios.isAxiosError(err)
+          ? (err.response?.data?.error ?? 'Failed to update override')
+          : 'Failed to update override',
+      );
+    } finally {
+      setOverrideBusy(false);
+    }
+  }
+
   const { species } = pokemon;
 
   // Can the logged-in user use the Move Reminder on this Pokémon?
@@ -314,6 +355,9 @@ export default function PokemonDetailPage() {
   // Can the logged-in user release this Pokémon?
   const canRelease =
     user?.id === pokemon.ownerId || user?.role === 'dm' || user?.role === 'admin';
+
+  const isDm         = user?.role === 'dm' || user?.role === 'admin';
+  const isPrevented  = pokemon.evolutionOverrides.some(o => o.condition === 'prevent');
 
   // Display name: nickname takes priority, else species name
   const displayName = pokemon.nickname
@@ -657,6 +701,29 @@ export default function PokemonDetailPage() {
                   );
                 })}
               </div>
+
+              {/* DM evolution block toggle */}
+              {isDm && (
+                <div className="mt-3 flex flex-col gap-1">
+                  {isPrevented && (
+                    <p className="text-xs text-yellow-600 font-medium">Evolution is blocked for this Pokémon.</p>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={isPrevented
+                      ? 'border-yellow-500 text-yellow-600 hover:bg-yellow-50 w-fit'
+                      : 'border-muted text-muted-foreground w-fit'}
+                    disabled={overrideBusy}
+                    onClick={toggleEvolutionBlock}
+                  >
+                    {isPrevented ? 'Lift Evolution Block' : 'Block Evolution'}
+                  </Button>
+                  {overrideMsg && (
+                    <p className="text-xs text-muted-foreground">{overrideMsg}</p>
+                  )}
+                </div>
+              )}
             </CardContent>
           </Card>
         )}

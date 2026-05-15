@@ -5,6 +5,7 @@ import { Item } from '../models/Item';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { computeStats } from '../lib/statCalc';
+import { canEvolve } from '../lib/evolution';
 
 const router = Router();
 
@@ -341,7 +342,7 @@ router.post('/use', verifyToken, async (req: Request, res: Response): Promise<vo
       }
 
       const species = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId })
-        .select('baseStats').lean();
+        .select('baseStats evolutionChain').lean();
       if (!species) {
         res.status(400).json({ data: null, error: 'Species data not found in cache.' });
         return;
@@ -352,10 +353,20 @@ router.post('/use', verifyToken, async (req: Request, res: Response): Promise<vo
       const newMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature).hp;
 
       // Current HP rises by the same amount as max HP — same as the main games.
-      // Evolution check is deferred to milestone 4.4.
       pokemon.currentHp += (newMaxHp - oldMaxHp);
 
       message = `Grew to level ${pokemon.level}!`;
+
+      const evolveIntoId = await canEvolve({
+        speciesId:          pokemon.speciesId,
+        level:              pokemon.level,
+        evolutionOverrides: (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[],
+      });
+      if (evolveIntoId !== null) {
+        pokemon.speciesId = evolveIntoId;
+        const evolved = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name').lean();
+        message += evolved ? ` ${pokemon.nickname ?? 'It'} evolved into ${evolved.name}!` : ' It evolved!';
+      }
 
     } else if (effect.kind === 'volatile_cure') {
       const before = pokemon.volatileStatus.length;

@@ -401,8 +401,9 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
         heldItem:        pokemon.heldItem,
         moves:           pokemon.moves,
         statusCondition: pokemon.statusCondition,
-        isInParty:       pokemon.isInParty,
-        partySlot:       pokemon.partySlot,
+        isInParty:          pokemon.isInParty,
+        partySlot:          pokemon.partySlot,
+        evolutionOverrides: pokemon.evolutionOverrides,
         stats,
         species: {
           name:           species.name,

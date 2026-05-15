@@ -518,4 +518,75 @@ router.get('/npcs/:npcId/party', async (req: Request, res: Response): Promise<vo
   });
 });
 
+// ---------------------------------------------------------------------------
+// Evolution overrides
+// POST   /api/dm/pokemon/:pokemonId/evolution-override  — prevent evolution
+// DELETE /api/dm/pokemon/:pokemonId/evolution-override  — lift the override
+//
+// The DM can block a player's Pokémon from auto-evolving on level-up.
+// Ownership is verified by confirming the Pokémon's owner is a player in
+// the DM's active campaign.
+// ---------------------------------------------------------------------------
+
+async function assertDmOwnsPokemon(
+  dmUserId: string,
+  pokemonId: string,
+  res: Response,
+) {
+  const campaign = await Campaign.findOne({ dmId: dmUserId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return null;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(pokemonId)) {
+    res.status(400).json({ data: null, error: 'Invalid Pokémon ID' });
+    return null;
+  }
+
+  const pokemon = await Pokemon.findById(pokemonId);
+  if (!pokemon || pokemon.ownerType !== 'player') {
+    res.status(404).json({ data: null, error: 'Pokémon not found' });
+    return null;
+  }
+
+  const playerIds = (campaign.playerIds as mongoose.Types.ObjectId[]).map(id => id.toString());
+  if (!playerIds.includes(pokemon.ownerId.toString())) {
+    res.status(403).json({ data: null, error: 'That Pokémon does not belong to a player in your campaign' });
+    return null;
+  }
+
+  return pokemon;
+}
+
+router.post('/pokemon/:pokemonId/evolution-override', async (req: Request, res: Response) => {
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, req.params.pokemonId as string, res);
+  if (!pokemon) return;
+
+  const alreadyPrevented = pokemon.evolutionOverrides.some(o => o.condition === 'prevent');
+  if (alreadyPrevented) {
+    res.json({ data: { message: 'Evolution is already blocked for this Pokémon' }, error: null });
+    return;
+  }
+
+  pokemon.evolutionOverrides.push({ condition: 'prevent', value: '' });
+  await pokemon.save();
+  res.json({ data: { message: 'Evolution blocked' }, error: null });
+});
+
+router.delete('/pokemon/:pokemonId/evolution-override', async (req: Request, res: Response) => {
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, req.params.pokemonId as string, res);
+  if (!pokemon) return;
+
+  const before = pokemon.evolutionOverrides.length;
+  pokemon.evolutionOverrides = pokemon.evolutionOverrides.filter(o => o.condition !== 'prevent') as typeof pokemon.evolutionOverrides;
+  if (pokemon.evolutionOverrides.length === before) {
+    res.json({ data: { message: 'No evolution block was set' }, error: null });
+    return;
+  }
+
+  await pokemon.save();
+  res.json({ data: { message: 'Evolution block lifted' }, error: null });
+});
+
 export default router;
