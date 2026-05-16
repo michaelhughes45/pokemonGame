@@ -75,6 +75,8 @@ export type IBattle = {
   catchAttempts: CatchAttempt[];
   // null = no limit (use full party of 6); set by DM when launching
   playerPokemonLimit: number | null;
+  // null = no limit (all NPC Pokémon must faint); set by DM when launching
+  npcPokemonLimit: number | null;
   // wild battles only — false lets DM use the wild Pokémon as a pure fight
   wildCatchable: boolean;
   expAwarded: boolean;
@@ -170,6 +172,7 @@ const BattleSchema = new Schema<IBattle>(
     ],
 
     playerPokemonLimit: { type: Number, default: null },
+    npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },
     expAwarded:         { type: Boolean, default: false },
     encounterId:        { type: Schema.Types.ObjectId, ref: 'Encounter', default: null },

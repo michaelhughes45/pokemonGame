@@ -1097,13 +1097,31 @@ async function checkBattleEnd(battle: HydratedDocument<IBattle>): Promise<string
       .map(e => e.npcId)
       .filter((id): id is mongoose.Types.ObjectId => id != null);
     if (npcIds.length > 0) {
-      // NPC battle: check whether any NPC still has healthy Pokémon to send out
-      const healthyEnemyCount = await Pokemon.countDocuments({
-        ownerId:   { $in: npcIds },
-        ownerType: 'npc',
-        currentHp: { $gt: 0 },
-      });
-      enemySideEliminated = healthyEnemyCount === 0;
+      if (battle.npcPokemonLimit !== null) {
+        // Limit set: enemy side is out when every NPC has used their full allowance
+        // and all of those Pokémon have fainted — same logic as the player side.
+        const results = await Promise.all(
+          battle.enemySide.map(async entry => {
+            if (!entry.npcId) return true;
+            const limitReached = (entry.fainted.length >= battle.npcPokemonLimit!);
+            if (limitReached) return true;
+            const healthyParty = await Pokemon.find(
+              { ownerId: entry.npcId, ownerType: 'npc', currentHp: { $gt: 0 } },
+              '_id',
+            ).lean();
+            return healthyParty.length === 0;
+          }),
+        );
+        enemySideEliminated = results.every(Boolean);
+      } else {
+        // No limit: all NPC Pokémon across the party must faint
+        const healthyEnemyCount = await Pokemon.countDocuments({
+          ownerId:   { $in: npcIds },
+          ownerType: 'npc',
+          currentHp: { $gt: 0 },
+        });
+        enemySideEliminated = healthyEnemyCount === 0;
+      }
     } else {
       // Wild battle: no active Pokémon and no NPC party to fall back to
       enemySideEliminated = true;
@@ -1294,8 +1312,10 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
   }
 
   // Hold at end_of_round so the DM can read the log before advancing.
-  // The advance-round endpoint handles the actual reset.
-  battle.phase = 'end_of_round';
+  // Only park here if the battle is still active — if checkBattleEnd ended it, leave it complete.
+  if (battle.status === 'active') {
+    battle.phase = 'end_of_round';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,13 +1333,14 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 // ---------------------------------------------------------------------------
 router.post('/', async (req: Request, res: Response): Promise<void> => {
   const {
-    type, playerIds, npcIds = [], playerPokemonLimit = null,
+    type, playerIds, npcIds = [], playerPokemonLimit = null, npcPokemonLimit = null,
     wildPokemon, wildCatchable = true,
   } = req.body as {
     type: string;
     playerIds: string[];
     npcIds?: string[];
     playerPokemonLimit?: number | null;
+    npcPokemonLimit?: number | null;
     wildPokemon?: { speciesId: number; level: number };
     wildCatchable?: boolean;
   };
@@ -1475,6 +1496,7 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
     enemySide,
     wildCatchable:      type === 'wild' ? wildCatchable : true,
     playerPokemonLimit: playerPokemonLimit ?? null,
+    npcPokemonLimit:    npcPokemonLimit ?? null,
     lastUpdatedAt:      new Date(),
   });
 
@@ -2630,7 +2652,10 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
     npcName: entry.npcId
       ? (npcNameMap.get(entry.npcId.toString()) ?? 'NPC')
       : 'Wild Pokémon',
-    activePokemonInfo: buildInfo(entry.activePokemonId),
+    activePokemonInfo:   buildInfo(entry.activePokemonId),
+    faintedCount:        entry.fainted.length,
+    npcLimitReached:     battle.npcPokemonLimit !== null
+      && entry.fainted.length >= battle.npcPokemonLimit,
   }));
 
   res.json({

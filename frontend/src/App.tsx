@@ -11,6 +11,7 @@ import PartyPage from './pages/PartyPage';
 import PCPage from './pages/PCPage';
 import BagPage from './pages/BagPage';
 import BattlePage from './pages/BattlePage';
+import TownPage from './pages/TownPage';
 
 function RequireDm({ children }: { children: React.ReactNode }) {
   const { token, user, loading } = useAuth();
@@ -94,6 +95,14 @@ function AppRoutes() {
         element={
           <ProtectedRoute>
             <BattlePage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/town"
+        element={
+          <ProtectedRoute>
+            <TownPage />
           </ProtectedRoute>
         }
       />

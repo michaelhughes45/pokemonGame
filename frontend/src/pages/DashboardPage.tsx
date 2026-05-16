@@ -188,6 +188,9 @@ export default function DashboardPage() {
           <Link to="/bag" className="text-sm underline text-muted-foreground">
             Bag →
           </Link>
+          <Link to="/town" className="text-sm underline text-muted-foreground">
+            Town →
+          </Link>
           {(user.role === 'dm' || user.role === 'admin') && (
             <Link to="/dm" className="text-sm underline text-muted-foreground">
               DM Panel →

@@ -8,6 +8,7 @@ import { Campaign } from '../models/Campaign';
 import { Npc } from '../models/Npc';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
+import { computeStats, BaseStats } from '../lib/statCalc';
 
 const router = Router();
 
@@ -587,6 +588,55 @@ router.delete('/pokemon/:pokemonId/evolution-override', async (req: Request, res
 
   await pokemon.save();
   res.json({ data: { message: 'Evolution block lifted' }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs/:npcId/heal
+// Restores every Pokémon in the NPC's party to full HP + PP and clears
+// all status conditions. DM only; NPC must belong to the DM's campaign.
+// ---------------------------------------------------------------------------
+router.post('/npcs/:npcId/heal', async (req: Request, res: Response): Promise<void> => {
+  const { npcId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(npcId as string)) {
+    res.status(400).json({ data: null, error: 'Invalid NPC ID' });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const npc = await Npc.findOne({ _id: npcId, campaignId: campaign._id }).lean();
+  if (!npc) {
+    res.status(404).json({ data: null, error: 'NPC not found in your campaign' });
+    return;
+  }
+
+  const party = await Pokemon.find({ ownerId: new mongoose.Types.ObjectId(npcId as string), ownerType: 'npc' }).lean();
+  if (party.length === 0) {
+    res.json({ data: { message: 'This NPC has no Pokémon.' }, error: null });
+    return;
+  }
+
+  const speciesIds = [...new Set(party.map(p => p.speciesId))];
+  const caches = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
+  const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+  await Promise.all(party.map(poke => {
+    const cache    = cacheMap.get(poke.speciesId);
+    const maxHp    = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp : poke.currentHp;
+    const fullMoves = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
+      .map(m => ({ ...m, currentPP: m.maxPP }));
+    return Pokemon.updateOne(
+      { _id: poke._id },
+      { $set: { currentHp: maxHp, statusCondition: null, statusCounter: null, volatileStatus: [], moves: fullMoves } },
+    );
+  }));
+
+  res.json({ data: { message: `${npc.name}'s party has been healed!` }, error: null });
 });
 
 export default router;

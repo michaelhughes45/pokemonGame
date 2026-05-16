@@ -489,4 +489,35 @@ router.delete('/:id', verifyToken, async (req: Request, res: Response): Promise<
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/pokemon/heal-party
+// Restores every party Pokémon to full HP + PP and clears all status conditions.
+// ---------------------------------------------------------------------------
+router.post('/heal-party', verifyToken, async (req: Request, res: Response): Promise<void> => {
+  const userId = new mongoose.Types.ObjectId(req.user!.userId);
+
+  const party = await Pokemon.find({ ownerId: userId, ownerType: 'player', isInParty: true }).lean();
+  if (party.length === 0) {
+    res.json({ data: { message: 'Your party is already in great shape!' }, error: null });
+    return;
+  }
+
+  const speciesIds = [...new Set(party.map(p => p.speciesId))];
+  const caches = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
+  const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+  await Promise.all(party.map(poke => {
+    const cache    = cacheMap.get(poke.speciesId);
+    const maxHp    = cache ? computeStats(cache.baseStats as any, poke.level, poke.nature).hp : poke.currentHp;
+    const fullMoves = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
+      .map(m => ({ ...m, currentPP: m.maxPP }));
+    return Pokemon.updateOne(
+      { _id: poke._id },
+      { $set: { currentHp: maxHp, statusCondition: null, statusCounter: null, volatileStatus: [], moves: fullMoves } },
+    );
+  }));
+
+  res.json({ data: { message: 'Your Pokémon have been healed!' }, error: null });
+});
+
 export default router;

@@ -386,6 +386,12 @@ pokemonGame/
 - `usedPokemonIds` on each `playerSide` entry tracks distinct Pokémon sent into the battle. Switching back to a previously-used Pokémon is always free; only introducing a brand-new Pokémon costs a slot against `playerPokemonLimit`
 - State endpoint returns `usedPokemonCount` (derived from `usedPokemonIds.length`) and `pokemonLimitReached` (computed boolean) per player entry so the frontend does not need to recompute them
 - `applyFaints` runs after every move resolution (submit-target) and after end-of-round damage (applyEndOfRound) — never inline; always call the helper to ensure volatile status is cleared and `fainted[]` is updated consistently
+- `canEvolve` in `backend/src/lib/evolution.ts` handles only `condition === 'level-up'`; item/trade evolutions are explicit player actions deferred to later phases
+- `expForLevel(level, expGroup)` in `statCalc.ts` returns total accumulated EXP needed to reach a level; the six PokeAPI group names are: `slow`, `medium-fast`, `fast`, `medium-slow`, `slow-then-very-fast` (erratic), `fast-then-very-slow` (fluctuating); `medium` is treated as an alias for `medium-fast`
+- `distributeExp` now uses `$set` (not `$inc`) for EXP because it computes the exact final `exp`, `level`, `currentHp`, and `speciesId` in one pass — avoids any race condition and keeps the update atomic
+- DM evolution override convention: `{ condition: 'prevent', value: '' }` pushed to `evolutionOverrides` blocks all level-up evolution for that Pokémon; POST/DELETE `/api/dm/pokemon/:pokemonId/evolution-override` manage it; `assertDmOwnsPokemon` guard verifies campaign membership before allowing the action
+- `npcPokemonLimit` on Battle is independent of `playerPokemonLimit` — the DM sets it separately when creating a battle; null = all NPC Pokémon must faint; when set, `checkBattleEnd` uses `entry.fainted.length >= npcPokemonLimit` per NPC entry
+- Heal endpoints restore `currentHp` to computed `maxHp`, set `statusCondition`/`statusCounter`/`volatileStatus` to null/[], and restore all `moves[].currentPP` to `maxPP`; batch species lookup (one PokedexCache query for all unique speciesIds) before parallel `updateOne` calls
 - `checkBattleEnd` guards on `battle.status !== 'active'` so it is safe to call multiple times per round without double-triggering; enemy side checks live NPC party HP in the DB; player side checks sendable party Pokémon per-entry
 - `distributeExp` uses `expAwarded` flag to prevent double-awarding; simplified formula `enemy_level × 5` per fainted enemy is a Phase 5 placeholder; active battlers (`usedPokemonIds`) get full EXP, benched get half with "(Exp. Share)" label in the turn log
 - `autoSkipBlockedActors` checks HP ≤ 0 on move actors before the status-block check — a Pokémon fainted by a faster actor is skipped rather than prompted for target selection
@@ -426,10 +432,11 @@ pokemonGame/
 - [x] **3.10** Switching — `actionType: 'switch'` + `switchToPokemonId` added to TurnQueueEntry; submit-move accepts switch actions; switches sort between items (2) and moves (0) at priority tier 1; `resolveSwitch` recalls outgoing Pokémon (clears volatileStatus), sets new activePokemonId, updates usedPokemonIds; switches auto-resolve in `autoSkipBlockedActors`; playerPokemonLimit enforced at submission (new Pokémon blocked if limit reached, previously-used Pokémon always free); state endpoint returns `usedPokemonCount` + `pokemonLimitReached` per player; Switch tab UI in BattlePage with limit counter and per-Pokémon blocking; DM NPC switch support added (dm-submit-move accepts `actionType: 'switch'`; `resolveSwitch` handles both player and NPC sides)
 - [x] **3.11** Faint & battle end — `applyFaints` helper detects HP ≤ 0 after every move and end-of-round damage, logs faint event, clears volatile statuses, updates `fainted[]` and nulls `activePokemonId`; `checkBattleEnd` checks full NPC party HP (enemy) and sendable party Pokémon (player) to set `status: 'complete'`; `distributeExp` awards EXP to all party Pokémon (active = full, benched = half via Exp. Share), guarded by `expAwarded` flag; Battle Complete banner + turn log visible on complete battles ★ first playable game
 - [x] **4.1** Wild battles & catch — DM creates wild battles with species lookup or randomize (1–1025); wild Pokémon generated at battle creation (random nature, gender, last-4 level-up moves, computed HP via statCalc); `enemySide` entry has no npcId; catch formula (catchRate × ballMod × hpMod × statusMod, 3-shake check, master-ball bypass); success transfers Pokémon to player PC; `wildCatchable` flag; run action logs repositioning message in speed order; Ball tab + Run button (with confirm) added to player action UI
-- [ ] **4.2** Evolution engine — level-up check, override rules respected
-- [ ] **4.3** DM encounter builder — /dm/encounters, build and launch, set playerPokemonLimit per encounter ★ first real session
-- [ ] **4.4** DM NPC builder — /dm/npcs, custom party (up to 12 Pokémon) and optional AI strategy for auto-submission; NPC bag management (give items to NPCs, use in battle via Item tab in NPC Actions — requires `ownerType: 'player'|'npc'` on Item model)
-- [ ] **4.5** DM EXP panel — /dm/exp, manual EXP award
+- [x] **4.2** Evolution engine — `canEvolve` helper in `backend/src/lib/evolution.ts` checks `evolutionChain` (condition === 'level-up') and respects `evolutionOverrides`; triggers on Rare Candy level-up (items.ts) and post-battle EXP (distributeExp in battles.ts); `expForLevel(level, expGroup)` added to statCalc.ts for all 6 Gen 3+ growth rates; level-up loop in distributeExp handles multi-level gains, HP delta, and evolution per level; DM override: POST/DELETE `/api/dm/pokemon/:id/evolution-override` sets/clears `{ condition: 'prevent' }` on the Pokémon; Pokémon detail page shows DM-only toggle button with yellow "blocked" state
+- [x] **4.3** Town & NPC management — Pokémon Center (/town) heals player party (POST /api/pokemon/heal-party); DM heals NPC parties (POST /api/dm/npcs/:id/heal); NPC Party Manager on DM panel (load NPCs → select → party list with sprite + HP → links to /pokemon/:id); `npcPokemonLimit` field on Battle (independent of playerPokemonLimit, null = no limit, enforced in checkBattleEnd); Pokémart stub (Coming Soon)
+- [ ] **4.4** DM encounter builder — /dm/encounters, build and launch, set playerPokemonLimit per encounter ★ first real session
+- [ ] **4.5** DM NPC builder — /dm/npcs, custom party (up to 12 Pokémon) and optional AI strategy for auto-submission; NPC bag management (give items to NPCs, use in battle via Item tab in NPC Actions — requires `ownerType: 'player'|'npc'` on Item model)
+- [ ] **4.6** DM EXP panel — /dm/exp, manual EXP award
 - [ ] **5.1** EV award engine — post-battle evYield distribution, 252/510 caps
 - [ ] **5.2** EV tools — DM EV panel, EV-reducing berries from bag
 - [ ] **5.3** Trainer IV activation — +20 stat bonus passed to @smogon/calc
@@ -442,9 +449,9 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 4.2 — Evolution engine (level-up check, override rules respected)
-- **Just finished:** 4.1 — Wild battles & catch. DM species lookup + randomize, wild Pokémon generation, catch formula, run action, Ball tab + Run button UI. Tag v4.1 when committing.
-- **Known issues / blockers:** NPC items deferred to 4.4
+- **Starting:** 4.4 — DM encounter builder (/dm/encounters, build and launch, set playerPokemonLimit per encounter) ★ first real session
+- **Just finished:** 4.3 — Town page (Pokémon Center + Pokémart stub), heal endpoints, NPC Party Manager on DM panel, npcPokemonLimit. Tag v4.3 when committing.
+- **Known issues / blockers:** NPC items deferred to 4.5
 
 ---
 

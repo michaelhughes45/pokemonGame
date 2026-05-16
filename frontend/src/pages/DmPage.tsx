@@ -698,6 +698,132 @@ function NpcCard({ token }: { token: string | null }) {
   );
 }
 
+// ── NPC Party Manager card ───────────────────────────────────────────────────
+// Lets the DM browse any NPC's Pokémon party and jump to the detail page for
+// each one (move reminder, evolution override, etc.).
+
+type NpcPartyPokemon = {
+  _id: string;
+  speciesId: number;
+  speciesName: string;
+  nickname: string | null;
+  level: number;
+  currentHp: number;
+};
+
+function NpcPartyManagerCard({ token }: { token: string | null }) {
+  const [npcs,        setNpcs]        = useState<NpcSummary[]>([]);
+  const [loaded,      setLoaded]      = useState(false);
+  const [loading,     setLoading]     = useState(false);
+  const [selectedNpc, setSelectedNpc] = useState<string>('');
+  const [party,       setParty]       = useState<NpcPartyPokemon[]>([]);
+  const [partyLoading,setPartyLoading]= useState(false);
+
+  const headers = { Authorization: `Bearer ${token}` };
+
+  async function loadNpcs() {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API}/api/dm/npcs`, { headers });
+      setNpcs(res.data.data ?? []);
+      setLoaded(true);
+    } catch {
+      setLoaded(true);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadParty(npcId: string) {
+    setSelectedNpc(npcId);
+    setParty([]);
+    if (!npcId) return;
+    setPartyLoading(true);
+    try {
+      const res = await axios.get(`${API}/api/dm/npcs/${npcId}/party`, { headers });
+      setParty(res.data.data ?? []);
+    } catch {
+      setParty([]);
+    } finally {
+      setPartyLoading(false);
+    }
+  }
+
+  const selectedNpcName = npcs.find(n => n._id === selectedNpc)?.name ?? '';
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>NPC Party Manager</CardTitle></CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {!loaded ? (
+          <Button variant="outline" onClick={loadNpcs} disabled={loading} className="min-h-11">
+            {loading ? 'Loading…' : 'Load NPCs'}
+          </Button>
+        ) : npcs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No NPCs in your campaign yet.</p>
+        ) : (
+          <>
+            <div className="flex flex-col gap-1.5">
+              <select
+                value={selectedNpc}
+                onChange={e => loadParty(e.target.value)}
+                className={selectClass}
+              >
+                <option value="">— Select an NPC —</option>
+                {npcs.map(n => (
+                  <option key={n._id} value={n._id}>
+                    {n.name} ({n.partyCount} Pokémon)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {selectedNpc && (
+              partyLoading ? (
+                <p className="text-sm text-muted-foreground">Loading party…</p>
+              ) : party.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{selectedNpcName} has no Pokémon yet.</p>
+              ) : (
+                <ul className="flex flex-col gap-2">
+                  {party.map(poke => (
+                    <li key={poke._id}>
+                      <Link
+                        to={`/pokemon/${poke._id}`}
+                        className="flex items-center justify-between border rounded-md p-3 hover:bg-muted transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <img
+                            src={`https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${poke.speciesId}.png`}
+                            alt={poke.speciesName}
+                            width={40}
+                            height={40}
+                            className="pixelated"
+                          />
+                          <div>
+                            <p className="text-sm font-medium">
+                              {poke.nickname
+                                ? `${poke.nickname} (${poke.speciesName})`
+                                : poke.speciesName}
+                            </p>
+                            <p className="text-xs text-muted-foreground">Lv. {poke.level}</p>
+                          </div>
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          {poke.currentHp} HP →
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              )
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Active Battles card ──────────────────────────────────────────────────────
 // Shows the DM all non-complete battles for their campaign so they can
 // navigate back into any open battle after leaving the page.
@@ -1081,6 +1207,7 @@ export default function DmPage() {
         <CampaignCard token={token} />
         <ActiveBattlesCard token={token} />
         <NpcCard token={token} />
+        <NpcPartyManagerCard token={token} />
         <CreateBattleCard token={token} />
         <GivePokemonCard token={token} />
         <GiveItemCard token={token} />
