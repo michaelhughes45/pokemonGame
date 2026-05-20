@@ -45,6 +45,8 @@ type PokemonDetail = {
   nickname: string | null;
   level: number;
   exp: number;
+  expForCurrentLevel: number;
+  expForNextLevel: number | null;
   currentHp: number;
   maxHp: number;
   nature: string;
@@ -55,6 +57,7 @@ type PokemonDetail = {
   isInParty: boolean;
   partySlot: number | null;
   evolutionOverrides: { condition: string; value: string }[];
+  hasHiddenAbility: boolean;
   stats: StatSpread;
   species: {
     name: string;
@@ -165,6 +168,25 @@ function StatRow({ label, base, actual }: { label: string; base: number; actual:
   );
 }
 
+function ExpBar({ exp, expForCurrentLevel, expForNextLevel }: { exp: number; expForCurrentLevel: number; expForNextLevel: number | null }) {
+  if (expForNextLevel === null) {
+    return <p className="text-sm text-muted-foreground">Max Level</p>;
+  }
+  const earned = Math.max(0, exp - expForCurrentLevel);
+  const needed = expForNextLevel - expForCurrentLevel;
+  const pct = needed > 0 ? Math.min(100, Math.round((earned / needed) * 100)) : 100;
+  return (
+    <div className="flex items-center gap-3">
+      <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden">
+        <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-sm font-mono font-semibold">
+        {earned.toLocaleString()}/{needed.toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
 function HpBar({ current, max }: { current: number; max: number }) {
   const pct = max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
   const color = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-yellow-400' : 'bg-red-500';
@@ -215,6 +237,10 @@ export default function PokemonDetailPage() {
   // Evolution override state (DM only)
   const [overrideBusy, setOverrideBusy] = useState(false);
   const [overrideMsg,  setOverrideMsg]  = useState('');
+
+  // Hidden ability toggle state (DM only)
+  const [hiddenAbilityBusy, setHiddenAbilityBusy] = useState(false);
+  const [hiddenAbilityMsg,  setHiddenAbilityMsg]  = useState('');
 
   // Release state — tracks which step of the two-step confirmation we're on:
   // 'idle' | 'confirm1' (first warning) | 'confirm2' (final warning) | 'busy' (request in flight)
@@ -307,6 +333,32 @@ export default function PokemonDetailPage() {
           : 'Failed to release Pokémon'
       );
       setReleaseStep('confirm2');
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Hidden ability toggle handler (DM only)
+  // ---------------------------------------------------------------------------
+  async function toggleHiddenAbility() {
+    if (!pokemon) return;
+    setHiddenAbilityBusy(true);
+    setHiddenAbilityMsg('');
+    try {
+      const res = await axios.patch(
+        `${API}/api/dm/pokemon/${pokemon._id}/hidden-ability`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setPokemon(prev => prev ? { ...prev, hasHiddenAbility: res.data.data.hasHiddenAbility } : prev);
+      setHiddenAbilityMsg(res.data.data.hasHiddenAbility ? 'Using hidden ability.' : 'Using normal ability.');
+    } catch (err) {
+      setHiddenAbilityMsg(
+        axios.isAxiosError(err)
+          ? (err.response?.data?.error ?? 'Failed to update ability')
+          : 'Failed to update ability',
+      );
+    } finally {
+      setHiddenAbilityBusy(false);
     }
   }
 
@@ -438,6 +490,16 @@ export default function PokemonDetailPage() {
           </CardHeader>
           <CardContent>
             <HpBar current={pokemon.currentHp} max={pokemon.maxHp} />
+          </CardContent>
+        </Card>
+
+        {/* ── Experience ── */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Experience</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ExpBar exp={pokemon.exp} expForCurrentLevel={pokemon.expForCurrentLevel} expForNextLevel={pokemon.expForNextLevel} />
           </CardContent>
         </Card>
 
@@ -625,12 +687,35 @@ export default function PokemonDetailPage() {
                   {a.isHidden && (
                     <Badge variant="secondary" className="text-xs">Hidden</Badge>
                   )}
+                  {a.isHidden && pokemon.hasHiddenAbility && (
+                    <Badge className="text-xs bg-purple-100 text-purple-700 border-purple-300">Active</Badge>
+                  )}
                 </div>
                 {a.effect && (
                   <p className="text-xs text-muted-foreground mt-0.5">{a.effect}</p>
                 )}
               </div>
             ))}
+
+            {/* DM hidden ability toggle — only shown if species has a hidden ability */}
+            {isDm && species.abilities.some(a => a.isHidden) && (
+              <div className="mt-1 flex flex-col gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className={pokemon.hasHiddenAbility
+                    ? 'border-purple-400 text-purple-700 hover:bg-purple-50 w-fit'
+                    : 'border-muted text-muted-foreground w-fit'}
+                  disabled={hiddenAbilityBusy}
+                  onClick={toggleHiddenAbility}
+                >
+                  {pokemon.hasHiddenAbility ? 'Using Hidden Ability' : 'Use Hidden Ability'}
+                </Button>
+                {hiddenAbilityMsg && (
+                  <p className="text-xs text-muted-foreground">{hiddenAbilityMsg}</p>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
 

@@ -38,6 +38,7 @@ type IPokemon = {
   statusCounter: number | null;
   volatileStatus: VolatileStatus[];
   evolutionOverrides: EvolutionOverride[];
+  hasHiddenAbility: boolean;
   isInParty: boolean;
   partySlot: number | null;
   caughtAt: Date | null;
@@ -93,6 +94,7 @@ const PokemonSchema = new Schema<IPokemon>(
         _id:       false,
       },
     ],
+    hasHiddenAbility: { type: Boolean, default: false },
     isInParty:        { type: Boolean, default: false },
     partySlot:        { type: Number, default: null },
     caughtAt:         { type: Date, default: null },

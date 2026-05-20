@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { verifyToken } from '../middleware/auth';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
-import { computeStats } from '../lib/statCalc';
+import { computeStats, expForLevel } from '../lib/statCalc';
 
 const router = Router();
 
@@ -394,6 +394,8 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
         nickname:        pokemon.nickname,
         level:           pokemon.level,
         exp:             pokemon.exp,
+        expForCurrentLevel: expForLevel(pokemon.level, (species.expGroup as string) || 'medium-fast'),
+        expForNextLevel:    pokemon.level >= 100 ? null : expForLevel(pokemon.level + 1, (species.expGroup as string) || 'medium-fast'),
         currentHp:       pokemon.currentHp,
         maxHp:           stats.hp,
         nature:          pokemon.nature,
@@ -404,6 +406,7 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
         isInParty:          pokemon.isInParty,
         partySlot:          pokemon.partySlot,
         evolutionOverrides: pokemon.evolutionOverrides,
+        hasHiddenAbility:   pokemon.hasHiddenAbility ?? false,
         stats,
         species: {
           name:           species.name,

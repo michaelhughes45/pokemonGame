@@ -3,6 +3,7 @@ import { verifyToken } from '../middleware/auth';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { fetchSpecies } from '../lib/pokeapi';
+import { expForLevel } from '../lib/statCalc';
 
 const router = Router();
 
@@ -104,7 +105,7 @@ router.post('/', verifyToken, async (req: Request, res: Response): Promise<void>
     ownerType: 'player',
     nickname: null,
     level,
-    exp: 0,
+    exp: expForLevel(level, (cached.expGroup as string) || 'medium-fast'),
     currentHp,
     nature,
     gender,

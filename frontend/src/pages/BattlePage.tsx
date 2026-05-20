@@ -29,6 +29,11 @@ type BagItem = {
   pocket: string;
 };
 
+type StatStages = {
+  atk: number; def: number; spa: number; spd: number;
+  spe: number; acc: number; eva: number;
+};
+
 // Joined by the state endpoint — name and HP for whatever Pokémon is currently active
 type ActivePokemonInfo = {
   _id: string;
@@ -39,6 +44,7 @@ type ActivePokemonInfo = {
   statusCondition: string | null;
   isConfused: boolean;
   moves?: MoveSlot[];
+  statStages: StatStages | null;
 };
 
 type PlayerSideEntry = {
@@ -167,6 +173,33 @@ function StatusBadge({ info }: { info: ActivePokemonInfo }) {
       {badges.map((b, i) => (
         <span key={i} className={`text-xs font-bold px-1.5 py-0.5 rounded ${b.cls}`}>{b.label}</span>
       ))}
+    </span>
+  );
+}
+
+const STAGE_STAT_LABELS: [keyof StatStages, string][] = [
+  ['atk', 'Atk'], ['def', 'Def'], ['spa', 'SpA'], ['spd', 'SpD'],
+  ['spe', 'Spe'], ['acc', 'Acc'], ['eva', 'Eva'],
+];
+
+function StatStageBadges({ stages }: { stages: StatStages | null }) {
+  if (!stages) return null;
+  const active = STAGE_STAT_LABELS.filter(([key]) => stages[key] !== 0);
+  if (active.length === 0) return null;
+  return (
+    <span className="flex flex-wrap gap-1">
+      {active.map(([key, label]) => {
+        const val = stages[key];
+        const positive = val > 0;
+        const cls = positive
+          ? 'bg-green-100 text-green-800'
+          : 'bg-red-100 text-red-800';
+        return (
+          <span key={key} className={`text-xs font-bold px-1.5 py-0.5 rounded ${cls}`}>
+            {label}{positive ? `+${val}` : val}
+          </span>
+        );
+      })}
     </span>
   );
 }
@@ -815,6 +848,7 @@ export default function BattlePage() {
                     {' · '}HP {activePokemonDetail.currentHp}/{activePokemonDetail.maxHp}
                   </span>
                   {myEntry?.activePokemonInfo && <StatusBadge info={myEntry.activePokemonInfo} />}
+                  {myEntry?.activePokemonInfo && <StatStageBadges stages={myEntry.activePokemonInfo.statStages} />}
                 </div>
               )}
 
@@ -1255,11 +1289,14 @@ export default function BattlePage() {
                               ].join(' ')}
                             >
                               <span>{info.name}</span>
-                              <span className="flex items-center gap-2">
+                              <span className="flex flex-col items-end gap-0.5">
                                 <span className="text-muted-foreground text-xs">
                                   HP {info.currentHp}{info.maxHp != null ? `/${info.maxHp}` : ''}
                                 </span>
-                                <StatusBadge info={info} />
+                                <span className="flex gap-1">
+                                  <StatusBadge info={info} />
+                                  <StatStageBadges stages={info.statStages} />
+                                </span>
                               </span>
                             </button>
                           );
@@ -1415,6 +1452,7 @@ export default function BattlePage() {
                               {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
                             </span>
                             <StatusBadge info={entry.activePokemonInfo} />
+                            <StatStageBadges stages={entry.activePokemonInfo.statStages} />
                           </>
                         ) : (
                           <span className="text-xs">No Pokémon out</span>
@@ -1460,6 +1498,7 @@ export default function BattlePage() {
                             {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
                           </span>
                           <StatusBadge info={entry.activePokemonInfo} />
+                          <StatStageBadges stages={entry.activePokemonInfo.statStages} />
                         </>
                       ) : (
                         <span className="text-muted-foreground text-xs">No Pokémon out</span>

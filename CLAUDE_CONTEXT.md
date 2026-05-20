@@ -98,6 +98,7 @@ Auth guards live in Express middleware — verify JWT on every protected route, 
 - **One active campaign per user** — a player must leave their current campaign before joining another. Trainer, Pokémon, and items are global to the user (not scoped per campaign). DMs run one campaign; their role does not include a player character
 - **Encounters, NPCs, and battles belong to a campaign** — all have a `campaignId` field; DMs can only see/edit their own campaign's data
 - **NPC parties cap at 12, player parties cap at 6** — allows gym leaders and bosses to field large teams without changing the player experience
+- **NPC fields one active Pokémon per player in the battle** — `enemySide` gets one entry per player all pointing to the same `npcId`, giving the NPC N simultaneous active slots where N = `playerSide.length`. DM sends out a different party Pokémon into each slot. This keeps battles equal (3 players vs 3 NPC Pokémon, etc.). Implemented in 4.4 encounter builder.
 - **Player Pokémon limit is per-battle, set by DM on the encounter** — `playerPokemonLimit` (null = no limit). Tracks distinct Pokémon sent out via `usedPokemonIds` on each player's `playerSide` entry. No pre-selection — players pick freely up to the limit during the battle. If all used Pokémon faint, that player is out for the rest of the battle
 - **Starters begin at level 1** — any species is valid as a starter; DM/admin can reset a player's starter via DELETE /api/dm/players/:username/starter
 - **Exp. Share is always on (Gen 6+ style)** — all Pokémon in the party gain EXP after battle; active battlers receive full EXP, benched Pokémon receive half EXP. No toggle.
@@ -403,6 +404,14 @@ pokemonGame/
 - Priority tiers in `checkAndAdvance` sort updated: items/catch (2) → switches (1) → moves/run (0); within each tier speed order applies
 - Ball tab in BattlePage: shown only when `battle.type === 'wild' && battle.wildCatchable`; displays pokeball-pocket bag items; clicking one calls `handleSubmitCatch(itemId)`; pokeballs are now included in the bagItems fetch filter alongside healing + status_cure
 - Run button in BattlePage: shown for all wild battles below the action tabs; requires a two-step confirm (`Run` → `Confirm Run` + `Cancel`) before submitting; resets each new round with other action state
+- `hasHiddenAbility: Boolean` (default false) on Pokemon model; PATCH `/api/dm/pokemon/:id/hidden-ability` toggles it; `resolveMove` picks the hidden ability slot when true, falls back to slot 1 if species has none; DM-only toggle button in Abilities card (purple when active, hidden when species has no hidden ability)
+- `statStages` on Battle is `Schema.Types.Mixed` (not a Mongoose Map) — always call `battle.markModified('statStages')` after any mutation; keyed by `pokemonId.toString()`; deleted (not zeroed) on switch-out and faint
+- `STAT_STAGE_MOVES` covers self-boost moves (in `SELF_TARGETING_MOVES`) and opponent-debuff moves (go through `resolveMove` path); `applyStatStageEffects` is the single helper for both; stat stage boosts passed to `@smogon/calc` as `boosts: { atk, def, spa, spd, spe }` (acc/eva stored but not passed — not used in damage formula)
+- Self-targeting branch in submit-target fetches `'nickname speciesId currentHp nature level'` from Pokemon and `'name baseStats'` from PokedexCache (expanded in 4.4 to support recovery move max-HP calculation)
+- Recovery move `Rest` sets `statusCondition: 'sleep'` and `statusCounter: 2` directly — slots into the existing Gen 5+ sleep counter system in `checkStatusBlock` without extra changes
+- Recoil/drain moves pre-fetch the attacker once before the target loop (not per-target) to avoid redundant DB hits; `atkSnap.currentHp` updated in-place after each application so multi-target edge cases stay consistent
+- `RECOIL_MOVES` has two types: `'damage'` (fraction of damage dealt) and `'max-hp'` (fraction of attacker's own maxHp — used by Struggle only); minimum 1 recoil enforced; only fires when `damage > 0` (misses don't trigger recoil)
+- `buildInfo` in state endpoint now returns `statStages: StatStages | null` per active Pokémon (null when no stages set); `StatStageBadges` component in BattlePage shows green `+N` / red `−N` pills for each non-zero stage
 
 ---
 
@@ -434,9 +443,11 @@ pokemonGame/
 - [x] **4.1** Wild battles & catch — DM creates wild battles with species lookup or randomize (1–1025); wild Pokémon generated at battle creation (random nature, gender, last-4 level-up moves, computed HP via statCalc); `enemySide` entry has no npcId; catch formula (catchRate × ballMod × hpMod × statusMod, 3-shake check, master-ball bypass); success transfers Pokémon to player PC; `wildCatchable` flag; run action logs repositioning message in speed order; Ball tab + Run button (with confirm) added to player action UI
 - [x] **4.2** Evolution engine — `canEvolve` helper in `backend/src/lib/evolution.ts` checks `evolutionChain` (condition === 'level-up') and respects `evolutionOverrides`; triggers on Rare Candy level-up (items.ts) and post-battle EXP (distributeExp in battles.ts); `expForLevel(level, expGroup)` added to statCalc.ts for all 6 Gen 3+ growth rates; level-up loop in distributeExp handles multi-level gains, HP delta, and evolution per level; DM override: POST/DELETE `/api/dm/pokemon/:id/evolution-override` sets/clears `{ condition: 'prevent' }` on the Pokémon; Pokémon detail page shows DM-only toggle button with yellow "blocked" state
 - [x] **4.3** Town & NPC management — Pokémon Center (/town) heals player party (POST /api/pokemon/heal-party); DM heals NPC parties (POST /api/dm/npcs/:id/heal); NPC Party Manager on DM panel (load NPCs → select → party list with sprite + HP → links to /pokemon/:id); `npcPokemonLimit` field on Battle (independent of playerPokemonLimit, null = no limit, enforced in checkBattleEnd); Pokémart stub (Coming Soon)
-- [ ] **4.4** DM encounter builder — /dm/encounters, build and launch, set playerPokemonLimit per encounter ★ first real session
-- [ ] **4.5** DM NPC builder — /dm/npcs, custom party (up to 12 Pokémon) and optional AI strategy for auto-submission; NPC bag management (give items to NPCs, use in battle via Item tab in NPC Actions — requires `ownerType: 'player'|'npc'` on Item model)
-- [ ] **4.6** DM EXP panel — /dm/exp, manual EXP award
+- [x] **4.4** Core move effects — ability passed to @smogon/calc (first non-hidden slot; `hasHiddenAbility` Boolean on Pokemon + DM toggle PATCH `/api/dm/pokemon/:id/hidden-ability` + purple "Active" badge on detail page); stat stages (`StatStages` type exported from Battle.ts; `statStages: Schema.Types.Mixed` on Battle keyed by pokemonId.toString(); `STAT_STAGE_MOVES` table ~50 moves; `applyStatStageEffects` helper ±6 clamp with magnitude narration; boosts passed to @smogon/calc; cleared on switch-out and faint via `markModified('statStages')`; `StatStageBadges` green/red pill UI in BattlePage); recovery moves (`RECOVERY_MOVES` table — flat 50%, weather-scaled Synthesis/Moonlight/Morning Sun, Rest full-heal + sleep 2 turns); recoil moves (`RECOIL_MOVES` table — damage-fraction and max-hp types; attacker pre-fetched once before target loop); drain moves (`DRAIN_MOVES` table — 50% or 75% of damage restored to attacker; capped at maxHp)
+- [ ] **4.5** Advanced move effects — multi-hit moves (Double Slap, Fury Attack, Bullet Seed, etc. — loop each hit, log individually); secondary stat effects on damaging moves (Close Combat self Def/SpDef drop, Crunch 20% Def chance, Psychic 10% SpDef chance, etc.); common switch-in ability effects (Intimidate −1 Atk on entry, Drought/Drizzle/Sand Stream/Snow Warning set weather, etc.)
+- [ ] **4.6** DM encounter builder — /dm/encounters, build and launch, set playerPokemonLimit per encounter; multi-wild support (multiple wild Pokémon in one battle — enemySide array, targeted catch, all-fainted end check); NPC fields one Pokémon per player (enemySide gets N entries for the same npcId where N = player count) ★ first real session
+- [ ] **4.7** DM NPC builder — /dm/npcs, custom party (up to 12 Pokémon) and optional AI strategy for auto-submission; NPC bag management (give items to NPCs, use in battle via Item tab in NPC Actions — requires `ownerType: 'player'|'npc'` on Item model)
+- [ ] **4.8** DM EXP/Pokémon panel — DM views any player's Pokémon (party + PC, filterable by player in campaign); manual EXP award to a specific Pokémon (triggers level-up + evolution chain same as distributeExp); manual level-up shortcut (Rare Candy equivalent, single endpoint); UI at /dm/players → select player → see their full roster with EXP bars → award EXP or level-up per Pokémon
 - [ ] **5.1** EV award engine — post-battle evYield distribution, 252/510 caps
 - [ ] **5.2** EV tools — DM EV panel, EV-reducing berries from bag
 - [ ] **5.3** Trainer IV activation — +20 stat bonus passed to @smogon/calc
@@ -449,9 +460,9 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 4.4 — DM encounter builder (/dm/encounters, build and launch, set playerPokemonLimit per encounter) ★ first real session
-- **Just finished:** 4.3 — Town page (Pokémon Center + Pokémart stub), heal endpoints, NPC Party Manager on DM panel, npcPokemonLimit. Tag v4.3 when committing.
-- **Known issues / blockers:** NPC items deferred to 4.5
+- **Starting:** 4.5 — Advanced move effects (multi-hit, secondary stat effects on damaging moves, switch-in ability effects)
+- **Just finished:** 4.4 — Ability integration, stat stages, recovery moves, recoil moves, drain moves. Tag v4.4 when committing.
+- **Known issues / blockers:** Dream Eater drain applies regardless of sleep status (secondary condition check deferred to 4.5); Geomancy implemented as free +2 boost (no charge turn); Roost does not remove Flying type temporarily
 
 ---
 

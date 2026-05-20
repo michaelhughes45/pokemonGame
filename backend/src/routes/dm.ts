@@ -8,7 +8,7 @@ import { Campaign } from '../models/Campaign';
 import { Npc } from '../models/Npc';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
-import { computeStats, BaseStats } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
 
 const router = Router();
 
@@ -186,7 +186,7 @@ router.post('/players/:username/pokemon', async (req: Request, res: Response): P
     ownerType: 'player',
     nickname:  null,
     level,
-    exp:       0,
+    exp:       expForLevel(level, (speciesDoc.expGroup as string) || 'medium-fast'),
     currentHp: maxHp,
     nature,
     gender:    resolvedGender,
@@ -444,7 +444,7 @@ router.post('/npcs/:npcId/pokemon', async (req: Request, res: Response): Promise
     ownerType: 'npc',
     nickname:  null,
     level,
-    exp:       0,
+    exp:       expForLevel(level, (speciesDoc.expGroup as string) || 'medium-fast'),
     currentHp: maxHp,
     nature,
     gender:    resolvedGender,
@@ -591,6 +591,24 @@ router.delete('/pokemon/:pokemonId/evolution-override', async (req: Request, res
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/dm/pokemon/:pokemonId/hidden-ability  — toggle hidden ability on/off
+//
+// When enabled, resolveMove uses the species' hidden ability slot instead of
+// slot 1. Falls back to slot 1 if the species has no hidden ability listed.
+// ---------------------------------------------------------------------------
+router.patch('/pokemon/:pokemonId/hidden-ability', async (req: Request, res: Response) => {
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, req.params.pokemonId as string, res);
+  if (!pokemon) return;
+
+  pokemon.hasHiddenAbility = !pokemon.hasHiddenAbility;
+  await pokemon.save();
+  res.json({
+    data: { hasHiddenAbility: pokemon.hasHiddenAbility },
+    error: null,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/dm/npcs/:npcId/heal
 // Restores every Pokémon in the NPC's party to full HP + PP and clears
 // all status conditions. DM only; NPC must belong to the DM's campaign.
@@ -637,6 +655,36 @@ router.post('/npcs/:npcId/heal', async (req: Request, res: Response): Promise<vo
   }));
 
   res.json({ data: { message: `${npc.name}'s party has been healed!` }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/fix-pokemon-exp
+// One-time migration: bumps any Pokémon whose exp is below their level minimum
+// up to expForLevel(level, expGroup). Safe to run multiple times.
+// ---------------------------------------------------------------------------
+router.post('/fix-pokemon-exp', async (req: Request, res: Response): Promise<void> => {
+  const allPokemon = await Pokemon.find({}, '_id speciesId level exp').lean();
+
+  const speciesIds = [...new Set(allPokemon.map(p => p.speciesId))];
+  const caches = await PokedexCache.find(
+    { pokeApiId: { $in: speciesIds } },
+    'pokeApiId expGroup',
+  ).lean();
+  const expGroupMap = new Map(
+    caches.map(c => [c.pokeApiId as number, (c.expGroup as string) || 'medium-fast']),
+  );
+
+  let fixed = 0;
+  for (const poke of allPokemon) {
+    const expGroup = expGroupMap.get(poke.speciesId) ?? 'medium-fast';
+    const minExp   = expForLevel(poke.level, expGroup);
+    if (poke.exp < minExp) {
+      await Pokemon.updateOne({ _id: poke._id }, { $set: { exp: minExp } });
+      fixed++;
+    }
+  }
+
+  res.json({ data: { fixed, total: allPokemon.length }, error: null });
 });
 
 export default router;

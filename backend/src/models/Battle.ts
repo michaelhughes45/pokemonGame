@@ -4,6 +4,11 @@ import mongoose, { Schema } from 'mongoose';
 // Sub-document types
 // ---------------------------------------------------------------------------
 
+export type StatStages = {
+  atk: number; def: number; spa: number; spd: number;
+  spe: number; acc: number; eva: number;
+};
+
 export type PlayerSideEntry = {
   userId: mongoose.Types.ObjectId;
   activePokemonId: mongoose.Types.ObjectId | null;
@@ -79,6 +84,10 @@ export type IBattle = {
   npcPokemonLimit: number | null;
   // wild battles only — false lets DM use the wild Pokémon as a pure fight
   wildCatchable: boolean;
+  // Keyed by pokemonId.toString(). Entries are added on first stage change and
+  // deleted when a Pokémon switches out or faints. Schema.Types.Mixed so the
+  // map is flexible; call battle.markModified('statStages') after mutations.
+  statStages: Record<string, StatStages>;
   expAwarded: boolean;
   encounterId: mongoose.Types.ObjectId | null;
   lastUpdatedAt: Date;
@@ -171,6 +180,7 @@ const BattleSchema = new Schema<IBattle>(
       },
     ],
 
+    statStages:         { type: Schema.Types.Mixed, default: {} },
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },

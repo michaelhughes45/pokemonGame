@@ -6,6 +6,7 @@ import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { computeStats } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
+import { fetchSpecies } from '../lib/pokeapi';
 
 const router = Router();
 
@@ -364,8 +365,19 @@ router.post('/use', verifyToken, async (req: Request, res: Response): Promise<vo
       });
       if (evolveIntoId !== null) {
         pokemon.speciesId = evolveIntoId;
-        const evolved = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name').lean();
-        message += evolved ? ` ${pokemon.nickname ?? 'It'} evolved into ${evolved.name}!` : ' It evolved!';
+        let evolved = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
+        if (!evolved) {
+          try {
+            const fetched = await fetchSpecies(evolveIntoId);
+            const created = await PokedexCache.create(fetched);
+            evolved = created.toObject();
+          } catch { /* leave evolved null — name falls back below */ }
+        }
+        if (evolved?.baseStats) {
+          pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature).hp;
+        }
+        const evolvedName = evolved ? (evolved.name as string) : 'a new form';
+        message += ` ${pokemon.nickname ?? 'It'} evolved into ${evolvedName}!`;
       }
 
     } else if (effect.kind === 'volatile_cure') {
