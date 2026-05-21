@@ -212,10 +212,17 @@ const SELF_TARGETING_MOVES = new Set([
   'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
 ]);
 
+// Two-turn moves that require a charge turn before firing.
+// The charge condition stored on the Pokémon is `charging-<moveId>`.
+const CHARGE_MOVES = new Set(['geomancy']);
+const CHARGE_MESSAGES: Record<string, string> = {
+  'geomancy': 'is absorbing power!',
+};
+
 // Stat stage effects for pure stat-change moves.
 // Opponent-debuff moves (growl, leer, etc.) target a foe and go through the
 // normal resolveMove path; self-boost moves are in SELF_TARGETING_MOVES.
-type StatEffect = { stat: keyof StatStages; stages: number; target: 'self' | 'foe' };
+type StatEffect = { stat: keyof StatStages; stages: number; target: 'self' | 'foe'; chance?: number };
 
 const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   // ── Self-boost moves ───────────────────────────────────────────────────────
@@ -272,6 +279,38 @@ const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'flash':           [{ stat: 'acc', stages: -1, target: 'foe' }],
   'kinesis':         [{ stat: 'acc', stages: -1, target: 'foe' }],
   'sweet-scent':     [{ stat: 'eva', stages: -2, target: 'foe' }],
+  // ── Damaging moves — guaranteed self stat drop ─────────────────────────────
+  'close-combat':  [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }],
+  'superpower':    [{ stat: 'atk', stages: -1, target: 'self' }, { stat: 'def', stages: -1, target: 'self' }],
+  'overheat':      [{ stat: 'spa', stages: -2, target: 'self' }],
+  'draco-meteor':  [{ stat: 'spa', stages: -2, target: 'self' }],
+  'leaf-storm':    [{ stat: 'spa', stages: -2, target: 'self' }],
+  'psycho-boost':  [{ stat: 'spa', stages: -2, target: 'self' }],
+  'hammer-arm':    [{ stat: 'spe', stages: -1, target: 'self' }],
+  'v-create':      [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }, { stat: 'spe', stages: -1, target: 'self' }],
+  // ── Damaging moves — chance-based foe stat drop ────────────────────────────
+  'crunch':        [{ stat: 'def', stages: -1, target: 'foe', chance: 0.2 }],
+  'psychic':       [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
+  'shadow-ball':   [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.2 }],
+  'acid':          [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
+  'acid-spray':    [{ stat: 'spd', stages: -2, target: 'foe', chance: 1 }],
+  'bubble':        [{ stat: 'spe', stages: -1, target: 'foe', chance: 0.1 }],
+  'bubble-beam':   [{ stat: 'spe', stages: -1, target: 'foe', chance: 0.1 }],
+  'constrict':     [{ stat: 'spe', stages: -1, target: 'foe', chance: 0.1 }],
+  'icy-wind':      [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'mud-shot':      [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'mud-slap':      [{ stat: 'acc', stages: -1, target: 'foe', chance: 1 }],
+  'rock-smash':    [{ stat: 'def', stages: -1, target: 'foe', chance: 0.5 }],
+  'energy-ball':   [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
+  'flash-cannon':  [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
+  'luster-purge':  [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.5 }],
+  'mist-ball':     [{ stat: 'spa', stages: -1, target: 'foe', chance: 0.5 }],
+  'octazooka':     [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.5 }],
+  'muddy-water':   [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.3 }],
+  'mirror-shot':   [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.3 }],
+  // ── Damaging moves — chance-based self stat boost ──────────────────────────
+  'charge-beam':   [{ stat: 'spa', stages: 1, target: 'self', chance: 0.7 }],
+  'meteor-mash':   [{ stat: 'atk', stages: 1, target: 'self', chance: 0.2 }],
 };
 
 const STAT_DISPLAY_NAMES: Record<keyof StatStages, string> = {
@@ -317,6 +356,40 @@ const RECOIL_MOVES: Record<string, RecoilEffect> = {
   'head-smash':   { type: 'damage', fraction: 1 / 2 },
   'struggle':     { type: 'max-hp', fraction: 1 / 4 },
 };
+
+// Multi-hit moves — hit a fixed number of times or a random 2–5.
+type MultiHitEffect = { type: 'fixed'; count: number } | { type: 'variable' };
+
+const MULTI_HIT_MOVES: Record<string, MultiHitEffect> = {
+  // Fixed 2-hit
+  'double-kick':   { type: 'fixed', count: 2 },
+  'bonemerang':    { type: 'fixed', count: 2 },
+  'twineedle':     { type: 'fixed', count: 2 },
+  'double-hit':    { type: 'fixed', count: 2 },
+  'dual-chop':     { type: 'fixed', count: 2 },
+  'dual-wingbeat': { type: 'fixed', count: 2 },
+  'gear-grind':    { type: 'fixed', count: 2 },
+  // Variable 2–5 hit (Gen 5+ distribution: 1/3 × 2, 1/3 × 3, 1/6 × 4, 1/6 × 5)
+  'fury-attack':   { type: 'variable' },
+  'double-slap':   { type: 'variable' },
+  'comet-punch':   { type: 'variable' },
+  'fury-swipes':   { type: 'variable' },
+  'spike-cannon':  { type: 'variable' },
+  'bullet-seed':   { type: 'variable' },
+  'icicle-spear':  { type: 'variable' },
+  'rock-blast':    { type: 'variable' },
+  'arm-thrust':    { type: 'variable' },
+  'pin-missile':   { type: 'variable' },
+  'tail-slap':     { type: 'variable' },
+  'bone-rush':     { type: 'variable' },
+};
+
+function getHitCount(moveId: string): number {
+  const effect = MULTI_HIT_MOVES[moveId];
+  if (!effect) return 1;
+  if (effect.type === 'fixed') return effect.count;
+  return [2, 2, 3, 3, 4, 5][Math.floor(Math.random() * 6)];
+}
 
 // Drain moves — attacker restores HP equal to a fraction of damage dealt.
 type DrainEffect = { fraction: number };
@@ -571,6 +644,86 @@ async function resolveItemAction(entry: TurnQueueEntry): Promise<string[]> {
 // Resolves a switch action: recalls the outgoing Pokémon (clearing its volatile
 // statuses), sets the incoming Pokémon as active, and adds it to usedPokemonIds.
 // Returns turn-log event strings.
+// Abilities that set field weather when the Pokémon enters.
+// Ability-set weather is indefinite (weatherTurnsRemaining = null).
+const ENTRY_ABILITY_WEATHER: Partial<Record<string, NonNullable<IBattle['weather']>>> = {
+  'drought':      'sun',
+  'drizzle':      'rain',
+  'sand-stream':  'sandstorm',
+  'snow-warning': 'snow',
+};
+
+const ENTRY_WEATHER_MESSAGES: Record<NonNullable<IBattle['weather']>, string> = {
+  sun:       'The sunlight turned harsh!',
+  rain:      'It started to rain!',
+  sandstorm: 'A sandstorm kicked up!',
+  hail:      'It started to hail!',
+  snow:      'It started to snow!',
+};
+
+// Fires when any Pokémon is sent onto the field (send-out, dm-send-out, mid-battle switch).
+// Handles Intimidate and weather-setting abilities. Returns turn-log event strings.
+async function applyEntryAbilities(
+  battle:       HydratedDocument<IBattle>,
+  incomingId:   mongoose.Types.ObjectId,
+  incomingSide: 'player' | 'enemy',
+): Promise<string[]> {
+  const poke = await Pokemon.findById(incomingId, 'speciesId nickname hasHiddenAbility').lean();
+  if (!poke) return [];
+  const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name abilities').lean();
+  if (!cache) return [];
+
+  type CachedAbility = { name: string; isHidden: boolean };
+  const abilities = (cache.abilities as CachedAbility[]) ?? [];
+  const ability   = (poke.hasHiddenAbility as boolean)
+    ? (abilities.find(a => a.isHidden) ?? abilities.find(a => !a.isHidden))
+    : abilities.find(a => !a.isHidden);
+  if (!ability) return [];
+
+  const pokeName    = (poke.nickname as string | null) ?? slugToDisplayName(cache.name as string);
+  const abilitySlug = ability.name;
+  const abilityName = slugToDisplayName(abilitySlug);
+  const events: string[] = [];
+
+  // Weather-setting abilities (Drought, Drizzle, Sand Stream, Snow Warning)
+  const entryWeather = ENTRY_ABILITY_WEATHER[abilitySlug];
+  if (entryWeather) {
+    if (battle.weather === entryWeather) {
+      // Same weather already active — no visible effect
+    } else if (battle.weather) {
+      battle.weather               = null;
+      battle.weatherTurnsRemaining = null;
+      events.push(`${pokeName}'s ${abilityName}! The weather cleared!`);
+    } else {
+      battle.weather               = entryWeather;
+      battle.weatherTurnsRemaining = null; // indefinite — ability weather has no countdown
+      events.push(`${pokeName}'s ${abilityName}! ${ENTRY_WEATHER_MESSAGES[entryWeather]}`);
+    }
+  }
+
+  // Intimidate — lowers Atk of all active opposing Pokémon by 1
+  if (abilitySlug === 'intimidate') {
+    const stageMap     = battle.statStages as Record<string, StatStages>;
+    const opposingSide = incomingSide === 'player' ? battle.enemySide : battle.playerSide;
+    const hasTargets   = opposingSide.some(e => e.activePokemonId);
+
+    if (hasTargets) {
+      events.push(`${pokeName}'s ${abilityName}!`);
+      for (const entry of opposingSide) {
+        if (!entry.activePokemonId) continue;
+        const targetId   = entry.activePokemonId.toString();
+        const target     = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
+        const tgtCache   = target ? await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name').lean() : null;
+        const targetName = (target?.nickname as string | null) ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'Pokémon');
+        events.push(...applyStatStageEffects(stageMap, targetId, [{ stat: 'atk', stages: -1, target: 'foe' }], targetName));
+      }
+      battle.markModified('statStages');
+    }
+  }
+
+  return events;
+}
+
 async function resolveSwitch(
   battle: HydratedDocument<IBattle>,
   entry:  TurnQueueEntry,
@@ -633,6 +786,9 @@ async function resolveSwitch(
     : null;
   const inName   = incoming?.nickname ?? (inCache ? slugToDisplayName(inCache.name as string) : 'Pokémon');
   events.push(`${inName} was sent out!`);
+
+  const incomingSide = entry.actorType === 'npc' ? 'enemy' : 'player';
+  events.push(...await applyEntryAbilities(battle, incomingId, incomingSide));
 
   return events;
 }
@@ -1404,7 +1560,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
   if (allActiveIds.length > 0) {
     const activePokemons = await Pokemon.find(
       { _id: { $in: allActiveIds }, currentHp: { $gt: 0 } },
-      'speciesId level nature currentHp statusCondition statusCounter nickname',
+      'speciesId level nature currentHp statusCondition statusCounter nickname volatileStatus',
     ).lean();
 
     const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
@@ -1462,8 +1618,11 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
         const cache = cacheMap.get(poke.speciesId);
         if (!cache) continue;
 
-        const pokeTypes = (cache.types as string[]) ?? [];
-        if (pokeTypes.some(t => immuneSet.has(t))) continue;
+        const pokeTypes    = (cache.types as string[]) ?? [];
+        const isRoosting   = ((poke.volatileStatus as Array<{ condition: string }>) ?? [])
+          .some(v => v.condition === 'roosting');
+        const effectiveTypes = isRoosting ? pokeTypes.filter(t => t !== 'flying') : pokeTypes;
+        if (effectiveTypes.some(t => immuneSet.has(t))) continue;
 
         const maxHp     = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
         const damage    = Math.max(1, Math.floor(maxHp / 16));
@@ -1476,6 +1635,15 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 
         const verb = battle.weather === 'sandstorm' ? 'buffeted by the sandstorm' : 'pelted by hail';
         allEvents.push(`${pokeName} is ${verb}! (${damage} damage, ${newHp} HP remaining)`);
+      }
+    }
+
+    // Clear roosting volatile — only lasts until end of the round it was used
+    for (const poke of activePokemons) {
+      const hasRoosting = ((poke.volatileStatus as Array<{ condition: string }>) ?? [])
+        .some(v => v.condition === 'roosting');
+      if (hasRoosting) {
+        await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: 'roosting' } } });
       }
     }
 
@@ -1845,6 +2013,18 @@ router.post('/:id/send-out', async (req: Request, res: Response): Promise<void> 
   if (!alreadyUsed) {
     playerEntry.usedPokemonIds.push(pokeId);
   }
+
+  const entryEvents = await applyEntryAbilities(battle, pokeId, 'player');
+  if (entryEvents.length > 0) {
+    let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+    if (!logEntry) {
+      battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+      logEntry = battle.turnLog[battle.turnLog.length - 1];
+    }
+    for (const ev of entryEvents) logEntry.events.push(ev);
+    battle.markModified('turnLog');
+  }
+
   battle.lastUpdatedAt = new Date();
   await battle.save();
 
@@ -1912,7 +2092,19 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
   }
 
   npcEntry.activePokemonId = pokeId;
-  battle.lastUpdatedAt     = new Date();
+
+  const npcEntryEvents = await applyEntryAbilities(battle, pokeId, 'enemy');
+  if (npcEntryEvents.length > 0) {
+    let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+    if (!logEntry) {
+      battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+      logEntry = battle.turnLog[battle.turnLog.length - 1];
+    }
+    for (const ev of npcEntryEvents) logEntry.events.push(ev);
+    battle.markModified('turnLog');
+  }
+
+  battle.lastUpdatedAt = new Date();
   await battle.save();
 
   res.json({ data: { activePokemonId: pokemonId }, error: null });
@@ -2554,59 +2746,93 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       }
     } else if (SELF_TARGETING_MOVES.has(currentEntry.moveId)) {
       const attacker = await Pokemon.findById(
-        currentEntry.activePokemonId, 'nickname speciesId currentHp nature level',
+        currentEntry.activePokemonId, 'nickname speciesId currentHp nature level volatileStatus',
       ).lean();
       const atkCache = attacker
         ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats').lean()
         : null;
       const attackerName = attacker?.nickname ?? (atkCache ? slugToDisplayName(atkCache.name as string) : 'Pokémon');
-      moveEvents.push(`${attackerName} used ${slugToDisplayName(currentEntry.moveId)}!`);
 
-      const statEffects = STAT_STAGE_MOVES[currentEntry.moveId];
-      if (statEffects) {
-        const selfEffects = statEffects.filter(e => e.target === 'self');
-        if (selfEffects.length > 0) {
-          const stageMap = battle.statStages as Record<string, StatStages>;
-          moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), selfEffects, attackerName));
-          battle.markModified('statStages');
+      // Two-turn moves: turn 1 enters charge state (no effect); turn 2 fires normally.
+      let applyEffects = true;
+      if (CHARGE_MOVES.has(currentEntry.moveId) && attacker) {
+        const chargeCondition = `charging-${currentEntry.moveId}`;
+        const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+        const isCharging = volStatus.some(v => v.condition === chargeCondition);
+
+        if (!isCharging) {
+          await Pokemon.updateOne(
+            { _id: currentEntry.activePokemonId },
+            { $push: { volatileStatus: { condition: chargeCondition, turnsRemaining: 99 } } },
+          );
+          moveEvents.push(`${attackerName} used ${slugToDisplayName(currentEntry.moveId)}! ${attackerName} ${CHARGE_MESSAGES[currentEntry.moveId]}`);
+          applyEffects = false;
+        } else {
+          await Pokemon.updateOne(
+            { _id: currentEntry.activePokemonId },
+            { $pull: { volatileStatus: { condition: chargeCondition } } },
+          );
         }
       }
 
-      const recoveryEffect = RECOVERY_MOVES[currentEntry.moveId];
-      if (recoveryEffect && attacker && atkCache?.baseStats) {
-        const maxHp     = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature).hp;
-        const currentHp = attacker.currentHp as number;
+      if (applyEffects) {
+        moveEvents.push(`${attackerName} used ${slugToDisplayName(currentEntry.moveId)}!`);
 
-        if (recoveryEffect.type === 'rest') {
-          await Pokemon.updateOne(
-            { _id: currentEntry.activePokemonId },
-            { $set: { currentHp: maxHp, statusCondition: 'sleep', statusCounter: 2 } },
-          );
-          moveEvents.push(`${attackerName} went to sleep and fully restored its HP!`);
-        } else if (currentHp >= maxHp) {
-          moveEvents.push(`${attackerName}'s HP is full!`);
-        } else {
-          const fraction = recoveryEffect.type === 'flat'
-            ? recoveryEffect.fraction
-            : battle.weather === 'sun' ? 2 / 3
-            : !battle.weather          ? 0.5
-            :                            0.25; // rain / sandstorm / hail / snow
-          const newHp    = Math.min(maxHp, currentHp + Math.floor(maxHp * fraction));
-          const restored = newHp - currentHp;
-          await Pokemon.updateOne({ _id: currentEntry.activePokemonId }, { $set: { currentHp: newHp } });
-          moveEvents.push(`${attackerName} restored ${restored} HP!`);
+        const statEffects = STAT_STAGE_MOVES[currentEntry.moveId];
+        if (statEffects) {
+          const selfEffects = statEffects.filter(e => e.target === 'self');
+          if (selfEffects.length > 0) {
+            const stageMap = battle.statStages as Record<string, StatStages>;
+            moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), selfEffects, attackerName));
+            battle.markModified('statStages');
+          }
+        }
+
+        const recoveryEffect = RECOVERY_MOVES[currentEntry.moveId];
+        if (recoveryEffect && attacker && atkCache?.baseStats) {
+          const maxHp     = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature).hp;
+          const currentHp = attacker.currentHp as number;
+
+          if (recoveryEffect.type === 'rest') {
+            await Pokemon.updateOne(
+              { _id: currentEntry.activePokemonId },
+              { $set: { currentHp: maxHp, statusCondition: 'sleep', statusCounter: 2 } },
+            );
+            moveEvents.push(`${attackerName} went to sleep and fully restored its HP!`);
+          } else if (currentHp >= maxHp) {
+            moveEvents.push(`${attackerName}'s HP is full!`);
+          } else {
+            const fraction = recoveryEffect.type === 'flat'
+              ? recoveryEffect.fraction
+              : battle.weather === 'sun' ? 2 / 3
+              : !battle.weather          ? 0.5
+              :                            0.25; // rain / sandstorm / hail / snow
+            const newHp    = Math.min(maxHp, currentHp + Math.floor(maxHp * fraction));
+            const restored = newHp - currentHp;
+            await Pokemon.updateOne({ _id: currentEntry.activePokemonId }, { $set: { currentHp: newHp } });
+            moveEvents.push(`${attackerName} restored ${restored} HP!`);
+
+            // Roost: temporarily remove Flying type for end-of-round weather damage this turn
+            if (currentEntry.moveId === 'roost') {
+              await Pokemon.updateOne(
+                { _id: currentEntry.activePokemonId },
+                { $push: { volatileStatus: { condition: 'roosting', turnsRemaining: 0 } } },
+              );
+            }
+          }
         }
       }
     } else {
-      const stageMap     = battle.statStages as Record<string, StatStages>;
-      const recoilEffect = RECOIL_MOVES[currentEntry.moveId];
-      const drainEffect  = DRAIN_MOVES[currentEntry.moveId];
+      const stageMap        = battle.statStages as Record<string, StatStages>;
+      const recoilEffect    = RECOIL_MOVES[currentEntry.moveId];
+      const drainEffect     = DRAIN_MOVES[currentEntry.moveId];
+      const selfStatEffects = (STAT_STAGE_MOVES[currentEntry.moveId] ?? []).filter(e => e.target === 'self');
 
-      // Pre-fetch attacker data once if this move has recoil or drain
+      // Pre-fetch attacker data once if this move has recoil, drain, or self stat effects
       type AtkSnapshot = { currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null };
       let atkSnap:      AtkSnapshot | null = null;
       let atkSnapCache: { name?: unknown; baseStats?: unknown } | null = null;
-      if (recoilEffect || drainEffect) {
+      if (recoilEffect || drainEffect || selfStatEffects.length > 0) {
         atkSnap = await Pokemon.findById(
           currentEntry.activePokemonId, 'nickname currentHp speciesId nature level',
         ).lean() as AtkSnapshot | null;
@@ -2616,34 +2842,66 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       }
 
       for (const targetId of targets) {
-        const { damage, events } = await resolveMove(
-          currentEntry.activePokemonId,
-          new mongoose.Types.ObjectId(targetId),
-          currentEntry.moveId,
-          battle.weather,
-          {
-            attacker: stageMap[currentEntry.activePokemonId.toString()],
-            target:   stageMap[targetId],
-          },
-        );
-        moveEvents.push(...events);
-
-        if (damage > 0) {
-          const currentHp = targetHpMap.get(targetId) ?? 0;
-          const newHp     = Math.max(0, currentHp - damage);
-          await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+        // Dream Eater only damages and heals if the target is asleep
+        if (currentEntry.moveId === 'dream-eater') {
+          const tgt      = await Pokemon.findById(targetId, 'statusCondition nickname speciesId').lean();
+          if (tgt?.statusCondition !== 'sleep') {
+            const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name').lean() : null;
+            const tgtName  = (tgt?.nickname as string | null) ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'Pokémon');
+            moveEvents.push(`Dream Eater had no effect on ${tgtName}!`);
+            continue;
+          }
         }
 
-        // Secondary status effect — rolled per target so multi-target moves work correctly
+        const hitCount   = getHitCount(currentEntry.moveId);
+        let totalDamage  = 0;
+        let actualHits   = 0;
+
+        for (let hit = 1; hit <= hitCount; hit++) {
+          // Stop hitting if the target already fainted from a previous hit
+          if ((targetHpMap.get(targetId) ?? 0) <= 0) break;
+
+          const { damage, events } = await resolveMove(
+            currentEntry.activePokemonId,
+            new mongoose.Types.ObjectId(targetId),
+            currentEntry.moveId,
+            battle.weather,
+            {
+              attacker: stageMap[currentEntry.activePokemonId.toString()],
+              target:   stageMap[targetId],
+            },
+          );
+
+          if (hitCount > 1) {
+            moveEvents.push(`(Hit ${hit}) ${events[0]}`);
+          } else {
+            moveEvents.push(...events);
+          }
+
+          if (damage > 0) {
+            const currentHp = targetHpMap.get(targetId) ?? 0;
+            const newHp     = Math.max(0, currentHp - damage);
+            await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+            targetHpMap.set(targetId, newHp);
+            totalDamage += damage;
+          }
+          actualHits++;
+        }
+
+        if (hitCount > 1) {
+          moveEvents.push(`Hit ${actualHits} time(s)!`);
+        }
+
+        // Secondary status effect — rolled once after all hits resolve
         if (moveEffect && Math.random() < moveEffect.chance) {
           const statusEvents = await applyStatusEffect(new mongoose.Types.ObjectId(targetId), moveEffect);
           moveEvents.push(...statusEvents);
         }
 
-        // Pure foe-targeting stat stage effects (e.g. Growl, Leer, Screech)
+        // Foe stat stage effects — chance rolled per effect (e.g. Crunch 20% Def drop)
         const statEffects = STAT_STAGE_MOVES[currentEntry.moveId];
         if (statEffects) {
-          const foeEffects = statEffects.filter(e => e.target === 'foe');
+          const foeEffects = statEffects.filter(e => e.target === 'foe' && Math.random() < (e.chance ?? 1));
           if (foeEffects.length > 0) {
             const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
             const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name').lean() : null;
@@ -2653,12 +2911,22 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
           }
         }
 
-        // Recoil — attacker takes damage after hitting
-        if (recoilEffect && damage > 0 && atkSnap && atkSnapCache) {
+        // Self stat effects on damaging moves (e.g. Close Combat −1 Def/SpDef, Charge Beam +1 SpAtk)
+        if (selfStatEffects.length > 0 && atkSnap && atkSnapCache) {
+          const rolledSelfEffects = selfStatEffects.filter(e => Math.random() < (e.chance ?? 1));
+          if (rolledSelfEffects.length > 0) {
+            const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
+            moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), rolledSelfEffects, atkName));
+            battle.markModified('statStages');
+          }
+        }
+
+        // Recoil — based on total damage dealt across all hits
+        if (recoilEffect && totalDamage > 0 && atkSnap && atkSnapCache) {
           const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
           let recoilDmg: number;
           if (recoilEffect.type === 'damage') {
-            recoilDmg = Math.max(1, Math.floor(damage * recoilEffect.fraction));
+            recoilDmg = Math.max(1, Math.floor(totalDamage * recoilEffect.fraction));
           } else {
             // Struggle: fraction of attacker's own max HP
             const maxHp = atkSnapCache.baseStats
@@ -2668,17 +2936,17 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
           }
           const newAtkHp = Math.max(0, atkSnap.currentHp - recoilDmg);
           await Pokemon.updateOne({ _id: currentEntry.activePokemonId }, { $set: { currentHp: newAtkHp } });
-          atkSnap.currentHp = newAtkHp; // keep snapshot current for multi-hit edge cases
+          atkSnap.currentHp = newAtkHp;
           moveEvents.push(`${atkName} was hurt by recoil!`);
         }
 
-        // Drain — attacker restores HP equal to a fraction of damage dealt
-        if (drainEffect && damage > 0 && atkSnap && atkSnapCache) {
+        // Drain — based on total damage dealt across all hits
+        if (drainEffect && totalDamage > 0 && atkSnap && atkSnapCache) {
           const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
           const maxHp   = atkSnapCache.baseStats
             ? computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature).hp
             : 0;
-          const restoreAmt = Math.max(1, Math.floor(damage * drainEffect.fraction));
+          const restoreAmt = Math.max(1, Math.floor(totalDamage * drainEffect.fraction));
           const newAtkHp   = Math.min(maxHp, atkSnap.currentHp + restoreAmt);
           const restored   = newAtkHp - atkSnap.currentHp;
           if (restored > 0) {
