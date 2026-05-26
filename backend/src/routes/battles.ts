@@ -56,13 +56,19 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
     return { entry, speed };
   });
 
-  // Priority tiers: items (2) → switches (1) → moves (0).
-  // Items act first (trainer acts first, like the main games), switches before moves.
-  // Within the same tier, highest Speed goes first; ties keep submission order.
+  // Sort order:
+  //   1. Action type tier — items/catch (2) → switches (1) → moves/run (0)
+  //   2. Move priority tier — Quick Attack (+1) beats normal moves (0), etc.
+  //      Only applies within the moves tier; items and switches are unaffected.
+  //   3. Speed — highest goes first within the same priority tier.
   const actionPriority = (t: string) => (t === 'item' || t === 'catch' ? 2 : t === 'switch' ? 1 : 0);
   withSpeed.sort((a, b) => {
-    const diff = actionPriority(b.entry.actionType) - actionPriority(a.entry.actionType);
-    if (diff !== 0) return diff;
+    const actionDiff = actionPriority(b.entry.actionType) - actionPriority(a.entry.actionType);
+    if (actionDiff !== 0) return actionDiff;
+    const movePriorityA = MOVE_PRIORITY[a.entry.moveId ?? ''] ?? 0;
+    const movePriorityB = MOVE_PRIORITY[b.entry.moveId ?? ''] ?? 0;
+    const movePriorityDiff = movePriorityB - movePriorityA;
+    if (movePriorityDiff !== 0) return movePriorityDiff;
     return b.speed - a.speed;
   });
 
@@ -163,7 +169,6 @@ const STATUS_MOVES: Record<string, StatusMoveEffect> = {
   'blizzard':      { status: 'freeze', chance: 0.1 },
   'ice-punch':     { status: 'freeze', chance: 0.1 },
   'freeze-dry':    { status: 'freeze', chance: 0.1 },
-  'aurora-beam':   { status: 'freeze', chance: 0.1 },
   'powder-snow':   { status: 'freeze', chance: 0.1 },
   // Confusion
   'confuse-ray':   { status: 'confusion', chance: 1 },
@@ -182,6 +187,57 @@ const STATUS_MOVES: Record<string, StatusMoveEffect> = {
 
 // Moves that change field weather.  These have no target — they affect the whole
 // battle.  The target the player submits is ignored during resolution.
+
+// Non-zero move priority values from the main series games.
+// Only moves that deviate from 0 are listed; everything else defaults to 0.
+const MOVE_PRIORITY: Record<string, number> = {
+  // +3
+  'detect': 3, 'endure': 3, 'protect': 3, 'kings-shield': 3, 'spiky-shield': 3,
+  'baneful-bunker': 3, 'obstruct': 3, 'quick-guard': 3, 'wide-guard': 3,
+  // +2
+  'extreme-speed': 2, 'feint': 2, 'first-impression': 2,
+  // +1
+  'aqua-jet': 1, 'baby-doll-eyes': 1, 'bullet-punch': 1, 'ice-shard': 1,
+  'mach-punch': 1, 'quick-attack': 1, 'shadow-sneak': 1, 'sucker-punch': 1,
+  'vacuum-wave': 1, 'water-shuriken': 1,
+  // -1
+  'vital-throw': -1,
+  // -3
+  'focus-punch': -3, 'revenge': -3, 'avalanche': -3,
+  // -4
+  'roar': -4, 'whirlwind': -4, 'dragon-tail': -4, 'circle-throw': -4,
+  // -5
+  'trick-room': -5,
+  // -6
+  'counter': -6, 'mirror-coat': -6,
+};
+
+// Moves that can cause the target to flinch (skip their turn if they haven't
+// moved yet). Keyed by PokeAPI move slug; value is flinch chance (0–1).
+const FLINCH_MOVES: Record<string, number> = {
+  'air-slash':       0.3,
+  'astonish':        0.3,
+  'bite':            0.3,
+  'bone-club':       0.1,
+  'dark-pulse':      0.2,
+  'dragon-rush':     0.2,
+  'extrasensory':    0.1,
+  'fake-out':        1.0,
+  'headbutt':        0.3,
+  'heart-stamp':     0.3,
+  'hyper-fang':      0.1,
+  'icicle-crash':    0.3,
+  'iron-head':       0.3,
+  'needle-arm':      0.3,
+  'rock-slide':      0.3,
+  'rolling-kick':    0.3,
+  'snore':           0.3,
+  'stomp':           0.3,
+  'twister':         0.2,
+  'waterfall':       0.2,
+  'zen-headbutt':    0.2,
+};
+
 type WeatherMoveEffect = {
   weather: NonNullable<IBattle['weather']>;
   startMessage: string;
@@ -214,10 +270,23 @@ const SELF_TARGETING_MOVES = new Set([
 
 // Two-turn moves that require a charge turn before firing.
 // The charge condition stored on the Pokémon is `charging-<moveId>`.
-const CHARGE_MOVES = new Set(['geomancy']);
+const CHARGE_MOVES = new Set([
+  'geomancy',
+  'solar-beam',
+  'fly', 'dig', 'dive', 'bounce', 'sky-attack',
+]);
 const CHARGE_MESSAGES: Record<string, string> = {
-  'geomancy': 'is absorbing power!',
+  'geomancy':   'is absorbing power!',
+  'solar-beam': 'is absorbing sunlight!',
+  'fly':        'flew up high!',
+  'dig':        'dug a hole!',
+  'dive':       'dove underwater!',
+  'bounce':     'sprang up!',
+  'sky-attack': 'is glowing!',
 };
+// Moves that make the user semi-invulnerable during the charge turn (flavor only —
+// targeting is free-form in this app, but the volatile flags it for DM awareness).
+const SEMI_INVULNERABLE_MOVES = new Set(['fly', 'dig', 'dive', 'bounce', 'sky-attack']);
 
 // Stat stage effects for pure stat-change moves.
 // Opponent-debuff moves (growl, leer, etc.) target a foe and go through the
@@ -289,6 +358,7 @@ const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'hammer-arm':    [{ stat: 'spe', stages: -1, target: 'self' }],
   'v-create':      [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }, { stat: 'spe', stages: -1, target: 'self' }],
   // ── Damaging moves — chance-based foe stat drop ────────────────────────────
+  'aurora-beam':   [{ stat: 'atk', stages: -1, target: 'foe', chance: 0.1 }],
   'crunch':        [{ stat: 'def', stages: -1, target: 'foe', chance: 0.2 }],
   'psychic':       [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
   'shadow-ball':   [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.2 }],
@@ -1042,6 +1112,23 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
 
     // Skip actors whose Pokémon fainted earlier this round (hit by a faster actor)
     if (!poke || poke.currentHp <= 0) {
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      continue;
+    }
+
+    // Skip flinched actors — flinch can only be set by a faster attacker, so this
+    // Pokémon had not yet moved when it was hit.
+    if (entry.flinched) {
+      const flinchCache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
+      const flinchName  = poke.nickname ?? (flinchCache ? slugToDisplayName(flinchCache.name as string) : 'Pokémon');
+      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+      if (!logEntry) {
+        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+        logEntry = battle.turnLog[battle.turnLog.length - 1];
+      }
+      logEntry.events.push(`${flinchName} flinched and couldn't move!`);
+      battle.markModified('turnLog');
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       continue;
@@ -2754,25 +2841,35 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       const attackerName = attacker?.nickname ?? (atkCache ? slugToDisplayName(atkCache.name as string) : 'Pokémon');
 
       // Two-turn moves: turn 1 enters charge state (no effect); turn 2 fires normally.
+      // Solar Beam skips the charge turn when the weather is harsh sunlight.
       let applyEffects = true;
       if (CHARGE_MOVES.has(currentEntry.moveId) && attacker) {
         const chargeCondition = `charging-${currentEntry.moveId}`;
         const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
-        const isCharging = volStatus.some(v => v.condition === chargeCondition);
+        const isCharging  = volStatus.some(v => v.condition === chargeCondition);
+        const skipCharge  = currentEntry.moveId === 'solar-beam' && battle.weather === 'sun';
+        const semiInvul   = SEMI_INVULNERABLE_MOVES.has(currentEntry.moveId);
 
-        if (!isCharging) {
+        if (!isCharging && !skipCharge) {
+          // Turn 1: push charge volatile (+ semi-invulnerable for Fly/Dig/etc.)
+          const volatilesToPush = [{ condition: chargeCondition, turnsRemaining: 99 }];
+          if (semiInvul) volatilesToPush.push({ condition: 'semi-invulnerable', turnsRemaining: 99 });
           await Pokemon.updateOne(
             { _id: currentEntry.activePokemonId },
-            { $push: { volatileStatus: { condition: chargeCondition, turnsRemaining: 99 } } },
+            { $push: { volatileStatus: { $each: volatilesToPush } } },
           );
           moveEvents.push(`${attackerName} used ${slugToDisplayName(currentEntry.moveId)}! ${attackerName} ${CHARGE_MESSAGES[currentEntry.moveId]}`);
           applyEffects = false;
-        } else {
+        } else if (isCharging) {
+          // Turn 2: clear charge volatile and semi-invulnerable if applicable
+          const conditionsToPull: string[] = [chargeCondition];
+          if (semiInvul) conditionsToPull.push('semi-invulnerable');
           await Pokemon.updateOne(
             { _id: currentEntry.activePokemonId },
-            { $pull: { volatileStatus: { condition: chargeCondition } } },
+            { $pull: { volatileStatus: { condition: { $in: conditionsToPull } } } },
           );
         }
+        // skipCharge (Solar Beam in sun): no volatile changes — applyEffects stays true
       }
 
       if (applyEffects) {
@@ -2954,6 +3051,17 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
             atkSnap.currentHp = newAtkHp;
             moveEvents.push(`${atkName} restored ${restored} HP!`);
           }
+        }
+
+        // Flinch — rolled once per target after all hits resolve, only if damage was dealt.
+        // Only unresolved queue entries can be flinched (faster attacker condition guaranteed
+        // by speed sort — if the target already resolved, it moved first and can't flinch).
+        const flinchChance = FLINCH_MOVES[currentEntry.moveId];
+        if (flinchChance && totalDamage > 0 && Math.random() < flinchChance) {
+          const targetEntry = battle.turnQueue.find(
+            e => e.activePokemonId.toString() === targetId && !e.resolved,
+          );
+          if (targetEntry) targetEntry.flinched = true;
         }
       }
     }

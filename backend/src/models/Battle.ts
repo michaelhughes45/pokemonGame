@@ -35,6 +35,7 @@ export type TurnQueueEntry = {
   // Empty [] during move_submission for moves; pre-filled for item/switch actions
   targets: mongoose.Types.ObjectId[];
   resolved: boolean;
+  flinched?: boolean;
 };
 
 type FieldCondition = {
@@ -141,6 +142,7 @@ const BattleSchema = new Schema<IBattle>(
         switchToPokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
         targets:           [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
         resolved:        { type: Boolean, default: false },
+        flinched:        { type: Boolean, default: false },
         _id:             false,
       },
     ],
