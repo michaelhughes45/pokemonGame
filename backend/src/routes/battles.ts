@@ -7,18 +7,10 @@ import { Pokemon } from '../models/Pokemon';
 import { Item } from '../models/Item';
 import { PokedexCache } from '../models/PokedexCache';
 import { Npc } from '../models/Npc';
-import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field, Generations } from '@smogon/calc';
 import { fetchSpecies } from '../lib/pokeapi';
 import { canEvolve } from '../lib/evolution';
-
-const NATURES = [
-  'Hardy','Lonely','Brave','Adamant','Naughty',
-  'Bold','Docile','Relaxed','Impish','Lax',
-  'Timid','Hasty','Serious','Jolly','Naive',
-  'Modest','Mild','Quiet','Bashful','Rash',
-  'Calm','Gentle','Sassy','Careful','Quirky',
-];
 
 const router = Router();
 
@@ -804,8 +796,11 @@ async function resolveSwitch(
   const events: string[] = [];
 
   if (entry.actorType === 'npc') {
+    // When an NPC has multiple slots (one per player), match by both npcId and
+    // activePokemonId so the switch lands on the exact slot that queued it.
     const npcEntry = battle.enemySide.find(
-      e => e.npcId?.toString() === entry.actorId.toString(),
+      e => e.npcId?.toString() === entry.actorId.toString()
+        && e.activePokemonId?.toString() === entry.activePokemonId.toString(),
     );
     if (!npcEntry) return [];
 
@@ -2130,7 +2125,13 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
     return;
   }
 
-  const { npcId, pokemonId } = req.body as { npcId: string; pokemonId: string };
+  const { npcId, pokemonId, slotIndex = 0 } = req.body as {
+    npcId: string;
+    pokemonId: string;
+    // 0-based index among all enemySide entries that share this npcId.
+    // Defaults to 0 — backward-compatible with single-slot battles.
+    slotIndex?: number;
+  };
 
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
     res.status(400).json({ data: null, error: 'Invalid battle ID' });
@@ -2151,11 +2152,20 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
     return;
   }
 
-  const npcEntry = battle.enemySide.find(e => e.npcId?.toString() === npcId);
-  if (!npcEntry) {
+  // Collect all slots for this NPC (multi-slot PvE battles have one per player)
+  const npcEntries = battle.enemySide.filter(e => e.npcId?.toString() === npcId);
+  if (npcEntries.length === 0) {
     res.status(404).json({ data: null, error: 'NPC not found in this battle' });
     return;
   }
+  if (slotIndex < 0 || slotIndex >= npcEntries.length) {
+    res.status(400).json({
+      data:  null,
+      error: `slotIndex must be between 0 and ${npcEntries.length - 1}`,
+    });
+    return;
+  }
+  const npcEntry = npcEntries[slotIndex];
 
   const pokeId = new mongoose.Types.ObjectId(pokemonId);
   const pokemon = await Pokemon.findOne({
@@ -2169,6 +2179,18 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
   }
   if (pokemon.currentHp <= 0) {
     res.status(400).json({ data: null, error: 'That Pokémon has fainted' });
+    return;
+  }
+
+  // Prevent the same Pokémon from being active in two slots simultaneously.
+  // (A different slot for the same NPC may already have this Pokémon out.)
+  const alreadyActiveInAnotherSlot = battle.enemySide.some(
+    e => e.npcId?.toString() === npcId
+      && e.activePokemonId?.toString() === pokemonId
+      && e !== npcEntry,
+  );
+  if (alreadyActiveInAnotherSlot) {
+    res.status(400).json({ data: null, error: 'That Pokémon is already active in another slot' });
     return;
   }
 
@@ -2345,7 +2367,14 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
       return;
     }
 
-    const wildEntry = battle.enemySide.find(e => !e.npcId && e.activePokemonId != null);
+    // Multi-wild: client passes targetPokemonId to specify which wild to throw at.
+    // Single-wild (backward compat): omit targetPokemonId and the only active slot is used.
+    const wildEntry = targetPokemonId
+      ? battle.enemySide.find(
+          e => !e.npcId && e.activePokemonId?.toString() === targetPokemonId,
+        )
+      : battle.enemySide.find(e => !e.npcId && e.activePokemonId != null);
+
     if (!wildEntry?.activePokemonId) {
       res.status(400).json({ data: null, error: 'No active wild Pokémon to catch' });
       return;
@@ -2477,11 +2506,15 @@ router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<
     return;
   }
 
-  const { npcId, moveId, actionType = 'move', switchToPokemonId } = req.body as {
+  const { npcId, moveId, actionType = 'move', switchToPokemonId, activePokemonId: slotPokemonId } = req.body as {
     npcId: string;
     moveId?: string;
     actionType?: 'move' | 'switch';
     switchToPokemonId?: string;
+    // Optional: the activePokemonId of the specific slot to submit for.
+    // Required when an NPC has multiple active slots (one per player).
+    // Omit for single-slot battles — the only active Pokémon is used.
+    activePokemonId?: string;
   };
 
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
@@ -2505,19 +2538,36 @@ router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<
 
   // For NPC battles match by npcId; for wild battles the DM passes the
   // wild Pokémon's activePokemonId in the npcId field.
+  // When an NPC has multiple slots (multi-slot PvE) the caller must also
+  // pass activePokemonId to identify the exact slot. Single-slot battles
+  // can omit it — the first match by npcId is used (backward-compatible).
   const npcEntry = battle.type === 'wild'
     ? battle.enemySide.find(e => e.activePokemonId?.toString() === npcId)
-    : battle.enemySide.find(e => e.npcId?.toString() === npcId);
+    : slotPokemonId
+      ? battle.enemySide.find(
+          e => e.npcId?.toString() === npcId
+            && e.activePokemonId?.toString() === slotPokemonId,
+        )
+      : battle.enemySide.find(e => e.npcId?.toString() === npcId);
   if (!npcEntry) {
     res.status(404).json({ data: null, error: 'NPC not found in this battle' });
     return;
   }
 
-  const alreadySubmitted = battle.turnQueue.some(
-    e => e.actorId.toString() === npcId && e.actorType === 'npc'
-  );
+  // Duplicate-submission guard: for multi-slot NPC battles, each slot submits
+  // independently (same actorId/npcId, different activePokemonId). When
+  // slotPokemonId is provided, scope the check to that specific slot only.
+  const alreadySubmitted = slotPokemonId
+    ? battle.turnQueue.some(
+        e => e.actorId.toString() === npcId
+          && e.activePokemonId?.toString() === slotPokemonId
+          && e.actorType === 'npc',
+      )
+    : battle.turnQueue.some(
+        e => e.actorId.toString() === npcId && e.actorType === 'npc',
+      );
   if (alreadySubmitted) {
-    res.status(400).json({ data: null, error: 'This NPC has already submitted a move this turn' });
+    res.status(400).json({ data: null, error: 'This NPC slot has already submitted a move this turn' });
     return;
   }
 

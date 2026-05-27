@@ -1,3 +1,14 @@
+// All 25 natures in national-dex order.
+// Exported so both the battle creation and encounter launch can generate
+// wild Pokémon with a random nature without duplicating the list.
+export const NATURES = [
+  'Hardy', 'Lonely', 'Brave',   'Adamant', 'Naughty',
+  'Bold',  'Docile', 'Relaxed', 'Impish',  'Lax',
+  'Timid', 'Hasty',  'Serious', 'Jolly',   'Naive',
+  'Modest','Mild',   'Quiet',   'Bashful', 'Rash',
+  'Calm',  'Gentle', 'Sassy',   'Careful', 'Quirky',
+];
+
 type StatKey = 'atk' | 'def' | 'spatk' | 'spdef' | 'speed';
 
 // Maps a nature name to which non-HP stat it boosts (+10%) and drops (-10%).

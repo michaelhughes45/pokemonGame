@@ -6,9 +6,11 @@ import { PokedexCache } from '../models/PokedexCache';
 import { Item } from '../models/Item';
 import { Campaign } from '../models/Campaign';
 import { Npc } from '../models/Npc';
+import { Encounter } from '../models/Encounter';
+import { Battle } from '../models/Battle';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
-import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
 
 const router = Router();
 
@@ -685,6 +687,558 @@ router.post('/fix-pokemon-exp', async (req: Request, res: Response): Promise<voi
   }
 
   res.json({ data: { fixed, total: allPokemon.length }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// ENCOUNTER CRUD
+// All routes require the DM to have an active campaign. Encounters are scoped
+// to that campaign — a DM can only see/edit their own campaign's encounters.
+// ---------------------------------------------------------------------------
+
+// Shared helper: fetch the DM's active campaign or send 403.
+async function assertDmCampaign(
+  dmUserId: string,
+  res: Response,
+): Promise<{ _id: mongoose.Types.ObjectId; [key: string]: unknown } | null> {
+  const campaign = await Campaign.findOne({ dmId: dmUserId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return null;
+  }
+  return campaign as { _id: mongoose.Types.ObjectId; [key: string]: unknown };
+}
+
+// Shared helper: fetch a specific encounter that belongs to this DM's campaign.
+// Sends 400/403/404 and returns null on failure so the caller can early-return.
+async function assertDmEncounter(
+  dmUserId: string,
+  encounterId: string,
+  res: Response,
+) {
+  if (!mongoose.Types.ObjectId.isValid(encounterId)) {
+    res.status(400).json({ data: null, error: 'Invalid encounter ID' });
+    return null;
+  }
+  const campaign = await Campaign.findOne({ dmId: dmUserId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return null;
+  }
+  const encounter = await Encounter.findOne({
+    _id: encounterId,
+    campaignId: campaign._id as mongoose.Types.ObjectId,
+  }).lean();
+  if (!encounter) {
+    res.status(404).json({ data: null, error: 'Encounter not found in your campaign' });
+    return null;
+  }
+  return encounter;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/encounters
+// Returns all encounters for the DM's active campaign.
+// ---------------------------------------------------------------------------
+router.get('/encounters', async (req: Request, res: Response): Promise<void> => {
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const encounters = await Encounter.find({ campaignId: campaign._id }).lean();
+  res.json({ data: encounters, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/encounters
+// Creates a new encounter for the DM's active campaign.
+//
+// Body:
+//   title (string, required)
+//   type  ('pve' | 'wild', required)  — 'pvp' reserved for Phase 5
+//   enemies        ([{ npcId }], required when type === 'pve')
+//   wildPokemon    ([{ speciesId, level, catchable? }], required when type === 'wild')
+//   playerPokemonLimit  (number | null, optional)
+//   npcPokemonLimit     (number | null, optional)
+//   expMultiplier       (number, optional, default 1)
+//   notes               (string, optional)
+//   isActive            (boolean, optional, default true)
+// ---------------------------------------------------------------------------
+router.post('/encounters', async (req: Request, res: Response): Promise<void> => {
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const {
+    title,
+    type,
+    enemies = [],
+    wildPokemon = [],
+    playerPokemonLimit = null,
+    npcPokemonLimit = null,
+    expMultiplier = 1,
+    notes = '',
+    isActive = true,
+  } = req.body as {
+    title?: string;
+    type?: string;
+    enemies?: { npcId: string }[];
+    wildPokemon?: { speciesId: number; level: number; catchable?: boolean }[];
+    playerPokemonLimit?: number | null;
+    npcPokemonLimit?: number | null;
+    expMultiplier?: number;
+    notes?: string;
+    isActive?: boolean;
+  };
+
+  // --- Basic validation ---
+  if (!title || typeof title !== 'string' || title.trim() === '') {
+    res.status(400).json({ data: null, error: 'title is required' });
+    return;
+  }
+  if (!['pve', 'wild'].includes(type ?? '')) {
+    res.status(400).json({ data: null, error: "type must be 'pve' or 'wild'" });
+    return;
+  }
+  if (
+    playerPokemonLimit !== null &&
+    (!Number.isInteger(playerPokemonLimit) || playerPokemonLimit < 1)
+  ) {
+    res.status(400).json({ data: null, error: 'playerPokemonLimit must be a positive integer or null' });
+    return;
+  }
+  if (
+    npcPokemonLimit !== null &&
+    (!Number.isInteger(npcPokemonLimit) || npcPokemonLimit < 1)
+  ) {
+    res.status(400).json({ data: null, error: 'npcPokemonLimit must be a positive integer or null' });
+    return;
+  }
+  if (typeof expMultiplier !== 'number' || expMultiplier <= 0) {
+    res.status(400).json({ data: null, error: 'expMultiplier must be a positive number' });
+    return;
+  }
+
+  // --- Type-specific validation ---
+  if (type === 'pve') {
+    if (!Array.isArray(enemies) || enemies.length === 0) {
+      res.status(400).json({ data: null, error: 'PvE encounters require at least one enemy NPC' });
+      return;
+    }
+    // All npcIds must be valid ObjectIds
+    if (!enemies.every(e => mongoose.Types.ObjectId.isValid(e.npcId))) {
+      res.status(400).json({ data: null, error: 'All enemy npcIds must be valid' });
+      return;
+    }
+    // All NPCs must belong to this campaign
+    const npcIds = enemies.map(e => new mongoose.Types.ObjectId(e.npcId));
+    const foundNpcs = await Npc.find(
+      { _id: { $in: npcIds }, campaignId: campaign._id },
+      '_id',
+    ).lean();
+    if (foundNpcs.length !== npcIds.length) {
+      res.status(403).json({ data: null, error: 'One or more NPCs do not belong to your campaign' });
+      return;
+    }
+  }
+
+  if (type === 'wild') {
+    if (!Array.isArray(wildPokemon) || wildPokemon.length === 0) {
+      res.status(400).json({ data: null, error: 'Wild encounters require at least one wild Pokémon entry' });
+      return;
+    }
+    for (const wp of wildPokemon) {
+      if (!Number.isInteger(wp.speciesId) || wp.speciesId < 1) {
+        res.status(400).json({ data: null, error: 'Each wildPokemon entry must have a valid speciesId' });
+        return;
+      }
+      if (!Number.isInteger(wp.level) || wp.level < 1 || wp.level > 100) {
+        res.status(400).json({ data: null, error: 'Each wildPokemon level must be between 1 and 100' });
+        return;
+      }
+    }
+  }
+
+  const encounter = await Encounter.create({
+    campaignId:  campaign._id,
+    createdByDm: req.user!.userId,
+    title:       title.trim(),
+    type,
+    enemies:     type === 'pve'
+      ? enemies.map(e => ({ npcId: new mongoose.Types.ObjectId(e.npcId) }))
+      : [],
+    wildPokemon: type === 'wild'
+      ? wildPokemon.map(wp => ({
+          speciesId: wp.speciesId,
+          level:     wp.level,
+          catchable: wp.catchable ?? true,
+        }))
+      : [],
+    playerPokemonLimit,
+    npcPokemonLimit,
+    expMultiplier,
+    notes,
+    isActive,
+  });
+
+  res.status(201).json({ data: encounter, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/encounters/:id
+// Returns a single encounter by ID (must belong to the DM's campaign).
+// ---------------------------------------------------------------------------
+router.get('/encounters/:id', async (req: Request, res: Response): Promise<void> => {
+  const encounter = await assertDmEncounter(req.user!.userId, req.params.id as string, res);
+  if (!encounter) return;
+
+  res.json({ data: encounter, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/dm/encounters/:id
+// Updates an encounter. All fields are optional — only provided fields change.
+// Re-runs the same validation rules as POST for any field that is present.
+// ---------------------------------------------------------------------------
+router.put('/encounters/:id', async (req: Request, res: Response): Promise<void> => {
+  const existing = await assertDmEncounter(req.user!.userId, req.params.id as string, res);
+  if (!existing) return;
+
+  // We need the full campaign document to validate NPC ownership on type changes
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const {
+    title,
+    type,
+    enemies,
+    wildPokemon,
+    playerPokemonLimit,
+    npcPokemonLimit,
+    expMultiplier,
+    notes,
+    isActive,
+  } = req.body as {
+    title?: string;
+    type?: string;
+    enemies?: { npcId: string }[];
+    wildPokemon?: { speciesId: number; level: number; catchable?: boolean }[];
+    playerPokemonLimit?: number | null;
+    npcPokemonLimit?: number | null;
+    expMultiplier?: number;
+    notes?: string;
+    isActive?: boolean;
+  };
+
+  // Build the resolved type for downstream checks (use incoming or fall back to existing)
+  const resolvedType = (type ?? existing.type) as 'pve' | 'wild';
+
+  // Validate each field that was actually provided
+  if (title !== undefined && (typeof title !== 'string' || title.trim() === '')) {
+    res.status(400).json({ data: null, error: 'title cannot be empty' });
+    return;
+  }
+  if (type !== undefined && !['pve', 'wild'].includes(type)) {
+    res.status(400).json({ data: null, error: "type must be 'pve' or 'wild'" });
+    return;
+  }
+  if (
+    playerPokemonLimit !== undefined &&
+    playerPokemonLimit !== null &&
+    (!Number.isInteger(playerPokemonLimit) || playerPokemonLimit < 1)
+  ) {
+    res.status(400).json({ data: null, error: 'playerPokemonLimit must be a positive integer or null' });
+    return;
+  }
+  if (
+    npcPokemonLimit !== undefined &&
+    npcPokemonLimit !== null &&
+    (!Number.isInteger(npcPokemonLimit) || npcPokemonLimit < 1)
+  ) {
+    res.status(400).json({ data: null, error: 'npcPokemonLimit must be a positive integer or null' });
+    return;
+  }
+  if (expMultiplier !== undefined && (typeof expMultiplier !== 'number' || expMultiplier <= 0)) {
+    res.status(400).json({ data: null, error: 'expMultiplier must be a positive number' });
+    return;
+  }
+
+  // Validate NPC list if enemies are being changed and encounter is (or will be) PvE
+  if (enemies !== undefined && resolvedType === 'pve') {
+    if (!Array.isArray(enemies) || enemies.length === 0) {
+      res.status(400).json({ data: null, error: 'PvE encounters require at least one enemy NPC' });
+      return;
+    }
+    if (!enemies.every(e => mongoose.Types.ObjectId.isValid(e.npcId))) {
+      res.status(400).json({ data: null, error: 'All enemy npcIds must be valid' });
+      return;
+    }
+    const npcIds = enemies.map(e => new mongoose.Types.ObjectId(e.npcId));
+    const foundNpcs = await Npc.find(
+      { _id: { $in: npcIds }, campaignId: campaign._id },
+      '_id',
+    ).lean();
+    if (foundNpcs.length !== npcIds.length) {
+      res.status(403).json({ data: null, error: 'One or more NPCs do not belong to your campaign' });
+      return;
+    }
+  }
+
+  // Validate wild Pokémon if being changed and encounter is (or will be) wild
+  if (wildPokemon !== undefined && resolvedType === 'wild') {
+    if (!Array.isArray(wildPokemon) || wildPokemon.length === 0) {
+      res.status(400).json({ data: null, error: 'Wild encounters require at least one wild Pokémon entry' });
+      return;
+    }
+    for (const wp of wildPokemon) {
+      if (!Number.isInteger(wp.speciesId) || wp.speciesId < 1) {
+        res.status(400).json({ data: null, error: 'Each wildPokemon entry must have a valid speciesId' });
+        return;
+      }
+      if (!Number.isInteger(wp.level) || wp.level < 1 || wp.level > 100) {
+        res.status(400).json({ data: null, error: 'Each wildPokemon level must be between 1 and 100' });
+        return;
+      }
+    }
+  }
+
+  // Build the $set payload — only include fields that were provided
+  const update: Record<string, unknown> = {};
+  if (title      !== undefined) update.title      = title.trim();
+  if (type       !== undefined) update.type        = type;
+  if (isActive   !== undefined) update.isActive    = isActive;
+  if (notes      !== undefined) update.notes       = notes;
+  if (expMultiplier  !== undefined) update.expMultiplier  = expMultiplier;
+  if (playerPokemonLimit !== undefined) update.playerPokemonLimit = playerPokemonLimit;
+  if (npcPokemonLimit    !== undefined) update.npcPokemonLimit    = npcPokemonLimit;
+  if (enemies !== undefined && resolvedType === 'pve') {
+    update.enemies = enemies.map(e => ({ npcId: new mongoose.Types.ObjectId(e.npcId) }));
+  }
+  if (wildPokemon !== undefined && resolvedType === 'wild') {
+    update.wildPokemon = wildPokemon.map(wp => ({
+      speciesId: wp.speciesId,
+      level:     wp.level,
+      catchable: wp.catchable ?? true,
+    }));
+  }
+
+  const updated = await Encounter.findByIdAndUpdate(
+    existing._id,
+    { $set: update },
+    { new: true },
+  ).lean();
+
+  res.json({ data: updated, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/dm/encounters/:id
+// Deletes an encounter (must belong to the DM's campaign).
+// Does not delete any Battles that were launched from this encounter —
+// those remain for historical reference.
+// ---------------------------------------------------------------------------
+router.delete('/encounters/:id', async (req: Request, res: Response): Promise<void> => {
+  const encounter = await assertDmEncounter(req.user!.userId, req.params.id as string, res);
+  if (!encounter) return;
+
+  await Encounter.deleteOne({ _id: encounter._id });
+  res.json({ data: { message: 'Encounter deleted' }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/encounters/:id/launch
+// Creates a Battle document from an encounter template and returns the new
+// battle's ID so the DM can redirect to /battle/:id.
+//
+// Body: { playerIds: string[] }  — which campaign players join this battle
+//
+// PvE logic:
+//   For each NPC in encounter.enemies, enemySide gets playerIds.length slots
+//   all pointing to the same npcId (activePokemonId: null). This gives the NPC
+//   one simultaneous active slot per player — the DM sends out a different
+//   party Pokémon into each slot via dm-send-out.
+//
+//   Example: 3 players + 1 NPC → 3 enemySide entries, same npcId, all null.
+//   Example: 3 players + 2 NPCs → 6 enemySide entries (3 per NPC).
+//
+// The encounter's playerPokemonLimit and npcPokemonLimit are carried into the
+// Battle document. encounterId is set so the battle can be traced back.
+// ---------------------------------------------------------------------------
+router.post('/encounters/:id/launch', async (req: Request, res: Response): Promise<void> => {
+  const encounter = await assertDmEncounter(req.user!.userId, req.params.id as string, res);
+  if (!encounter) return;
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const { playerIds } = req.body as { playerIds?: string[] };
+
+  if (!Array.isArray(playerIds) || playerIds.length === 0) {
+    res.status(400).json({ data: null, error: 'playerIds must be a non-empty array' });
+    return;
+  }
+  if (!playerIds.every(id => mongoose.Types.ObjectId.isValid(id))) {
+    res.status(400).json({ data: null, error: 'All playerIds must be valid ObjectIds' });
+    return;
+  }
+
+  // All players must be members of this campaign
+  const campaignPlayerStrings = (campaign.playerIds as mongoose.Types.ObjectId[]).map(id => id.toString());
+  const outsiders = playerIds.filter(id => !campaignPlayerStrings.includes(id));
+  if (outsiders.length > 0) {
+    res.status(400).json({
+      data:  null,
+      error: `These player IDs are not in your campaign: ${outsiders.join(', ')}`,
+    });
+    return;
+  }
+
+  // --- Build enemySide ---
+  // PvE: each NPC gets one slot per player (N slots, same npcId, activePokemonId null)
+  type EnemySlot = {
+    npcId?: mongoose.Types.ObjectId;
+    activePokemonId: mongoose.Types.ObjectId | null;
+    fainted: mongoose.Types.ObjectId[];
+  };
+
+  let enemySide: EnemySlot[] = [];
+
+  if (encounter.type === 'pve') {
+    const enemies = encounter.enemies as Array<{ npcId: mongoose.Types.ObjectId }>;
+    if (enemies.length === 0) {
+      res.status(400).json({ data: null, error: 'This encounter has no NPCs configured' });
+      return;
+    }
+    // Verify all NPCs still exist in the campaign (they may have been deleted since creation)
+    const npcIds = enemies.map(e => e.npcId);
+    const foundNpcs = await Npc.find(
+      { _id: { $in: npcIds }, campaignId: campaign._id },
+      '_id',
+    ).lean();
+    if (foundNpcs.length !== npcIds.length) {
+      res.status(400).json({ data: null, error: 'One or more NPCs in this encounter no longer exist' });
+      return;
+    }
+
+    // One slot per player for each NPC
+    for (const enemy of enemies) {
+      for (let i = 0; i < playerIds.length; i++) {
+        enemySide.push({
+          npcId:           new mongoose.Types.ObjectId(enemy.npcId.toString()),
+          activePokemonId: null,
+          fainted:         [],
+        });
+      }
+    }
+  } else if (encounter.type === 'wild') {
+    const wildEntries = encounter.wildPokemon as Array<{
+      speciesId: number;
+      level: number;
+      catchable: boolean;
+    }>;
+    if (wildEntries.length === 0) {
+      res.status(400).json({ data: null, error: 'This encounter has no wild Pokémon configured' });
+      return;
+    }
+
+    // Generate one wild Pokémon document per entry and create one enemySide slot
+    for (const wp of wildEntries) {
+      // Fetch species from cache; fall back to PokeAPI on first encounter
+      let species = await PokedexCache.findOne({ pokeApiId: wp.speciesId }).lean();
+      if (!species) {
+        try {
+          const fetched = await fetchSpecies(wp.speciesId);
+          const created = await PokedexCache.create(fetched);
+          species = created.toObject();
+        } catch {
+          res.status(400).json({ data: null, error: `Species #${wp.speciesId} not found` });
+          return;
+        }
+      }
+
+      const nature = NATURES[Math.floor(Math.random() * NATURES.length)];
+
+      const genderRatio = (species.genderRatio as number) ?? -1;
+      let gender: 'male' | 'female' | 'none';
+      if (genderRatio === -1) {
+        gender = 'none';
+      } else {
+        gender = Math.random() < genderRatio / 8 ? 'female' : 'male';
+      }
+
+      // Last 4 moves learnable at or below the target level
+      const learnable = ((species.levelUpMoves ?? []) as Array<{ moveId: string; level: number }>)
+        .filter(m => m.level <= wp.level)
+        .slice(-4);
+      const moveList = ((species.moves ?? []) as Array<{ name: string; pp: number | null }>);
+      const moves = learnable.map(m => {
+        const md = moveList.find(mv => mv.name === m.moveId);
+        const pp = md?.pp ?? 5;
+        return { moveId: m.moveId, currentPP: pp, maxPP: pp };
+      });
+
+      const stats = computeStats(species.baseStats as BaseStats, wp.level, nature);
+
+      const wildPoke = await Pokemon.create({
+        speciesId:          species.pokeApiId,
+        // DM's userId as ownerId — same convention as POST /api/battles wild creation
+        ownerId:            new mongoose.Types.ObjectId(req.user!.userId),
+        ownerType:          'wild',
+        nickname:           null,
+        level:              wp.level,
+        exp:                expForLevel(wp.level, (species.expGroup as string) || 'medium-fast'),
+        currentHp:          stats.hp,
+        nature,
+        gender,
+        heldItem:           null,
+        moves,
+        evs:                { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 },
+        statusCondition:    null,
+        statusCounter:      null,
+        volatileStatus:     [],
+        evolutionOverrides: [],
+        isInParty:          false,
+        partySlot:          null,
+        caughtAt:           null,
+        caughtByPlayerId:   null,
+      });
+
+      enemySide.push({
+        activePokemonId: wildPoke._id as mongoose.Types.ObjectId,
+        fainted:         [],
+      });
+    }
+  }
+
+  const battle = await Battle.create({
+    campaignId: campaign._id,
+    type:       encounter.type,
+    status:     'waiting',
+    phase:      'move_submission',
+    playerSide: playerIds.map(id => ({
+      userId:          new mongoose.Types.ObjectId(id),
+      activePokemonId: null,
+      usedPokemonIds:  [],
+      fainted:         [],
+    })),
+    enemySide,
+    // Wild: catchable if any entry has catchable:true. PvE: always false.
+    wildCatchable: encounter.type === 'wild'
+      ? (encounter.wildPokemon as Array<{ catchable: boolean }>).some(wp => wp.catchable)
+      : false,
+    playerPokemonLimit: encounter.playerPokemonLimit ?? null,
+    npcPokemonLimit:    encounter.npcPokemonLimit    ?? null,
+    encounterId:        encounter._id,
+    lastUpdatedAt:      new Date(),
+  });
+
+  res.status(201).json({
+    data:  { battleId: battle._id, type: battle.type, status: battle.status },
+    error: null,
+  });
 });
 
 export default router;
