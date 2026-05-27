@@ -12,6 +12,8 @@ import PCPage from './pages/PCPage';
 import BagPage from './pages/BagPage';
 import BattlePage from './pages/BattlePage';
 import TownPage from './pages/TownPage';
+import EncountersPage from './pages/EncountersPage';
+import EncounterFormPage from './pages/EncounterFormPage';
 
 function RequireDm({ children }: { children: React.ReactNode }) {
   const { token, user, loading } = useAuth();
@@ -111,6 +113,30 @@ function AppRoutes() {
         element={
           <RequireDm>
             <DmPage />
+          </RequireDm>
+        }
+      />
+      <Route
+        path="/dm/encounters"
+        element={
+          <RequireDm>
+            <EncountersPage />
+          </RequireDm>
+        }
+      />
+      <Route
+        path="/dm/encounters/new"
+        element={
+          <RequireDm>
+            <EncounterFormPage />
+          </RequireDm>
+        }
+      />
+      <Route
+        path="/dm/encounters/:id/edit"
+        element={
+          <RequireDm>
+            <EncounterFormPage />
           </RequireDm>
         }
       />

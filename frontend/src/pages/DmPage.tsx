@@ -1204,6 +1204,17 @@ export default function DmPage() {
           </Link>
         </div>
 
+        {/* Quick-nav to the full Encounters page */}
+        <Link to="/dm/encounters">
+          <div className="flex items-center justify-between rounded-md border px-4 py-3 hover:bg-muted/50 transition-colors cursor-pointer min-h-14">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-sm font-medium">Encounters</span>
+              <span className="text-xs text-muted-foreground">Build, edit, and launch encounters</span>
+            </div>
+            <span className="text-sm text-muted-foreground">→</span>
+          </div>
+        </Link>
+
         <CampaignCard token={token} />
         <ActiveBattlesCard token={token} />
         <NpcCard token={token} />

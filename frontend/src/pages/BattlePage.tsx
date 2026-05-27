@@ -281,6 +281,9 @@ export default function BattlePage() {
   const [actionTab,           setActionTab]           = useState<'move' | 'item' | 'switch' | 'ball'>('move');
   const [selectedItemId,      setSelectedItemId]      = useState<string | null>(null);
   const [runConfirmPending,   setRunConfirmPending]   = useState(false);
+  // Which wild Pokémon the player has chosen to throw a ball at.
+  // null = nothing selected yet (only relevant in multi-wild battles).
+  const [catchTarget,         setCatchTarget]         = useState<string | null>(null);
 
   // Polling loop — fetches full battle state every 3 seconds
   useEffect(() => {
@@ -340,6 +343,13 @@ export default function BattlePage() {
   // Fetch active Pokémon detail (moves, type data) when activePokemonId becomes known
   const myEntry = battle?.playerSide.find(e => e.userId === user?.id);
   const activePokemonId = myEntry?.activePokemonId ?? null;
+
+  // Wild encounters: list of enemy slots that still have an active wild Pokémon.
+  // Used for multi-wild target picking in the Ball tab.
+  const catchableWild = battle?.type === 'wild'
+    ? battle.enemySide.filter(e => !e.npcId && e.activePokemonId != null)
+    : [];
+  const isMultiWild = catchableWild.length > 1;
 
   useEffect(() => {
     if (!activePokemonId || !token) {
@@ -519,16 +529,17 @@ export default function BattlePage() {
     }
   }
 
-  async function handleSubmitCatch(itemId: string) {
+  async function handleSubmitCatch(itemId: string, targetPokemonId?: string) {
     if (!id) return;
     setSubmitting(true);
     setActionError('');
     try {
       await axios.post(
         `${API}/api/battles/${id}/submit-move`,
-        { actionType: 'catch', itemId },
+        { actionType: 'catch', itemId, ...(targetPokemonId ? { targetPokemonId } : {}) },
         { headers: { Authorization: `Bearer ${token}` } },
       );
+      setCatchTarget(null);
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to throw Poké Ball.'));
     } finally {
@@ -554,50 +565,55 @@ export default function BattlePage() {
     }
   }
 
-  async function fetchNpcParty(npcId: string) {
-    if (npcParties[npcId]) { setExpandedSendOut(npcId); return; }
+  // slotKey = "${npcId}:${slotIndex}" — used to track which slot's send-out picker is open
+  async function fetchNpcParty(npcId: string, slotKey: string) {
+    if (npcParties[npcId]) { setExpandedSendOut(slotKey); return; }
     setPartyLoading(npcId);
     try {
       const res = await axios.get(`${API}/api/dm/npcs/${npcId}/party`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       setNpcParties(prev => ({ ...prev, [npcId]: res.data.data ?? [] }));
-      setExpandedSendOut(npcId);
+      setExpandedSendOut(slotKey);
     } catch { /* silently fail — list stays empty */ }
     finally { setPartyLoading(null); }
   }
 
-  async function handleDmSendOut(npcId: string, pokemonId: string) {
+  // slotIndex lets the backend target a specific slot when an NPC has multiple entries
+  async function handleDmSendOut(npcId: string, pokemonId: string, slotIndex?: number) {
     if (!id) return;
     setSubmitting(true); setActionError('');
     try {
-      await axios.post(`${API}/api/battles/${id}/dm-send-out`, { npcId, pokemonId }, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      await axios.post(`${API}/api/battles/${id}/dm-send-out`,
+        { npcId, pokemonId, ...(slotIndex !== undefined ? { slotIndex } : {}) },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
       setExpandedSendOut(null);
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to send out Pokémon.'));
     } finally { setSubmitting(false); }
   }
 
-  async function handleDmSubmitMove(npcId: string, moveId: string) {
+  // slotPokemonId scopes the submission to the specific NPC slot (multi-slot battles)
+  async function handleDmSubmitMove(npcId: string, moveId: string, slotPokemonId?: string) {
     if (!id) return;
     setSubmitting(true); setActionError('');
     try {
-      await axios.post(`${API}/api/battles/${id}/dm-submit-move`, { npcId, moveId }, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
+        { npcId, moveId, ...(slotPokemonId ? { activePokemonId: slotPokemonId } : {}) },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to submit move.'));
     } finally { setSubmitting(false); }
   }
 
-  async function handleDmSubmitSwitch(npcId: string, switchToPokemonId: string) {
+  async function handleDmSubmitSwitch(npcId: string, switchToPokemonId: string, slotPokemonId?: string) {
     if (!id) return;
     setSubmitting(true); setActionError('');
     try {
       await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
-        { npcId, actionType: 'switch', switchToPokemonId },
+        { npcId, actionType: 'switch', switchToPokemonId, ...(slotPokemonId ? { activePokemonId: slotPokemonId } : {}) },
         { headers: { Authorization: `Bearer ${token}` } },
       );
     } catch (err: unknown) {
@@ -1003,21 +1019,61 @@ export default function BattlePage() {
 
                     {battle.type === 'wild' && battle.wildCatchable && (
                       <TabsContent value="ball">
+                        {/* Multi-wild target picker — only shown when >1 wild Pokémon is still active */}
+                        {isMultiWild && (
+                          <div className="mt-2 mb-3 flex flex-col gap-1">
+                            <p className="text-xs text-muted-foreground font-medium mb-1">
+                              Throw at which Pokémon?
+                            </p>
+                            {catchableWild.map(entry => (
+                              <button
+                                key={entry.activePokemonId}
+                                onClick={() => setCatchTarget(
+                                  catchTarget === entry.activePokemonId ? null : entry.activePokemonId!
+                                )}
+                                className={[
+                                  'flex items-center justify-between rounded-md border px-3 py-2 text-sm text-left transition-colors min-h-9',
+                                  catchTarget === entry.activePokemonId
+                                    ? 'bg-primary text-primary-foreground border-primary'
+                                    : 'hover:bg-accent cursor-pointer',
+                                ].join(' ')}
+                              >
+                                <span className="font-medium">{entry.activePokemonInfo?.name ?? 'Wild Pokémon'}</span>
+                                <span className="text-xs opacity-70">
+                                  HP {entry.activePokemonInfo?.currentHp ?? '?'}
+                                  {entry.activePokemonInfo?.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
                         {bagItems.filter(i => i.pocket === 'pokeballs').length === 0 ? (
                           <p className="text-sm text-muted-foreground mt-2">No Poké Balls in bag.</p>
                         ) : (
                           <div className="flex flex-col gap-2 mt-2">
-                            {bagItems.filter(i => i.pocket === 'pokeballs').map(item => (
-                              <button
-                                key={item.itemId}
-                                onClick={() => !submitting && handleSubmitCatch(item.itemId)}
-                                disabled={submitting}
-                                className="flex justify-between items-center rounded-md border px-4 py-3 text-sm text-left hover:bg-accent cursor-pointer min-h-11"
-                              >
-                                <span className="font-medium">{formatMove(item.itemId)}</span>
-                                <span className="text-muted-foreground text-xs">×{item.quantity}</span>
-                              </button>
-                            ))}
+                            {bagItems.filter(i => i.pocket === 'pokeballs').map(item => {
+                              const needsTarget = isMultiWild && !catchTarget;
+                              return (
+                                <button
+                                  key={item.itemId}
+                                  onClick={() => !submitting && !needsTarget && handleSubmitCatch(
+                                    item.itemId,
+                                    catchTarget ?? undefined,
+                                  )}
+                                  disabled={submitting || needsTarget}
+                                  title={needsTarget ? 'Select a target above first' : undefined}
+                                  className={[
+                                    'flex justify-between items-center rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                    needsTarget || submitting
+                                      ? 'opacity-40 cursor-not-allowed'
+                                      : 'hover:bg-accent cursor-pointer',
+                                  ].join(' ')}
+                                >
+                                  <span className="font-medium">{formatMove(item.itemId)}</span>
+                                  <span className="text-muted-foreground text-xs">×{item.quantity}</span>
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </TabsContent>
@@ -1067,179 +1123,210 @@ export default function BattlePage() {
           <Card>
             <CardHeader><CardTitle className="text-base">NPC Actions</CardTitle></CardHeader>
             <CardContent className="flex flex-col gap-4">
-              {battle.enemySide.map(entry => {
-                // For wild battles entry.npcId is absent; use activePokemonId as the actor key
-                const isWild  = !entry.npcId;
-                const actorId = entry.npcId ?? entry.activePokemonId ?? '';
-                const npcMoveSubmitted = battle.turnQueue.some(
-                  e => e.actorId === actorId && e.actorType === 'npc'
-                );
+              {(() => {
+                // Group NPC entries by npcId; wild entries render 1:1 in natural order.
+                const seenNpcIds = new Set<string>();
+                return battle.enemySide.map(entry => {
+                  const isWild = !entry.npcId;
+                  if (!isWild && seenNpcIds.has(entry.npcId!)) return null; // skip duplicate NPC slots
+                  if (!isWild) seenNpcIds.add(entry.npcId!);
 
-                if (isWild) {
-                  // Wild Pokémon: already active, no party to load, moves come from activePokemonInfo
-                  const wildMoves = entry.activePokemonInfo?.moves ?? [];
-                  return (
-                    <div key={actorId} className="flex flex-col gap-2 border rounded-md p-3">
-                      <p className="text-sm font-medium">
-                        Wild {entry.activePokemonInfo?.speciesName ?? entry.npcName}
-                      </p>
-                      {!entry.activePokemonId ? (
-                        <p className="text-xs text-muted-foreground">Fainted</p>
-                      ) : npcMoveSubmitted ? (
-                        <p className="text-xs text-muted-foreground">
-                          {entry.activePokemonInfo?.name ?? 'Pokémon'} — move submitted
+                  // ── Wild Pokémon ──────────────────────────────────────────
+                  if (isWild) {
+                    const actorId  = entry.activePokemonId ?? '';
+                    const wildMoveSubmitted = battle.turnQueue.some(
+                      e => e.actorId === actorId && e.actorType === 'npc'
+                    );
+                    const wildMoves = entry.activePokemonInfo?.moves ?? [];
+                    return (
+                      <div key={actorId} className="flex flex-col gap-2 border rounded-md p-3">
+                        <p className="text-sm font-medium">
+                          Wild {entry.activePokemonInfo?.speciesName ?? entry.npcName}
                         </p>
-                      ) : wildMoves.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">No moves available.</p>
-                      ) : (
-                        <div className="grid grid-cols-2 gap-2">
-                          {wildMoves.map((slot: MoveSlot) => {
-                            const noPP = slot.currentPP <= 0;
-                            return (
-                              <button
-                                key={slot.moveId}
-                                onClick={() => !noPP && !submitting && handleDmSubmitMove(actorId, slot.moveId)}
-                                disabled={noPP || submitting}
-                                className={[
-                                  'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                                  noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
-                                ].join(' ')}
-                              >
-                                <span className="font-medium">{formatMove(slot.moveId)}</span>
-                                <span className="text-muted-foreground text-xs mt-0.5">PP {slot.currentPP}/{slot.maxPP}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  );
-                }
-
-                // NPC entry — existing logic
-                const npcId      = entry.npcId!;
-                const party      = npcParties[npcId] ?? [];
-                const activePokemon = entry.activePokemonId
-                  ? party.find((p: NpcPartyPokemon) => p._id === entry.activePokemonId)
-                  : null;
-
-                return (
-                  <div key={npcId} className="flex flex-col gap-2 border rounded-md p-3">
-                    <p className="text-sm font-medium">{entry.npcName}</p>
-
-                    {!entry.activePokemonId ? (
-                      expandedSendOut === npcId ? (
-                        <div className="flex flex-col gap-2">
-                          {partyLoading === npcId ? (
-                            <p className="text-sm text-muted-foreground">Loading party…</p>
-                          ) : party.length === 0 ? (
-                            <p className="text-sm text-muted-foreground">No Pokémon in this NPC's party.</p>
-                          ) : (
-                            party.map((p: NpcPartyPokemon) => {
-                              const fainted = p.currentHp <= 0;
-                              return (
-                                <button
-                                  key={p._id}
-                                  onClick={() => !fainted && !submitting && handleDmSendOut(npcId, p._id)}
-                                  disabled={fainted || submitting}
-                                  className={[
-                                    'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors',
-                                    fainted ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
-                                  ].join(' ')}
-                                >
-                                  <span className="font-medium">{p.nickname ?? p.speciesName}</span>
-                                  <span className="text-muted-foreground text-xs">
-                                    Lv.{p.level} · {fainted ? 'Fainted' : `HP ${p.currentHp}`}
-                                  </span>
-                                </button>
-                              );
-                            })
-                          )}
-                          <Button variant="ghost" size="sm" onClick={() => setExpandedSendOut(null)} className="min-h-9">
-                            Cancel
-                          </Button>
-                        </div>
-                      ) : (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => fetchNpcParty(npcId)}
-                          disabled={partyLoading === npcId}
-                          className="w-full min-h-9"
-                        >
-                          {partyLoading === npcId ? 'Loading…' : 'Send Out Pokémon'}
-                        </Button>
-                      )
-                    ) : npcMoveSubmitted ? (
-                      <p className="text-xs text-muted-foreground">
-                        {entry.activePokemonInfo?.name ?? 'Pokémon'} — move submitted
-                      </p>
-                    ) : activePokemon ? (
-                      <Tabs
-                        value={npcActionTab[npcId] ?? 'move'}
-                        onValueChange={v => setNpcActionTab(prev => ({ ...prev, [npcId]: v as 'move' | 'switch' }))}
-                      >
-                        <TabsList>
-                          <TabsTrigger value="move">Move</TabsTrigger>
-                          <TabsTrigger value="switch">Switch</TabsTrigger>
-                        </TabsList>
-
-                        <TabsContent value="move">
-                          <p className="text-sm text-muted-foreground mb-2">
-                            {entry.activePokemonInfo?.name ?? activePokemon.nickname ?? activePokemon.speciesName} — choose a move:
+                        {!entry.activePokemonId ? (
+                          <p className="text-xs text-muted-foreground">Fainted</p>
+                        ) : wildMoveSubmitted ? (
+                          <p className="text-xs text-muted-foreground">
+                            {entry.activePokemonInfo?.name ?? 'Pokémon'} — move submitted
                           </p>
+                        ) : wildMoves.length === 0 ? (
+                          <p className="text-sm text-muted-foreground">No moves available.</p>
+                        ) : (
                           <div className="grid grid-cols-2 gap-2">
-                            {activePokemon.moves.map((slot: MoveSlot) => {
-                              const noPP = slot.currentPP <= 0;
+                            {wildMoves.map((m: MoveSlot) => {
+                              const noPP = m.currentPP <= 0;
                               return (
                                 <button
-                                  key={slot.moveId}
-                                  onClick={() => !noPP && !submitting && handleDmSubmitMove(npcId, slot.moveId)}
+                                  key={m.moveId}
+                                  onClick={() => !noPP && !submitting && handleDmSubmitMove(actorId, m.moveId)}
                                   disabled={noPP || submitting}
                                   className={[
                                     'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
                                     noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
                                   ].join(' ')}
                                 >
-                                  <span className="font-medium">{formatMove(slot.moveId)}</span>
-                                  <span className="text-muted-foreground text-xs mt-0.5">PP {slot.currentPP}/{slot.maxPP}</span>
+                                  <span className="font-medium">{formatMove(m.moveId)}</span>
+                                  <span className="text-muted-foreground text-xs mt-0.5">PP {m.currentPP}/{m.maxPP}</span>
                                 </button>
                               );
                             })}
                           </div>
-                        </TabsContent>
+                        )}
+                      </div>
+                    );
+                  }
 
-                        <TabsContent value="switch">
-                          <p className="text-sm text-muted-foreground mb-2">Switch out for:</p>
-                          <div className="flex flex-col gap-2">
-                            {party.filter((p: NpcPartyPokemon) => p._id !== entry.activePokemonId).map((p: NpcPartyPokemon) => {
-                              const fainted  = p.currentHp <= 0;
-                              return (
-                                <button
-                                  key={p._id}
-                                  onClick={() => !fainted && !submitting && handleDmSubmitSwitch(npcId, p._id)}
-                                  disabled={fainted || submitting}
-                                  className={[
-                                    'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors',
-                                    fainted ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
-                                  ].join(' ')}
+                  // ── NPC group (one or more slots per player) ──────────────
+                  const npcId    = entry.npcId!;
+                  const npcSlots = battle.enemySide.filter(e => e.npcId === npcId);
+                  const party    = npcParties[npcId] ?? [];
+
+                  return (
+                    <div key={npcId} className="flex flex-col gap-2 border rounded-md p-3">
+                      <p className="text-sm font-medium">{entry.npcName}</p>
+
+                      {npcSlots.map((slot, slotIdx) => {
+                        const slotKey        = `${npcId}:${slotIdx}`;
+                        const slotLabel      = npcSlots.length > 1 ? `Slot ${slotIdx + 1}` : null;
+                        const activePokemon  = slot.activePokemonId
+                          ? party.find((p: NpcPartyPokemon) => p._id === slot.activePokemonId)
+                          : null;
+                        const slotSubmitted  = battle.turnQueue.some(
+                          e => e.actorId === npcId && e.actorType === 'npc'
+                            && e.activePokemonId === slot.activePokemonId
+                        );
+
+                        return (
+                          <div
+                            key={slotKey}
+                            className={npcSlots.length > 1
+                              ? 'border-t pt-2 flex flex-col gap-2'
+                              : 'flex flex-col gap-2'
+                            }
+                          >
+                            {slotLabel && (
+                              <p className="text-xs text-muted-foreground font-medium">{slotLabel}</p>
+                            )}
+
+                            {!slot.activePokemonId ? (
+                              expandedSendOut === slotKey ? (
+                                <div className="flex flex-col gap-2">
+                                  {partyLoading === npcId ? (
+                                    <p className="text-sm text-muted-foreground">Loading party…</p>
+                                  ) : party.length === 0 ? (
+                                    <p className="text-sm text-muted-foreground">No Pokémon in this NPC's party.</p>
+                                  ) : (
+                                    party.map((p: NpcPartyPokemon) => {
+                                      const fainted = p.currentHp <= 0;
+                                      return (
+                                        <button
+                                          key={p._id}
+                                          onClick={() => !fainted && !submitting && handleDmSendOut(npcId, p._id, slotIdx)}
+                                          disabled={fainted || submitting}
+                                          className={[
+                                            'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors',
+                                            fainted ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                          ].join(' ')}
+                                        >
+                                          <span className="font-medium">{p.nickname ?? p.speciesName}</span>
+                                          <span className="text-muted-foreground text-xs">
+                                            Lv.{p.level} · {fainted ? 'Fainted' : `HP ${p.currentHp}`}
+                                          </span>
+                                        </button>
+                                      );
+                                    })
+                                  )}
+                                  <Button variant="ghost" size="sm" onClick={() => setExpandedSendOut(null)} className="min-h-9">
+                                    Cancel
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => fetchNpcParty(npcId, slotKey)}
+                                  disabled={partyLoading === npcId}
+                                  className="w-full min-h-9"
                                 >
-                                  <span className="font-medium">{p.nickname ?? p.speciesName}</span>
-                                  <span className="text-muted-foreground text-xs">
-                                    Lv.{p.level} · {fainted ? 'Fainted' : `HP ${p.currentHp}`}
-                                  </span>
-                                </button>
-                              );
-                            })}
+                                  {partyLoading === npcId ? 'Loading…' : 'Send Out Pokémon'}
+                                </Button>
+                              )
+                            ) : slotSubmitted ? (
+                              <p className="text-xs text-muted-foreground">
+                                {slot.activePokemonInfo?.name ?? 'Pokémon'} — move submitted
+                              </p>
+                            ) : activePokemon ? (
+                              <Tabs
+                                value={npcActionTab[slotKey] ?? 'move'}
+                                onValueChange={v => setNpcActionTab(prev => ({ ...prev, [slotKey]: v as 'move' | 'switch' }))}
+                              >
+                                <TabsList>
+                                  <TabsTrigger value="move">Move</TabsTrigger>
+                                  <TabsTrigger value="switch">Switch</TabsTrigger>
+                                </TabsList>
+
+                                <TabsContent value="move">
+                                  <p className="text-sm text-muted-foreground mb-2">
+                                    {slot.activePokemonInfo?.name ?? activePokemon.nickname ?? activePokemon.speciesName} — choose a move:
+                                  </p>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    {activePokemon.moves.map((m: MoveSlot) => {
+                                      const noPP = m.currentPP <= 0;
+                                      return (
+                                        <button
+                                          key={m.moveId}
+                                          onClick={() => !noPP && !submitting && handleDmSubmitMove(npcId, m.moveId, slot.activePokemonId!)}
+                                          disabled={noPP || submitting}
+                                          className={[
+                                            'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                            noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                          ].join(' ')}
+                                        >
+                                          <span className="font-medium">{formatMove(m.moveId)}</span>
+                                          <span className="text-muted-foreground text-xs mt-0.5">PP {m.currentPP}/{m.maxPP}</span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </TabsContent>
+
+                                <TabsContent value="switch">
+                                  <p className="text-sm text-muted-foreground mb-2">Switch out for:</p>
+                                  <div className="flex flex-col gap-2">
+                                    {party
+                                      .filter((p: NpcPartyPokemon) => p._id !== slot.activePokemonId)
+                                      .map((p: NpcPartyPokemon) => {
+                                        const fainted = p.currentHp <= 0;
+                                        return (
+                                          <button
+                                            key={p._id}
+                                            onClick={() => !fainted && !submitting && handleDmSubmitSwitch(npcId, p._id, slot.activePokemonId!)}
+                                            disabled={fainted || submitting}
+                                            className={[
+                                              'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors',
+                                              fainted ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                            ].join(' ')}
+                                          >
+                                            <span className="font-medium">{p.nickname ?? p.speciesName}</span>
+                                            <span className="text-muted-foreground text-xs">
+                                              Lv.{p.level} · {fainted ? 'Fainted' : `HP ${p.currentHp}`}
+                                            </span>
+                                          </button>
+                                        );
+                                      })}
+                                  </div>
+                                </TabsContent>
+                              </Tabs>
+                            ) : (
+                              <p className="text-sm text-muted-foreground">Loading party…</p>
+                            )}
                           </div>
-                        </TabsContent>
-                      </Tabs>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">Loading party…</p>
-                    )}
-                  </div>
-                );
-              })}
+                        );
+                      })}
+                    </div>
+                  );
+                });
+              })()}
               {actionError && <p className="text-sm text-destructive">{actionError}</p>}
             </CardContent>
           </Card>
@@ -1485,27 +1572,73 @@ export default function BattlePage() {
               </p>
             ) : (
               <ul className="flex flex-col gap-3">
-                {battle.enemySide.map(entry => (
-                  <li key={entry.npcId ?? entry.activePokemonId ?? ''} className="flex items-center justify-between gap-2 text-sm">
-                    <span className="font-medium">
-                      {entry.activePokemonInfo?.name ?? entry.npcName}
-                    </span>
-                    <span className="flex items-center gap-2">
-                      {entry.activePokemonInfo ? (
-                        <>
-                          <span className="text-muted-foreground text-xs">
-                            HP {entry.activePokemonInfo.currentHp}
-                            {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
+                {(() => {
+                  // Group NPC entries by npcId; wild entries render 1:1.
+                  const seenNpcIds = new Set<string>();
+                  return battle.enemySide.map(entry => {
+                    const isWild = !entry.npcId;
+                    if (!isWild && seenNpcIds.has(entry.npcId!)) return null;
+                    if (!isWild) seenNpcIds.add(entry.npcId!);
+
+                    if (isWild) {
+                      return (
+                        <li key={entry.activePokemonId ?? 'wild'} className="flex items-center justify-between gap-2 text-sm">
+                          <span className="font-medium">
+                            {entry.activePokemonInfo?.name ?? 'Wild Pokémon'}
                           </span>
-                          <StatusBadge info={entry.activePokemonInfo} />
-                          <StatStageBadges stages={entry.activePokemonInfo.statStages} />
-                        </>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">No Pokémon out</span>
-                      )}
-                    </span>
-                  </li>
-                ))}
+                          <span className="flex items-center gap-2">
+                            {entry.activePokemonInfo ? (
+                              <>
+                                <span className="text-muted-foreground text-xs">
+                                  HP {entry.activePokemonInfo.currentHp}
+                                  {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
+                                </span>
+                                <StatusBadge info={entry.activePokemonInfo} />
+                                <StatStageBadges stages={entry.activePokemonInfo.statStages} />
+                              </>
+                            ) : (
+                              <span className="text-muted-foreground text-xs">Fainted / Caught</span>
+                            )}
+                          </span>
+                        </li>
+                      );
+                    }
+
+                    // NPC group
+                    const npcId    = entry.npcId!;
+                    const npcSlots = battle.enemySide.filter(e => e.npcId === npcId);
+                    return (
+                      <li key={npcId} className="flex flex-col gap-1 text-sm">
+                        <span className="font-medium">{entry.npcName}</span>
+                        {npcSlots.map((slot, slotIdx) => (
+                          <span
+                            key={`${npcId}:${slotIdx}`}
+                            className="flex items-center justify-between gap-2 pl-3 border-l ml-1"
+                          >
+                            <span className="text-muted-foreground">
+                              {npcSlots.length > 1 ? `Slot ${slotIdx + 1}: ` : ''}
+                              {slot.activePokemonInfo?.name ?? '—'}
+                            </span>
+                            <span className="flex items-center gap-1">
+                              {slot.activePokemonInfo ? (
+                                <>
+                                  <span className="text-muted-foreground text-xs">
+                                    HP {slot.activePokemonInfo.currentHp}
+                                    {slot.activePokemonInfo.maxHp != null ? `/${slot.activePokemonInfo.maxHp}` : ''}
+                                  </span>
+                                  <StatusBadge info={slot.activePokemonInfo} />
+                                  <StatStageBadges stages={slot.activePokemonInfo.statStages} />
+                                </>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">No Pokémon out</span>
+                              )}
+                            </span>
+                          </span>
+                        ))}
+                      </li>
+                    );
+                  });
+                })()}
               </ul>
             )}
           </CardContent>
