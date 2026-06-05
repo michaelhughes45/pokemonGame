@@ -36,6 +36,7 @@ type ReminderMove = {
   power: number | null;
   accuracy: number | null;
   pp: number | null;
+  flavorText?: string;
 };
 
 type PokemonDetail = {
@@ -67,6 +68,7 @@ type PokemonDetail = {
     learnableMoves: {
       name: string; type: string; category: string;
       power: number | null; accuracy: number | null; pp: number | null;
+      flavorText?: string;
     }[];
     reminderMoves: ReminderMove[];
     evolutionChain: EvolutionStep[];
@@ -574,6 +576,9 @@ export default function PokemonDetailPage() {
                       )}
                     </div>
                     <PpBar current={m.currentPP} max={m.maxPP} />
+                    {detail?.flavorText && (
+                      <p className="text-xs text-muted-foreground mt-1 italic">{detail.flavorText}</p>
+                    )}
                   </div>
                 );
               })
@@ -652,6 +657,9 @@ export default function PokemonDetailPage() {
                           <Badge variant="secondary" className="text-[10px] ml-auto">current</Badge>
                         )}
                       </div>
+                      {rm.flavorText && (
+                        <p className="text-xs text-muted-foreground mt-1 italic">{rm.flavorText}</p>
+                      )}
                     </button>
                   );
                 })

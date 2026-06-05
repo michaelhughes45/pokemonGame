@@ -15,7 +15,7 @@ type Move = {
   name: string; type: string; category: string;
   power: number | null; accuracy: number | null;
   pp: number | null; priority: number;
-  effect: string; implemented: boolean;
+  effect: string; flavorText: string; implemented: boolean;
 };
 
 type EvolutionStep = { speciesId: number; condition: string; value: string };
@@ -185,6 +185,8 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
   // Transform moves
   const moves: Move[] = (moveDataList as any[]).map(data => {
     const entry = (data.effect_entries as any[]).find((e: any) => e.language.name === 'en');
+    const flavorEntries = (data.flavor_text_entries as any[]).filter((e: any) => e.language.name === 'en');
+    const flavorEntry = flavorEntries[flavorEntries.length - 1]; // newest game version
     return {
       name:        data.name as string,
       type:        data.type.name as string,
@@ -194,6 +196,7 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
       pp:          data.pp ?? null,
       priority:    data.priority ?? 0,
       effect:      entry?.short_effect ?? entry?.effect ?? '',
+      flavorText:  flavorEntry?.flavor_text?.replace(/\n|\f/g, ' ') ?? '',
       implemented: false,
     };
   });

@@ -87,12 +87,16 @@ const VALID_NATURES = [
 
 router.post('/players/:username/pokemon', async (req: Request, res: Response): Promise<void> => {
   const { username } = req.params;
-  const { species, level = 5, nature = 'Hardy', gender } = req.body as {
+  const { species, level = 5, nature: rawNature = 'random', gender } = req.body as {
     species: string | number;
     level?: number;
     nature?: string;
     gender?: string;
   };
+
+  const nature = rawNature.toLowerCase() === 'random'
+    ? NATURES[Math.floor(Math.random() * NATURES.length)]
+    : rawNature;
 
   if (!species && species !== 0) {
     res.status(400).json({ data: null, error: 'species is required (name or dex number)' });
@@ -349,12 +353,16 @@ router.post('/npcs', async (req: Request, res: Response): Promise<void> => {
 // ---------------------------------------------------------------------------
 router.post('/npcs/:npcId/pokemon', async (req: Request, res: Response): Promise<void> => {
   const { npcId } = req.params;
-  const { species, level = 5, nature = 'Hardy', gender } = req.body as {
+  const { species, level = 5, nature: rawNature = 'random', gender } = req.body as {
     species: string | number;
     level?:  number;
     nature?: string;
     gender?: string;
   };
+
+  const nature = rawNature.toLowerCase() === 'random'
+    ? NATURES[Math.floor(Math.random() * NATURES.length)]
+    : rawNature;
 
   if (!mongoose.Types.ObjectId.isValid(npcId as string)) {
     res.status(400).json({ data: null, error: 'Invalid NPC ID' });

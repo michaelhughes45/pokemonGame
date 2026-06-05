@@ -372,16 +372,15 @@ export default function BattlePage() {
     setActionError('');
   }, [currentTargetIndex]);
 
-  // Auto-fetch NPC parties for any NPC that has an active Pokémon but whose
-  // party the DM hasn't loaded yet (handles page refresh mid-battle).
+  // Fetch (and refresh each round) all NPC parties in this battle so HP and PP stay current.
+  // Runs on turn number change so fainted Pokémon are grayed out and PP is accurate.
   const userRole = user?.role;
   useEffect(() => {
     if ((userRole !== 'dm' && userRole !== 'admin') || !battle || battle.status !== 'active') return;
-    // Only auto-fetch for NPC entries (wild entries have no npcId and need no party load)
-    const uncached = battle.enemySide.filter(
-      e => e.npcId && e.activePokemonId && !npcParties[e.npcId]
-    );
-    uncached.forEach(entry => {
+    const seen = new Set<string>();
+    battle.enemySide.forEach(entry => {
+      if (!entry.npcId || seen.has(entry.npcId)) return;
+      seen.add(entry.npcId);
       axios.get(`${API}/api/dm/npcs/${entry.npcId}/party`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -389,7 +388,7 @@ export default function BattlePage() {
         .catch(() => {});
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [battle?.enemySide, userRole]);
+  }, [battle?.turnNumber, battle?.status, userRole, token]);
 
   // ---------------------------------------------------------------------------
   // Derived state
@@ -1270,7 +1269,7 @@ export default function BattlePage() {
                                     {slot.activePokemonInfo?.name ?? activePokemon.nickname ?? activePokemon.speciesName} — choose a move:
                                   </p>
                                   <div className="grid grid-cols-2 gap-2">
-                                    {activePokemon.moves.map((m: MoveSlot) => {
+                                    {(slot.activePokemonInfo?.moves ?? activePokemon.moves).map((m: MoveSlot) => {
                                       const noPP = m.currentPP <= 0;
                                       return (
                                         <button

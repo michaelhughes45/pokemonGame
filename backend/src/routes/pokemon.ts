@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { verifyToken } from '../middleware/auth';
 import { Pokemon } from '../models/Pokemon';
+import { Npc } from '../models/Npc';
 import { PokedexCache } from '../models/PokedexCache';
 import { computeStats, expForLevel } from '../lib/statCalc';
 
@@ -365,7 +366,7 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
 
     // Build reminderMoves: level-up moves learnable at or below the Pokémon's current level,
     // enriched with display data from the moves cache. These populate the Move Reminder UI.
-    type MoveDetail = { name: string; type: string; category: string; power: number | null; accuracy: number | null; pp: number | null };
+    type MoveDetail = { name: string; type: string; category: string; power: number | null; accuracy: number | null; pp: number | null; flavorText?: string };
     const moveDetailMap = new Map(
       (species.moves as MoveDetail[]).map(m => [m.name, m])
     );
@@ -375,13 +376,14 @@ router.get('/:id', verifyToken, async (req: Request, res: Response): Promise<voi
       .map(lm => {
         const detail = moveDetailMap.get(lm.moveId);
         return {
-          moveId:   lm.moveId,
-          level:    lm.level,
-          type:     detail?.type     ?? '',
-          category: detail?.category ?? '',
-          power:    detail?.power    ?? null,
-          accuracy: detail?.accuracy ?? null,
-          pp:       detail?.pp       ?? 5,
+          moveId:     lm.moveId,
+          level:      lm.level,
+          type:       detail?.type       ?? '',
+          category:   detail?.category   ?? '',
+          power:      detail?.power      ?? null,
+          accuracy:   detail?.accuracy   ?? null,
+          pp:         detail?.pp         ?? 5,
+          flavorText: detail?.flavorText ?? '',
         };
       })
       .sort((a, b) => a.level - b.level || a.moveId.localeCompare(b.moveId));
@@ -469,6 +471,11 @@ router.delete('/:id', verifyToken, async (req: Request, res: Response): Promise<
     const ownerId    = pokemon.ownerId;
 
     await Pokemon.deleteOne({ _id: id });
+
+    // If the Pokémon belonged to an NPC, remove it from the NPC's party array
+    if (pokemon.ownerType === 'npc') {
+      await Npc.updateOne({ party: id }, { $pull: { party: new mongoose.Types.ObjectId(id) } });
+    }
 
     // If the released Pokémon was in the party, compact remaining party slots
     // so they run 1, 2, 3 … with no gaps.

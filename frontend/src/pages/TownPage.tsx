@@ -59,7 +59,7 @@ export default function TownPage() {
             <Button
               onClick={healParty}
               disabled={healBusy}
-              className="w-full min-h-[44px]"
+              className="w-full min-h-11"
             >
               {healBusy ? 'Healing…' : 'Heal Party'}
             </Button>
@@ -142,7 +142,7 @@ function DmHealSection({ token }: { token: string }) {
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         {!loaded ? (
-          <Button variant="outline" onClick={loadNpcs} disabled={loading} className="min-h-[44px]">
+          <Button variant="outline" onClick={loadNpcs} disabled={loading} className="min-h-11">
             {loading ? 'Loading…' : 'Load NPCs'}
           </Button>
         ) : npcs.length === 0 ? (
@@ -160,7 +160,7 @@ function DmHealSection({ token }: { token: string }) {
                   variant="outline"
                   disabled={busy[npc._id]}
                   onClick={() => healNpc(npc._id)}
-                  className="min-h-[44px]"
+                  className="min-h-11"
                 >
                   {busy[npc._id] ? 'Healing…' : 'Heal'}
                 </Button>

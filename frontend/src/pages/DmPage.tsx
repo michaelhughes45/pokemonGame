@@ -280,7 +280,7 @@ function GivePokemonCard({ token }: { token: string | null }) {
   const [username,  setUsername]  = useState('');
   const [species, setSpecies] = useState('');
   const [level,     setLevel]     = useState('5');
-  const [nature,    setNature]    = useState('Hardy');
+  const [nature,    setNature]    = useState('Random');
   const [gender,    setGender]    = useState('auto');
   const [loading,   setLoading]   = useState(false);
   const [result,    setResult]    = useState('');
@@ -376,6 +376,7 @@ function GivePokemonCard({ token }: { token: string | null }) {
                 onChange={e => setNature(e.target.value)}
                 className={selectClass}
               >
+                <option value="Random">Random</option>
                 {NATURES.map(n => (
                   <option key={n} value={n}>{n}</option>
                 ))}
@@ -521,7 +522,7 @@ function NpcCard({ token }: { token: string | null }) {
   // Give-pokemon form fields (shared across all NPCs — only one open at a time)
   const [gpSpecies,    setGpSpecies]    = useState('');
   const [gpLevel,      setGpLevel]      = useState('5');
-  const [gpNature,     setGpNature]     = useState('Hardy');
+  const [gpNature,     setGpNature]     = useState('Random');
   const [gpGender,     setGpGender]     = useState('auto');
   const [gpLoading,    setGpLoading]    = useState(false);
   const [gpResult,     setGpResult]     = useState('');
@@ -615,6 +616,7 @@ function NpcCard({ token }: { token: string | null }) {
                       <div className="flex flex-col gap-1.5">
                         <Label>Nature</Label>
                         <select value={gpNature} onChange={e => setGpNature(e.target.value)} className={selectClass}>
+                          <option value="Random">Random</option>
                           {NATURES.map(n => <option key={n} value={n}>{n}</option>)}
                         </select>
                       </div>

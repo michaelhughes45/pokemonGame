@@ -108,6 +108,32 @@ type StatusMoveEffect = {
   chance: number; // 0–1
 };
 
+type StatusCondition = 'burn' | 'paralysis' | 'sleep' | 'freeze' | 'poison' | 'toxic' | 'confusion';
+
+// Abilities that grant immunity to one or more status conditions.
+const STATUS_IMMUNITY_ABILITIES: Record<string, StatusCondition[]> = {
+  'immunity':     ['poison', 'toxic'],
+  'insomnia':     ['sleep'],
+  'vital-spirit': ['sleep'],
+  'magma-armor':  ['freeze'],
+  'water-veil':   ['burn'],
+  'limber':       ['paralysis'],
+  'own-tempo':    ['confusion'],
+  'oblivious':    ['confusion'],
+};
+
+// Resolves which ability slug is active for a Pokémon given its cached ability list
+// and whether its hidden ability is toggled on.
+function resolveAbilitySlug(
+  abilities: Array<{ name: string; isHidden: boolean }>,
+  hasHiddenAbility: boolean,
+): string | null {
+  const ability = hasHiddenAbility
+    ? (abilities.find(a => a.isHidden) ?? abilities.find(a => !a.isHidden))
+    : abilities.find(a => !a.isHidden);
+  return ability?.name ?? null;
+}
+
 // Moves that inflict a status condition, either as their primary effect (chance 1)
 // or as a secondary effect on damage moves.  Keyed by PokeAPI move slug.
 const STATUS_MOVES: Record<string, StatusMoveEffect> = {
@@ -400,6 +426,57 @@ const RECOVERY_MOVES: Record<string, RecoveryEffect> = {
   'rest':        { type: 'rest' },
 };
 
+// Physical moves that make contact and can trigger contact-based defender abilities
+// (Poison Point, Static, Flame Body, Rough Skin, Iron Barbs, Effect Spore).
+// Not exhaustive — covers the most commonly used moves in play.
+const CONTACT_MOVES = new Set([
+  // Normal
+  'scratch', 'tackle', 'pound', 'headbutt', 'body-slam', 'take-down', 'double-edge',
+  'quick-attack', 'extreme-speed', 'slam', 'strength', 'giga-impact', 'facade',
+  'return', 'frustration', 'retaliate', 'skull-bash', 'hyper-fang', 'super-fang',
+  'last-resort', 'double-hit', 'dizzy-punch', 'mega-punch', 'rage', 'rollout',
+  'stomp', 'covet', 'fake-out', 'rapid-spin', 'thrash', 'double-kick', 'triple-kick',
+  // Fighting
+  'low-kick', 'karate-chop', 'submission', 'seismic-toss', 'cross-chop', 'dynamic-punch',
+  'mach-punch', 'focus-punch', 'drain-punch', 'close-combat', 'high-jump-kick', 'jump-kick',
+  'sky-uppercut', 'force-palm', 'brick-break', 'hammer-arm', 'superpower', 'low-sweep',
+  'circle-throw', 'storm-throw', 'vital-throw', 'body-press',
+  // Flying
+  'peck', 'drill-peck', 'wing-attack', 'aerial-ace', 'brave-bird', 'sky-attack',
+  'fly', 'bounce', 'pluck', 'acrobatics', 'dual-wingbeat',
+  // Poison
+  'poison-jab', 'cross-poison', 'poison-sting', 'lunge',
+  // Ground
+  'dig', 'slash', 'high-horsepower',
+  // Rock
+  'rock-smash', 'head-smash',
+  // Bug
+  'x-scissor', 'bug-bite', 'u-turn', 'fury-cutter', 'leech-life',
+  'first-impression', 'fell-stinger',
+  // Ghost
+  'shadow-claw', 'shadow-sneak', 'lick', 'shadow-punch',
+  // Steel
+  'iron-tail', 'steel-wing', 'bullet-punch', 'meteor-mash', 'iron-head', 'smart-strike',
+  'sunsteel-strike', 'behemoth-blade', 'behemoth-bash',
+  // Fire
+  'fire-punch', 'fire-fang', 'flame-charge', 'flare-blitz', 'flame-wheel',
+  // Water
+  'waterfall', 'aqua-tail', 'liquidation', 'dive', 'aqua-jet', 'crabhammer',
+  // Electric
+  'thunder-punch', 'thunder-fang', 'spark', 'wild-charge', 'volt-tackle', 'plasma-fists',
+  // Ice
+  'ice-punch', 'ice-fang', 'ice-ball',
+  // Psychic
+  'zen-headbutt', 'psychic-fangs',
+  // Dark
+  'crunch', 'bite', 'night-slash', 'sucker-punch', 'foul-play', 'assurance',
+  'payback', 'revenge', 'spirit-break',
+  // Dragon
+  'dragon-claw', 'dragon-rush', 'outrage', 'dragon-tail', 'dual-chop', 'scale-shot',
+  // Grass
+  'vine-whip', 'leaf-blade', 'wood-hammer', 'power-whip', 'petal-dance',
+]);
+
 // Recoil moves — attacker takes damage after hitting.
 // 'damage'  → fraction of HP damage dealt to the target
 // 'max-hp'  → fraction of attacker's own max HP (Struggle)
@@ -467,6 +544,15 @@ const DRAIN_MOVES: Record<string, DrainEffect> = {
   'dream-eater':      { fraction: 0.5 },
   'draining-kiss':    { fraction: 0.75 },
   'oblivion-wing':    { fraction: 0.75 },
+};
+
+// HP-triggered abilities that boost moves of a specific type when HP ≤ 1/3.
+// Key: PokeAPI ability slug. Value: the move type they boost (lowercase).
+const PINCH_ABILITIES: Record<string, string> = {
+  'torrent':  'water',
+  'blaze':    'fire',
+  'overgrow': 'grass',
+  'swarm':    'bug',
 };
 
 // Applies stat stage effects to a Pokémon in the battle's stage map and returns
@@ -1173,15 +1259,26 @@ async function checkConfusion(
 ): Promise<{ hitSelf: boolean; events: string[] }> {
   const poke = await Pokemon.findById(
     pokemonId,
-    'nickname speciesId level nature currentHp volatileStatus',
+    'nickname speciesId level nature currentHp volatileStatus hasHiddenAbility',
   ).lean();
   if (!poke) return { hitSelf: false, events: [] };
 
   const confIdx = (poke.volatileStatus ?? []).findIndex(v => v.condition === 'confusion');
   if (confIdx === -1) return { hitSelf: false, events: [] };
 
-  const cache       = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name baseStats').lean();
+  const cache       = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name baseStats abilities').lean();
   const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
+
+  // If the Pokémon has an immunity ability, snap it out immediately rather than rolling the 50% check.
+  type CachedAbility = { name: string; isHidden: boolean };
+  const abilitySlug = resolveAbilitySlug(
+    (cache?.abilities as CachedAbility[]) ?? [],
+    poke.hasHiddenAbility as boolean,
+  );
+  if (abilitySlug && (STATUS_IMMUNITY_ABILITIES[abilitySlug] ?? []).includes('confusion')) {
+    await Pokemon.updateOne({ _id: pokemonId }, { $pull: { volatileStatus: { condition: 'confusion' } } });
+    return { hitSelf: false, events: [`${displayName}'s ${slugToDisplayName(abilitySlug)} snapped it out of confusion!`] };
+  }
 
   const newTurns   = poke.volatileStatus[confIdx].turnsRemaining - 1;
   const didSnapOut = newTurns <= 0;
@@ -1224,7 +1321,7 @@ async function applyStatusEffect(
 ): Promise<string[]> {
   const target = await Pokemon.findById(
     targetId,
-    'nickname speciesId statusCondition volatileStatus currentHp',
+    'nickname speciesId statusCondition volatileStatus currentHp hasHiddenAbility',
   ).lean();
   if (!target || target.currentHp <= 0) return [];
 
@@ -1233,7 +1330,7 @@ async function applyStatusEffect(
   if (!isConfusion && target.statusCondition) return [];
   if (isConfusion && target.volatileStatus.some(v => v.condition === 'confusion')) return [];
 
-  const cache = await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name types').lean();
+  const cache = await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name types abilities').lean();
   const types = (cache?.types ?? []) as string[];
   const displayName = target.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
 
@@ -1245,6 +1342,18 @@ async function applyStatusEffect(
     (effect.status === 'freeze'    && types.includes('ice'))
   );
   if (isImmune) return [];
+
+  type CachedAbility = { name: string; isHidden: boolean };
+  const abilitySlug = resolveAbilitySlug(
+    (cache?.abilities as CachedAbility[]) ?? [],
+    target.hasHiddenAbility as boolean,
+  );
+  if (abilitySlug) {
+    const immuneStatuses = STATUS_IMMUNITY_ABILITIES[abilitySlug] ?? [];
+    if (immuneStatuses.includes(effect.status)) {
+      return [`${displayName}'s ${slugToDisplayName(abilitySlug)} prevents the ${effect.status}!`];
+    }
+  }
 
   if (isConfusion) {
     const turnsRemaining = Math.floor(Math.random() * 4) + 2; // 2–5 turns
@@ -1300,7 +1409,7 @@ async function resolveMove(
   // Look up the move's data from the attacker's species cache.
   // The `name` field on each cached move is the PokeAPI slug, matching moveId.
   const moveData = (attackerCache.moves as Array<{
-    name: string; category: string; power: number | null; implemented: boolean;
+    name: string; type: string; category: string; power: number | null; implemented: boolean;
   }>).find(m => m.name === moveId);
 
   // Status moves and unrecognised moves deal no damage
@@ -1327,6 +1436,18 @@ async function resolveMove(
     : targetAbilities.find(a => !a.isHidden);
   const attackerAbilityName = attackerAbility ? slugToDisplayName(attackerAbility.name) : undefined;
   const targetAbilityName   = targetAbility   ? slugToDisplayName(targetAbility.name)   : undefined;
+
+  // Check if a pinch ability (Torrent, Blaze, Overgrow, Swarm) is active this turn.
+  const pinchEvents: string[] = [];
+  if (attackerAbility) {
+    const boostedType = PINCH_ABILITIES[attackerAbility.name];
+    if (boostedType && moveData.type?.toLowerCase() === boostedType) {
+      const maxHp = computeStats(attackerCache.baseStats as BaseStats, attacker.level, attacker.nature).hp;
+      if (attacker.currentHp <= Math.floor(maxHp / 3)) {
+        pinchEvents.push(`${attackerName}'s ${attackerAbilityName}!`);
+      }
+    }
+  }
 
   let damage    = 0;
   let effectNote = '';
@@ -1386,7 +1507,7 @@ async function resolveMove(
 
   return {
     damage,
-    events: [`${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${critNote}`],
+    events: [...pinchEvents, `${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${critNote}`],
   };
 }
 
@@ -1642,14 +1763,16 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
   if (allActiveIds.length > 0) {
     const activePokemons = await Pokemon.find(
       { _id: { $in: allActiveIds }, currentHp: { $gt: 0 } },
-      'speciesId level nature currentHp statusCondition statusCounter nickname volatileStatus',
+      'speciesId level nature currentHp statusCondition statusCounter nickname volatileStatus hasHiddenAbility',
     ).lean();
 
     const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
     const caches     = speciesIds.length > 0
-      ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats types').lean()
+      ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats types abilities').lean()
       : [];
     const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+    type CachedAbility = { name: string; isHidden: boolean };
 
     // Track running HP so stacked end-of-round damage sources don't overwrite each other.
     const runningHp = new Map(activePokemons.map(p => [p._id.toString(), p.currentHp]));
@@ -1668,6 +1791,27 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 
       const maxHp    = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
       const pokeName = poke.nickname ?? slugToDisplayName(cache.name as string);
+
+      // Poison Heal: heal 1/8 maxHp instead of taking poison/toxic damage.
+      const abilitySlugForStatus = resolveAbilitySlug(
+        (cache.abilities as CachedAbility[]) ?? [],
+        poke.hasHiddenAbility as boolean,
+      );
+      if (
+        (poke.statusCondition === 'poison' || poke.statusCondition === 'toxic') &&
+        abilitySlugForStatus === 'poison-heal'
+      ) {
+        const currentHp = runningHp.get(poke._id.toString()) ?? poke.currentHp;
+        const healAmt   = Math.max(1, Math.floor(maxHp / 8));
+        const newHp     = Math.min(maxHp, currentHp + healAmt);
+        const restored  = newHp - currentHp;
+        if (restored > 0) {
+          runningHp.set(poke._id.toString(), newHp);
+          await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+          allEvents.push(`${pokeName}'s Poison Heal restored ${restored} HP!`);
+        }
+        continue;
+      }
 
       // Toxic damage scales each round: counter/16 × maxHp (counter starts at 1, caps at 15).
       // Burn and poison deal a flat 1/8 maxHp.
@@ -1726,6 +1870,81 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
         .some(v => v.condition === 'roosting');
       if (hasRoosting) {
         await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: 'roosting' } } });
+      }
+    }
+
+    // --- End-of-round ability effects ---
+    // Speed Boost, Rain Dish, Ice Body, Dry Skin, Moody all fire after status and weather damage
+    // so their HP changes read from runningHp rather than the original snapshot.
+    const stageMap = battle.statStages as Record<string, StatStages>;
+    for (const poke of activePokemons) {
+      const cache = cacheMap.get(poke.speciesId);
+      if (!cache) continue;
+
+      const abilitySlug = resolveAbilitySlug(
+        (cache.abilities as CachedAbility[]) ?? [],
+        poke.hasHiddenAbility as boolean,
+      );
+      if (!abilitySlug) continue;
+
+      const pokeName  = poke.nickname ?? slugToDisplayName(cache.name as string);
+      const maxHp     = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
+      const currentHp = runningHp.get(poke._id.toString()) ?? poke.currentHp;
+
+      if (abilitySlug === 'speed-boost') {
+        const events = applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: 'spe', stages: 1, target: 'self' }], pokeName);
+        allEvents.push(...events);
+        battle.markModified('statStages');
+
+      } else if (abilitySlug === 'rain-dish' && battle.weather === 'rain') {
+        if (currentHp < maxHp) {
+          const healAmt  = Math.max(1, Math.floor(maxHp / 16));
+          const newHp    = Math.min(maxHp, currentHp + healAmt);
+          runningHp.set(poke._id.toString(), newHp);
+          await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+          allEvents.push(`${pokeName}'s Rain Dish restored ${newHp - currentHp} HP!`);
+        }
+
+      } else if (abilitySlug === 'ice-body' && (battle.weather === 'hail' || battle.weather === 'snow')) {
+        if (currentHp < maxHp) {
+          const healAmt  = Math.max(1, Math.floor(maxHp / 16));
+          const newHp    = Math.min(maxHp, currentHp + healAmt);
+          runningHp.set(poke._id.toString(), newHp);
+          await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+          allEvents.push(`${pokeName}'s Ice Body restored ${newHp - currentHp} HP!`);
+        }
+
+      } else if (abilitySlug === 'dry-skin') {
+        if (battle.weather === 'rain') {
+          if (currentHp < maxHp) {
+            const healAmt  = Math.max(1, Math.floor(maxHp / 16));
+            const newHp    = Math.min(maxHp, currentHp + healAmt);
+            runningHp.set(poke._id.toString(), newHp);
+            await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+            allEvents.push(`${pokeName}'s Dry Skin restored ${newHp - currentHp} HP!`);
+          }
+        } else if (battle.weather === 'sun') {
+          const damage = Math.max(1, Math.floor(maxHp / 8));
+          const newHp  = Math.max(0, currentHp - damage);
+          runningHp.set(poke._id.toString(), newHp);
+          await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+          allEvents.push(`${pokeName}'s Dry Skin is seared by the sun! (${damage} damage, ${newHp} HP remaining)`);
+        }
+
+      } else if (abilitySlug === 'moody') {
+        const allStats: (keyof StatStages)[] = ['atk', 'def', 'spa', 'spd', 'spe', 'acc', 'eva'];
+        const boostStat  = allStats[Math.floor(Math.random() * allStats.length)];
+        const dropStats  = allStats.filter(s => s !== boostStat);
+        const dropStat   = dropStats[Math.floor(Math.random() * dropStats.length)];
+        const events = [
+          ...applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: boostStat, stages: 2,  target: 'self' }], pokeName),
+          ...applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: dropStat,  stages: -1, target: 'self' }], pokeName),
+        ];
+        if (events.length) {
+          allEvents.push(`${pokeName}'s Moody!`);
+          allEvents.push(...events);
+          battle.markModified('statStages');
+        }
       }
     }
 
@@ -2975,11 +3194,12 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       const drainEffect     = DRAIN_MOVES[currentEntry.moveId];
       const selfStatEffects = (STAT_STAGE_MOVES[currentEntry.moveId] ?? []).filter(e => e.target === 'self');
 
-      // Pre-fetch attacker data once if this move has recoil, drain, or self stat effects
+      // Pre-fetch attacker data once if this move has recoil, drain, self stat effects, or contact
+      // (contact moves need attacker HP for Rough Skin / Iron Barbs damage)
       type AtkSnapshot = { currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null };
       let atkSnap:      AtkSnapshot | null = null;
       let atkSnapCache: { name?: unknown; baseStats?: unknown } | null = null;
-      if (recoilEffect || drainEffect || selfStatEffects.length > 0) {
+      if (recoilEffect || drainEffect || selfStatEffects.length > 0 || CONTACT_MOVES.has(currentEntry.moveId)) {
         atkSnap = await Pokemon.findById(
           currentEntry.activePokemonId, 'nickname currentHp speciesId nature level',
         ).lean() as AtkSnapshot | null;
@@ -3112,6 +3332,64 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
             e => e.activePokemonId.toString() === targetId && !e.resolved,
           );
           if (targetEntry) targetEntry.flinched = true;
+        }
+
+        // Contact abilities — if the move makes contact and dealt damage, the defender's
+        // ability may trigger an effect on the attacker (status, recoil, etc.).
+        if (CONTACT_MOVES.has(currentEntry.moveId) && totalDamage > 0) {
+          const defPoke = await Pokemon.findById(targetId, 'speciesId hasHiddenAbility nickname').lean();
+          if (defPoke) {
+            const defCache = await PokedexCache.findOne(
+              { pokeApiId: defPoke.speciesId }, 'name abilities baseStats',
+            ).lean();
+            type CachedAbility = { name: string; isHidden: boolean };
+            const defAbilitySlug = resolveAbilitySlug(
+              (defCache?.abilities as CachedAbility[]) ?? [],
+              defPoke.hasHiddenAbility as boolean,
+            );
+            if (defAbilitySlug) {
+              const defName   = defPoke.nickname ?? (defCache ? slugToDisplayName(defCache.name as string) : 'Pokémon');
+              const atkId     = currentEntry.activePokemonId;
+
+              if (defAbilitySlug === 'rough-skin' || defAbilitySlug === 'iron-barbs') {
+                if (atkSnap && atkSnapCache?.baseStats) {
+                  const maxHp    = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature).hp;
+                  const dmg      = Math.max(1, Math.floor(maxHp / 8));
+                  const newAtkHp = Math.max(0, atkSnap.currentHp - dmg);
+                  await Pokemon.updateOne({ _id: atkId }, { $set: { currentHp: newAtkHp } });
+                  atkSnap.currentHp = newAtkHp;
+                  const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
+                  moveEvents.push(`${atkName} was hurt by ${defName}'s ${slugToDisplayName(defAbilitySlug)}!`);
+                }
+              } else if (defAbilitySlug === 'poison-point' && Math.random() < 0.3) {
+                const statusEvents = await applyStatusEffect(atkId, { status: 'poison', chance: 1 });
+                if (statusEvents.length) {
+                  moveEvents.push(`${defName}'s Poison Point!`);
+                  moveEvents.push(...statusEvents);
+                }
+              } else if (defAbilitySlug === 'static' && Math.random() < 0.3) {
+                const statusEvents = await applyStatusEffect(atkId, { status: 'paralysis', chance: 1 });
+                if (statusEvents.length) {
+                  moveEvents.push(`${defName}'s Static!`);
+                  moveEvents.push(...statusEvents);
+                }
+              } else if (defAbilitySlug === 'flame-body' && Math.random() < 0.3) {
+                const statusEvents = await applyStatusEffect(atkId, { status: 'burn', chance: 1 });
+                if (statusEvents.length) {
+                  moveEvents.push(`${defName}'s Flame Body!`);
+                  moveEvents.push(...statusEvents);
+                }
+              } else if (defAbilitySlug === 'effect-spore' && Math.random() < 0.3) {
+                const roll   = Math.random();
+                const status = roll < 1 / 3 ? 'poison' : roll < 2 / 3 ? 'paralysis' : 'sleep';
+                const statusEvents = await applyStatusEffect(atkId, { status: status as StatusCondition, chance: 1 });
+                if (statusEvents.length) {
+                  moveEvents.push(`${defName}'s Effect Spore!`);
+                  moveEvents.push(...statusEvents);
+                }
+              }
+            }
+          }
         }
       }
     }
