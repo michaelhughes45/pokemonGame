@@ -31,35 +31,50 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
 
   // All actors submitted — fetch Pokémon documents for speed calculation
   const pokemonIds = battle.turnQueue.map(e => e.activePokemonId);
-  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'speciesId level nature statusCondition').lean();
+  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'speciesId level nature statusCondition hasHiddenAbility').lean();
   const speciesIds = [...new Set(pokemons.map(p => p.speciesId))];
-  const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
+  const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats abilities').lean();
 
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
   const pokemonMap = new Map(pokemons.map(p => [p._id.toString(), p]));
 
+  type CachedAbility = { name: string; isHidden: boolean };
   const withSpeed = battle.turnQueue.map(entry => {
     const poke  = pokemonMap.get(entry.activePokemonId.toString());
     const cache = poke ? cacheMap.get(poke.speciesId) : null;
+
+    // Resolve ability first — needed for both speed doubling and Prankster
+    const abilitySlug = poke && cache
+      ? resolveAbilitySlug((cache.abilities as CachedAbility[]) ?? [], (poke.hasHiddenAbility as boolean) ?? false)
+      : null;
+
     const rawSpeed = poke && cache
       ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).speed
       : 0;
-    const speed = poke?.statusCondition === 'paralysis' ? Math.floor(rawSpeed * 0.5) : rawSpeed;
-    return { entry, speed };
+    // Paralysis halves speed; weather speed doublers (Swift Swim, Chlorophyll, etc.) double it.
+    // Both can apply simultaneously — halve first, then double, matching main-game order.
+    const afterParalysis = poke?.statusCondition === 'paralysis' ? Math.floor(rawSpeed * 0.5) : rawSpeed;
+    const weatherMatches = abilitySlug != null
+      && (WEATHER_SPEED_DOUBLERS[abilitySlug] ?? []).includes(battle.weather ?? '');
+    const speed = weatherMatches ? afterParalysis * 2 : afterParalysis;
+
+    // Prankster: status-category moves gain +1 priority for this actor
+    const pranksterBonus = abilitySlug === 'prankster' && PRANKSTER_MOVES.has(entry.moveId ?? '') ? 1 : 0;
+    const movePriority   = (MOVE_PRIORITY[entry.moveId ?? ''] ?? 0) + pranksterBonus;
+
+    return { entry, speed, movePriority };
   });
 
   // Sort order:
   //   1. Action type tier — items/catch (2) → switches (1) → moves/run (0)
-  //   2. Move priority tier — Quick Attack (+1) beats normal moves (0), etc.
+  //   2. Move priority tier — Quick Attack (+1) beats normal moves (0), Prankster adds +1 to status moves.
   //      Only applies within the moves tier; items and switches are unaffected.
   //   3. Speed — highest goes first within the same priority tier.
   const actionPriority = (t: string) => (t === 'item' || t === 'catch' ? 2 : t === 'switch' ? 1 : 0);
   withSpeed.sort((a, b) => {
     const actionDiff = actionPriority(b.entry.actionType) - actionPriority(a.entry.actionType);
     if (actionDiff !== 0) return actionDiff;
-    const movePriorityA = MOVE_PRIORITY[a.entry.moveId ?? ''] ?? 0;
-    const movePriorityB = MOVE_PRIORITY[b.entry.moveId ?? ''] ?? 0;
-    const movePriorityDiff = movePriorityB - movePriorityA;
+    const movePriorityDiff = b.movePriority - a.movePriority;
     if (movePriorityDiff !== 0) return movePriorityDiff;
     return b.speed - a.speed;
   });
@@ -120,6 +135,22 @@ const STATUS_IMMUNITY_ABILITIES: Record<string, StatusCondition[]> = {
   'limber':       ['paralysis'],
   'own-tempo':    ['confusion'],
   'oblivious':    ['confusion'],
+};
+
+// Abilities that convert Normal-type moves to another type with a 1.2× power boost.
+const ILATE_MAP: Record<string, string> = {
+  'pixilate':    'Fairy',
+  'aerilate':    'Flying',
+  'refrigerate': 'Ice',
+  'galvanize':   'Electric',
+};
+
+// Abilities that double Speed in a specific weather condition.
+const WEATHER_SPEED_DOUBLERS: Record<string, string[]> = {
+  'swift-swim':  ['rain'],
+  'chlorophyll': ['sun'],
+  'sand-rush':   ['sandstorm'],
+  'slush-rush':  ['hail', 'snow'],
 };
 
 // Resolves which ability slug is active for a Pokémon given its cached ability list
@@ -558,10 +589,11 @@ const PINCH_ABILITIES: Record<string, string> = {
 // Applies stat stage effects to a Pokémon in the battle's stage map and returns
 // turn-log narration strings. Call battle.markModified('statStages') after.
 function applyStatStageEffects(
-  stageMap: Record<string, StatStages>,
-  pokemonId: string,
-  effects:   StatEffect[],
-  name:      string,
+  stageMap:    Record<string, StatStages>,
+  pokemonId:   string,
+  effects:     StatEffect[],
+  name:        string,
+  abilitySlug?: string | null,
 ): string[] {
   if (!stageMap[pokemonId]) {
     stageMap[pokemonId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
@@ -570,14 +602,18 @@ function applyStatStageEffects(
   const events: string[] = [];
 
   for (const effect of effects) {
+    let stageChange = effect.stages;
+    if (abilitySlug === 'contrary') stageChange = -stageChange;
+    if (abilitySlug === 'simple')   stageChange *= 2;
+
     const current = stages[effect.stat];
-    const clamped = Math.max(-6, Math.min(6, current + effect.stages));
+    const clamped = Math.max(-6, Math.min(6, current + stageChange));
     const delta   = clamped - current;
     stages[effect.stat] = clamped;
 
     const label = STAT_DISPLAY_NAMES[effect.stat];
     if (delta === 0) {
-      events.push(`${name}'s ${label} won't go ${effect.stages > 0 ? 'any higher' : 'any lower'}!`);
+      events.push(`${name}'s ${label} won't go ${stageChange > 0 ? 'any higher' : 'any lower'}!`);
     } else {
       const mag = Math.abs(delta) >= 3 ? 'drastically ' : Math.abs(delta) >= 2 ? 'sharply ' : '';
       events.push(`${name}'s ${label} ${mag}${delta > 0 ? 'rose' : 'fell'}!`);
@@ -592,6 +628,15 @@ function applyStatStageEffects(
 const NO_TARGET_MOVE_IDS = new Set([
   ...Object.keys(WEATHER_MOVES),
   ...SELF_TARGETING_MOVES,
+]);
+
+// Moves that gain +1 priority when used by a Pokémon with Prankster.
+// Derived from: pure status moves (chance === 1 in STATUS_MOVES), non-charging
+// self-targeting moves, and weather moves — all are "Status" category in PokeAPI.
+const PRANKSTER_MOVES = new Set([
+  ...Object.entries(STATUS_MOVES).filter(([, v]) => v.chance === 1).map(([k]) => k),
+  ...[...SELF_TARGETING_MOVES].filter(m => !CHARGE_MOVES.has(m)),
+  ...Object.keys(WEATHER_MOVES),
 ]);
 
 // Item effects for healing and status_cure items usable in battle.
@@ -860,12 +905,58 @@ async function applyEntryAbilities(
       for (const entry of opposingSide) {
         if (!entry.activePokemonId) continue;
         const targetId   = entry.activePokemonId.toString();
-        const target     = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-        const tgtCache   = target ? await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name').lean() : null;
+        const target     = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId hasHiddenAbility').lean();
+        const tgtCache   = target ? await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name abilities').lean() : null;
         const targetName = (target?.nickname as string | null) ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'Pokémon');
-        events.push(...applyStatStageEffects(stageMap, targetId, [{ stat: 'atk', stages: -1, target: 'foe' }], targetName));
+        const tgtAbility = target && tgtCache ? resolveAbilitySlug((tgtCache.abilities as CachedAbility[]) ?? [], target.hasHiddenAbility as boolean) : null;
+        events.push(...applyStatStageEffects(stageMap, targetId, [{ stat: 'atk', stages: -1, target: 'foe' }], targetName, tgtAbility));
+
+        // Competitive/Defiant: react to Intimidate's Atk drop
+        if (tgtAbility === 'competitive' || tgtAbility === 'defiant') {
+          const reactionStat: keyof StatStages = tgtAbility === 'competitive' ? 'spa' : 'atk';
+          events.push(`${targetName}'s ${slugToDisplayName(tgtAbility)}!`);
+          events.push(...applyStatStageEffects(stageMap, targetId, [{ stat: reactionStat, stages: 2, target: 'self' }], targetName));
+        }
       }
       battle.markModified('statStages');
+    }
+  }
+
+  return events;
+}
+
+// Applies switch-out ability effects for the outgoing Pokémon and returns turn-log events.
+// Natural Cure clears any non-volatile status; Regenerator restores 1/3 max HP.
+async function applySwitchOutAbilities(
+  pokemonId: string,
+  outgoing:  Record<string, unknown> | null,
+  outCache:  Record<string, unknown> | null,
+  outName:   string,
+): Promise<string[]> {
+  if (!outgoing || !outCache) return [];
+
+  type CachedAbility = { name: string; isHidden: boolean };
+  const abilitySlug = resolveAbilitySlug(
+    (outCache.abilities as CachedAbility[]) ?? [],
+    (outgoing.hasHiddenAbility as boolean) ?? false,
+  );
+  if (!abilitySlug) return [];
+
+  const events: string[] = [];
+
+  if (abilitySlug === 'natural-cure' && outgoing.statusCondition) {
+    await Pokemon.updateOne({ _id: pokemonId }, { $set: { statusCondition: null, statusCounter: null } });
+    events.push(`${outName}'s Natural Cure! ${outName}'s status was cured!`);
+  }
+
+  if (abilitySlug === 'regenerator') {
+    const maxHp     = computeStats(outCache.baseStats as BaseStats, outgoing.level as number, outgoing.nature as string).hp;
+    const currentHp = outgoing.currentHp as number;
+    if (currentHp < maxHp) {
+      const healAmt = Math.max(1, Math.floor(maxHp / 3));
+      const newHp   = Math.min(maxHp, currentHp + healAmt);
+      await Pokemon.updateOne({ _id: pokemonId }, { $set: { currentHp: newHp } });
+      events.push(`${outName}'s Regenerator! ${outName} restored ${newHp - currentHp} HP!`);
     }
   }
 
@@ -895,12 +986,13 @@ async function resolveSwitch(
       await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
       delete (battle.statStages as Record<string, StatStages>)[outgoingId.toString()];
       battle.markModified('statStages');
-      const outgoing = await Pokemon.findById(outgoingId, 'nickname speciesId').lean();
+      const outgoing = await Pokemon.findById(outgoingId, 'nickname speciesId hasHiddenAbility statusCondition currentHp nature level').lean();
       const outCache = outgoing
-        ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name').lean()
+        ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name abilities baseStats').lean()
         : null;
       const outName  = outgoing?.nickname ?? (outCache ? slugToDisplayName(outCache.name as string) : 'Pokémon');
       events.push(`${outName} was recalled!`);
+      events.push(...await applySwitchOutAbilities(outgoingId.toString(), outgoing, outCache, outName));
     }
 
     npcEntry.activePokemonId = incomingId;
@@ -915,12 +1007,13 @@ async function resolveSwitch(
       await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
       delete (battle.statStages as Record<string, StatStages>)[outgoingId.toString()];
       battle.markModified('statStages');
-      const outgoing  = await Pokemon.findById(outgoingId, 'nickname speciesId').lean();
+      const outgoing  = await Pokemon.findById(outgoingId, 'nickname speciesId hasHiddenAbility statusCondition currentHp nature level').lean();
       const outCache  = outgoing
-        ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name').lean()
+        ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name abilities baseStats').lean()
         : null;
       const outName   = outgoing?.nickname ?? (outCache ? slugToDisplayName(outCache.name as string) : 'Pokémon');
       events.push(`${outName} was recalled!`);
+      events.push(...await applySwitchOutAbilities(outgoingId.toString(), outgoing, outCache, outName));
     }
 
     playerEntry.activePokemonId = incomingId;
@@ -1385,13 +1478,13 @@ async function resolveMove(
   moveId:            string,
   weather:           IBattle['weather'],
   stages:            { attacker?: StatStages; target?: StatStages } = {},
-): Promise<{ damage: number; events: string[] }> {
+): Promise<{ damage: number; isCrit: boolean; events: string[] }> {
   const [attacker, target] = await Promise.all([
     Pokemon.findById(attackerPokemonId).lean(),
     Pokemon.findById(targetPokemonId).lean(),
   ]);
   if (!attacker || !target) {
-    return { damage: 0, events: ['(Pokémon not found during move resolution)'] };
+    return { damage: 0, isCrit: false, events: ['(Pokémon not found during move resolution)'] };
   }
 
   const [attackerCache, targetCache] = await Promise.all([
@@ -1399,7 +1492,7 @@ async function resolveMove(
     PokedexCache.findOne({ pokeApiId: target.speciesId }).lean(),
   ]);
   if (!attackerCache || !targetCache) {
-    return { damage: 0, events: ['(Species cache missing during move resolution)'] };
+    return { damage: 0, isCrit: false, events: ['(Species cache missing during move resolution)'] };
   }
 
   const attackerName = attacker.nickname ?? slugToDisplayName(attackerCache.name as string);
@@ -1417,6 +1510,7 @@ async function resolveMove(
     const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) && !(moveId in WEATHER_MOVES) && !SELF_TARGETING_MOVES.has(moveId) ? ' (effect not yet implemented)' : '';
     return {
       damage: 0,
+      isCrit: false,
       events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`],
     };
   }
@@ -1499,6 +1593,13 @@ async function resolveMove(
   } catch {
     // Fallback if @smogon/calc doesn't recognise the species or move name
     damage = Math.max(1, Math.floor((moveData.power * attacker.level) / 50));
+    // Apply type-changing ability multipliers that @smogon/calc would normally handle
+    const atkAbilitySlug = attackerAbility?.name;
+    if (atkAbilitySlug === 'protean' || atkAbilitySlug === 'libero') {
+      damage = Math.floor(damage * 1.5); // STAB on every move
+    } else if (atkAbilitySlug && atkAbilitySlug in ILATE_MAP && moveData.type?.toLowerCase() === 'normal') {
+      damage = Math.floor(damage * 1.2); // -ilate power boost
+    }
   }
 
   damage = Math.max(0, damage);
@@ -1507,6 +1608,7 @@ async function resolveMove(
 
   return {
     damage,
+    isCrit: isCrit && damage > 0,
     events: [...pinchEvents, `${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${critNote}`],
   };
 }
@@ -1892,7 +1994,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       const currentHp = runningHp.get(poke._id.toString()) ?? poke.currentHp;
 
       if (abilitySlug === 'speed-boost') {
-        const events = applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: 'spe', stages: 1, target: 'self' }], pokeName);
+        const events = applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: 'spe', stages: 1, target: 'self' }], pokeName, abilitySlug);
         allEvents.push(...events);
         battle.markModified('statStages');
 
@@ -1937,16 +2039,23 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
         const dropStats  = allStats.filter(s => s !== boostStat);
         const dropStat   = dropStats[Math.floor(Math.random() * dropStats.length)];
         const events = [
-          ...applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: boostStat, stages: 2,  target: 'self' }], pokeName),
-          ...applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: dropStat,  stages: -1, target: 'self' }], pokeName),
+          ...applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: boostStat, stages: 2,  target: 'self' }], pokeName, abilitySlug),
+          ...applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: dropStat,  stages: -1, target: 'self' }], pokeName, abilitySlug),
         ];
         if (events.length) {
           allEvents.push(`${pokeName}'s Moody!`);
           allEvents.push(...events);
           battle.markModified('statStages');
         }
+
+      } else if (abilitySlug === 'shed-skin' && poke.statusCondition) {
+        if (Math.random() < 1 / 3) {
+          await Pokemon.updateOne({ _id: poke._id }, { $set: { statusCondition: null, statusCounter: null } });
+          allEvents.push(`${pokeName}'s Shed Skin! ${pokeName} shed its skin and cured its status!`);
+        }
       }
     }
+
 
     if (allEvents.length > 0) {
       let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
@@ -3102,10 +3211,10 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       }
     } else if (SELF_TARGETING_MOVES.has(currentEntry.moveId)) {
       const attacker = await Pokemon.findById(
-        currentEntry.activePokemonId, 'nickname speciesId currentHp nature level volatileStatus',
+        currentEntry.activePokemonId, 'nickname speciesId currentHp nature level volatileStatus hasHiddenAbility',
       ).lean();
       const atkCache = attacker
-        ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats').lean()
+        ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats abilities').lean()
         : null;
       const attackerName = attacker?.nickname ?? (atkCache ? slugToDisplayName(atkCache.name as string) : 'Pokémon');
 
@@ -3148,8 +3257,12 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
         if (statEffects) {
           const selfEffects = statEffects.filter(e => e.target === 'self');
           if (selfEffects.length > 0) {
-            const stageMap = battle.statStages as Record<string, StatStages>;
-            moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), selfEffects, attackerName));
+            type CachedAbility   = { name: string; isHidden: boolean };
+            const stageMap       = battle.statStages as Record<string, StatStages>;
+            const atkAbilitySlug = attacker && atkCache
+              ? resolveAbilitySlug((atkCache.abilities as CachedAbility[]) ?? [], attacker.hasHiddenAbility as boolean)
+              : null;
+            moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), selfEffects, attackerName, atkAbilitySlug));
             battle.markModified('statStages');
           }
         }
@@ -3194,18 +3307,35 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       const drainEffect     = DRAIN_MOVES[currentEntry.moveId];
       const selfStatEffects = (STAT_STAGE_MOVES[currentEntry.moveId] ?? []).filter(e => e.target === 'self');
 
-      // Pre-fetch attacker data once if this move has recoil, drain, self stat effects, or contact
-      // (contact moves need attacker HP for Rough Skin / Iron Barbs damage)
-      type AtkSnapshot = { currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null };
-      let atkSnap:      AtkSnapshot | null = null;
-      let atkSnapCache: { name?: unknown; baseStats?: unknown } | null = null;
-      if (recoilEffect || drainEffect || selfStatEffects.length > 0 || CONTACT_MOVES.has(currentEntry.moveId)) {
-        atkSnap = await Pokemon.findById(
-          currentEntry.activePokemonId, 'nickname currentHp speciesId nature level',
-        ).lean() as AtkSnapshot | null;
-        if (atkSnap) {
-          atkSnapCache = await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'name baseStats').lean();
-        }
+      // Always pre-fetch attacker data — used for recoil, drain, contact abilities, Serene Grace,
+      // Contrary/Simple, on-KO boosts, and type-changing ability narration.
+      type AtkSnapshot = { currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean };
+      const atkSnap      = await Pokemon.findById(
+        currentEntry.activePokemonId, 'nickname currentHp speciesId nature level hasHiddenAbility',
+      ).lean() as AtkSnapshot | null;
+      const atkSnapCache = atkSnap
+        ? await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'name baseStats abilities').lean()
+        : null;
+
+      // Resolve attacker ability once — used for Serene Grace, Contrary/Simple, type-changing, etc.
+      type CachedAbility = { name: string; isHidden: boolean };
+      const attackerAbilitySlug = atkSnap && atkSnapCache
+        ? resolveAbilitySlug((atkSnapCache.abilities as CachedAbility[]) ?? [], atkSnap.hasHiddenAbility ?? false)
+        : null;
+      const sereneGrace = attackerAbilitySlug === 'serene-grace';
+
+      // For type-changing abilities (Protean/Libero, -ilate), look up the move's type once
+      // before the target loop so the narration can fire correctly per target.
+      let typeChangeMoveType: string | null = null;
+      const isTypeChanging = attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero'
+        || (attackerAbilitySlug != null && attackerAbilitySlug in ILATE_MAP);
+      if (isTypeChanging && atkSnap) {
+        type MoveEntry = { type: string };
+        const moveCacheDoc = await PokedexCache.findOne(
+          { pokeApiId: atkSnap.speciesId, 'moves.name': currentEntry.moveId },
+          { 'moves.$': 1 },
+        ).lean();
+        typeChangeMoveType = (moveCacheDoc?.moves as MoveEntry[] | undefined)?.[0]?.type?.toLowerCase() ?? null;
       }
 
       for (const targetId of targets) {
@@ -3220,15 +3350,27 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
           }
         }
 
+        // Type-changing ability narration (fires before the attack, once per target)
+        if (typeChangeMoveType && atkSnap && atkSnapCache) {
+          const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
+          if (attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero') {
+            const typeDisplay = typeChangeMoveType.charAt(0).toUpperCase() + typeChangeMoveType.slice(1);
+            moveEvents.push(`${atkName}'s ${slugToDisplayName(attackerAbilitySlug)}! ${atkName} became the ${typeDisplay} type!`);
+          } else if (attackerAbilitySlug && attackerAbilitySlug in ILATE_MAP && typeChangeMoveType === 'normal') {
+            moveEvents.push(`${atkName}'s ${slugToDisplayName(attackerAbilitySlug)}! The move became ${ILATE_MAP[attackerAbilitySlug]} type!`);
+          }
+        }
+
         const hitCount   = getHitCount(currentEntry.moveId);
         let totalDamage  = 0;
         let actualHits   = 0;
+        let anyCrit      = false;
 
         for (let hit = 1; hit <= hitCount; hit++) {
           // Stop hitting if the target already fainted from a previous hit
           if ((targetHpMap.get(targetId) ?? 0) <= 0) break;
 
-          const { damage, events } = await resolveMove(
+          const { damage, isCrit, events } = await resolveMove(
             currentEntry.activePokemonId,
             new mongoose.Types.ObjectId(targetId),
             currentEntry.moveId,
@@ -3238,6 +3380,8 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
               target:   stageMap[targetId],
             },
           );
+
+          if (isCrit) anyCrit = true;
 
           if (hitCount > 1) {
             moveEvents.push(`(Hit ${hit}) ${events[0]}`);
@@ -3259,8 +3403,26 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
           moveEvents.push(`Hit ${actualHits} time(s)!`);
         }
 
+        // Anger Point: if any hit was a critical hit, the defender's Atk jumps to +6
+        if (anyCrit) {
+          type CachedAbility = { name: string; isHidden: boolean };
+          const apTgt   = await Pokemon.findById(targetId, 'nickname speciesId hasHiddenAbility').lean();
+          const apCache = apTgt ? await PokedexCache.findOne({ pokeApiId: apTgt.speciesId }, 'name abilities').lean() : null;
+          const apAbility = apTgt && apCache
+            ? resolveAbilitySlug((apCache.abilities as CachedAbility[]) ?? [], (apTgt.hasHiddenAbility as boolean) ?? false)
+            : null;
+          if (apAbility === 'anger-point') {
+            const apName = (apTgt?.nickname as string | null) ?? (apCache ? slugToDisplayName(apCache.name as string) : 'Pokémon');
+            const apStageMap = battle.statStages as Record<string, StatStages>;
+            if (!apStageMap[targetId]) apStageMap[targetId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
+            apStageMap[targetId].atk = 6;
+            battle.markModified('statStages');
+            moveEvents.push(`${apName}'s Anger Point! ${apName}'s Attack rose to the maximum!`);
+          }
+        }
+
         // Secondary status effect — rolled once after all hits resolve
-        if (moveEffect && Math.random() < moveEffect.chance) {
+        if (moveEffect && Math.random() < (sereneGrace ? Math.min(1, moveEffect.chance * 2) : moveEffect.chance)) {
           const statusEvents = await applyStatusEffect(new mongoose.Types.ObjectId(targetId), moveEffect);
           moveEvents.push(...statusEvents);
         }
@@ -3268,22 +3430,32 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
         // Foe stat stage effects — chance rolled per effect (e.g. Crunch 20% Def drop)
         const statEffects = STAT_STAGE_MOVES[currentEntry.moveId];
         if (statEffects) {
-          const foeEffects = statEffects.filter(e => e.target === 'foe' && Math.random() < (e.chance ?? 1));
+          const foeEffects = statEffects.filter(e => e.target === 'foe' && Math.random() < (sereneGrace ? Math.min(1, (e.chance ?? 1) * 2) : (e.chance ?? 1)));
           if (foeEffects.length > 0) {
-            const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-            const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name').lean() : null;
-            const tgtName  = tgt?.nickname ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'Pokémon');
-            moveEvents.push(...applyStatStageEffects(stageMap, targetId, foeEffects, tgtName));
+            type CachedAbility = { name: string; isHidden: boolean };
+            const tgt        = await Pokemon.findById(targetId, 'nickname speciesId hasHiddenAbility').lean();
+            const tgtCache   = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name abilities').lean() : null;
+            const tgtName    = tgt?.nickname ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'Pokémon');
+            const tgtAbility = tgt && tgtCache ? resolveAbilitySlug((tgtCache.abilities as CachedAbility[]) ?? [], tgt.hasHiddenAbility as boolean) : null;
+            moveEvents.push(...applyStatStageEffects(stageMap, targetId, foeEffects, tgtName, tgtAbility));
             battle.markModified('statStages');
+
+            // Competitive/Defiant: react to any foe-caused stat drop
+            if (foeEffects.some(e => e.stages < 0) && (tgtAbility === 'competitive' || tgtAbility === 'defiant')) {
+              const reactionStat: keyof StatStages = tgtAbility === 'competitive' ? 'spa' : 'atk';
+              moveEvents.push(`${tgtName}'s ${slugToDisplayName(tgtAbility)}!`);
+              moveEvents.push(...applyStatStageEffects(stageMap, targetId, [{ stat: reactionStat, stages: 2, target: 'self' }], tgtName));
+              battle.markModified('statStages');
+            }
           }
         }
 
         // Self stat effects on damaging moves (e.g. Close Combat −1 Def/SpDef, Charge Beam +1 SpAtk)
         if (selfStatEffects.length > 0 && atkSnap && atkSnapCache) {
-          const rolledSelfEffects = selfStatEffects.filter(e => Math.random() < (e.chance ?? 1));
+          const rolledSelfEffects = selfStatEffects.filter(e => Math.random() < (sereneGrace ? Math.min(1, (e.chance ?? 1) * 2) : (e.chance ?? 1)));
           if (rolledSelfEffects.length > 0) {
             const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
-            moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), rolledSelfEffects, atkName));
+            moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), rolledSelfEffects, atkName, attackerAbilitySlug));
             battle.markModified('statStages');
           }
         }
@@ -3389,6 +3561,50 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
                 }
               }
             }
+          }
+        }
+      }
+
+      // On-KO stat boosts: Moxie (+1 Atk) and Beast Boost (+1 highest base stat)
+      const koCount = targets.filter(id => (targetHpMap.get(id) ?? 1) <= 0).length;
+      if (koCount > 0) {
+        type CachedAbility = { name: string; isHidden: boolean };
+        let koAbilitySlug  = attackerAbilitySlug;
+        let koAtkCache: { name?: unknown; baseStats?: unknown; abilities?: unknown } | null = atkSnapCache;
+        let koAtkName      = atkSnap
+          ? (atkSnap.nickname ?? (atkSnapCache ? slugToDisplayName((atkSnapCache.name ?? '') as string) : 'Pokémon'))
+          : null;
+
+        // atkSnap is conditionally pre-fetched; if it wasn't, fetch only what KO check needs
+        if (koAbilitySlug == null) {
+          const fetchedAtk   = await Pokemon.findById(currentEntry.activePokemonId, 'nickname speciesId hasHiddenAbility').lean();
+          const fetchedCache = fetchedAtk
+            ? await PokedexCache.findOne({ pokeApiId: fetchedAtk.speciesId }, 'name abilities baseStats').lean()
+            : null;
+          koAbilitySlug = fetchedAtk && fetchedCache
+            ? resolveAbilitySlug((fetchedCache.abilities as CachedAbility[]) ?? [], (fetchedAtk.hasHiddenAbility as boolean) ?? false)
+            : null;
+          koAtkCache = fetchedCache;
+          koAtkName  = (fetchedAtk?.nickname as string | null) ?? (fetchedCache ? slugToDisplayName((fetchedCache.name ?? '') as string) : 'Pokémon');
+        }
+
+        if (koAbilitySlug === 'moxie' || koAbilitySlug === 'beast-boost') {
+          // Beast Boost: find the holder's highest base stat (among the 5 combat stats)
+          let boostStat: keyof StatStages = 'atk';
+          if (koAbilitySlug === 'beast-boost' && koAtkCache?.baseStats) {
+            const bs = koAtkCache.baseStats as BaseStats;
+            const statMap: [keyof StatStages, number][] = [
+              ['atk', bs.atk], ['def', bs.def], ['spa', bs.spatk], ['spd', bs.spdef], ['spe', bs.speed],
+            ];
+            boostStat = statMap.reduce((best, cur) => cur[1] > best[1] ? cur : best)[0];
+          }
+          const atkId       = currentEntry.activePokemonId.toString();
+          const atkName     = koAtkName ?? 'Pokémon';
+          const abilityName = slugToDisplayName(koAbilitySlug);
+          for (let i = 0; i < koCount; i++) {
+            moveEvents.push(`${atkName}'s ${abilityName}!`);
+            moveEvents.push(...applyStatStageEffects(stageMap, atkId, [{ stat: boostStat, stages: 1, target: 'self' }], atkName));
+            battle.markModified('statStages');
           }
         }
       }
