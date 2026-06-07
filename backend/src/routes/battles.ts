@@ -8,9 +8,55 @@ import { Item } from '../models/Item';
 import { PokedexCache } from '../models/PokedexCache';
 import { Npc } from '../models/Npc';
 import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
-import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field, Generations } from '@smogon/calc';
+import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smogon/calc';
 import { fetchSpecies } from '../lib/pokeapi';
 import { canEvolve } from '../lib/evolution';
+import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier } from '../lib/itemData';
+import {
+  GEN9,
+  slugToDisplayName,
+  toCalcWeather,
+  toCalcStatus,
+  resolveAbilitySlug,
+  applyStatStageEffects,
+} from '../lib/battleCalc';
+import {
+  StatusCondition,
+  STATUS_IMMUNITY_ABILITIES,
+  ILATE_MAP,
+  PINCH_ABILITIES,
+  WEATHER_SPEED_DOUBLERS,
+} from '../lib/abilityData';
+import {
+  WEATHER_MOVES,
+  ENTRY_ABILITY_WEATHER,
+  ENTRY_WEATHER_MESSAGES,
+} from '../lib/weatherData';
+import {
+  StatusMoveEffect,
+  STATUS_MOVES,
+  MOVE_PRIORITY,
+  FLINCH_MOVES,
+  SELF_TARGETING_MOVES,
+  CHARGE_MOVES,
+  CHARGE_MESSAGES,
+  SEMI_INVULNERABLE_MOVES,
+  StatEffect,
+  STAT_STAGE_MOVES,
+  STAT_DISPLAY_NAMES,
+  RecoveryEffect,
+  RECOVERY_MOVES,
+  CONTACT_MOVES,
+  RecoilEffect,
+  RECOIL_MOVES,
+  MultiHitEffect,
+  MULTI_HIT_MOVES,
+  getHitCount,
+  DrainEffect,
+  DRAIN_MOVES,
+  NO_TARGET_MOVE_IDS,
+  PRANKSTER_MOVES,
+} from '../lib/moveData';
 
 const router = Router();
 
@@ -88,592 +134,8 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
   await autoSkipBlockedActors(battle);
 }
 
-// ---------------------------------------------------------------------------
-// @smogon/calc helpers
-// ---------------------------------------------------------------------------
 
-const GEN9 = Generations.get(9);
 
-// Convert a PokeAPI slug to a display name suitable for @smogon/calc and
-// human-readable log strings.  "ice-beam" → "Ice Beam", "mr-mime" → "Mr Mime"
-function slugToDisplayName(slug: string): string {
-  return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
-
-// Map our battle weather strings to the values @smogon/calc expects.
-function toCalcWeather(weather: IBattle['weather']): string | undefined {
-  if (!weather) return undefined;
-  const map: Record<string, string> = {
-    rain: 'Rain', sun: 'Sun', sandstorm: 'Sand', hail: 'Hail', snow: 'Snow',
-  };
-  return map[weather];
-}
-
-// Map our statusCondition strings to the StatusName values @smogon/calc expects.
-function toCalcStatus(status: string | null | undefined): string | undefined {
-  if (!status) return undefined;
-  const map: Record<string, string> = {
-    burn: 'brn', paralysis: 'par', poison: 'psn', toxic: 'tox', sleep: 'slp', freeze: 'frz',
-  };
-  return map[status];
-}
-
-type StatusMoveEffect = {
-  status: 'burn' | 'paralysis' | 'sleep' | 'freeze' | 'poison' | 'toxic' | 'confusion';
-  chance: number; // 0–1
-};
-
-type StatusCondition = 'burn' | 'paralysis' | 'sleep' | 'freeze' | 'poison' | 'toxic' | 'confusion';
-
-// Abilities that grant immunity to one or more status conditions.
-const STATUS_IMMUNITY_ABILITIES: Record<string, StatusCondition[]> = {
-  'immunity':     ['poison', 'toxic'],
-  'insomnia':     ['sleep'],
-  'vital-spirit': ['sleep'],
-  'magma-armor':  ['freeze'],
-  'water-veil':   ['burn'],
-  'limber':       ['paralysis'],
-  'own-tempo':    ['confusion'],
-  'oblivious':    ['confusion'],
-};
-
-// Abilities that convert Normal-type moves to another type with a 1.2× power boost.
-const ILATE_MAP: Record<string, string> = {
-  'pixilate':    'Fairy',
-  'aerilate':    'Flying',
-  'refrigerate': 'Ice',
-  'galvanize':   'Electric',
-};
-
-// Abilities that double Speed in a specific weather condition.
-const WEATHER_SPEED_DOUBLERS: Record<string, string[]> = {
-  'swift-swim':  ['rain'],
-  'chlorophyll': ['sun'],
-  'sand-rush':   ['sandstorm'],
-  'slush-rush':  ['hail', 'snow'],
-};
-
-// Resolves which ability slug is active for a Pokémon given its cached ability list
-// and whether its hidden ability is toggled on.
-function resolveAbilitySlug(
-  abilities: Array<{ name: string; isHidden: boolean }>,
-  hasHiddenAbility: boolean,
-): string | null {
-  const ability = hasHiddenAbility
-    ? (abilities.find(a => a.isHidden) ?? abilities.find(a => !a.isHidden))
-    : abilities.find(a => !a.isHidden);
-  return ability?.name ?? null;
-}
-
-// Moves that inflict a status condition, either as their primary effect (chance 1)
-// or as a secondary effect on damage moves.  Keyed by PokeAPI move slug.
-const STATUS_MOVES: Record<string, StatusMoveEffect> = {
-  // Paralysis
-  'thunder-wave':  { status: 'paralysis', chance: 1 },
-  'glare':         { status: 'paralysis', chance: 1 },
-  'stun-spore':    { status: 'paralysis', chance: 1 },
-  'nuzzle':        { status: 'paralysis', chance: 1 },
-  'zap-cannon':    { status: 'paralysis', chance: 1 },
-  'body-slam':     { status: 'paralysis', chance: 0.3 },
-  'thunder':       { status: 'paralysis', chance: 0.3 },
-  'thunderbolt':   { status: 'paralysis', chance: 0.1 },
-  'discharge':     { status: 'paralysis', chance: 0.3 },
-  'spark':         { status: 'paralysis', chance: 0.3 },
-  'volt-tackle':   { status: 'paralysis', chance: 0.1 },
-  'bounce':        { status: 'paralysis', chance: 0.3 },
-  // Burn
-  'will-o-wisp':   { status: 'burn', chance: 1 },
-  'ember':         { status: 'burn', chance: 0.1 },
-  'flamethrower':  { status: 'burn', chance: 0.1 },
-  'fire-blast':    { status: 'burn', chance: 0.1 },
-  'fire-punch':    { status: 'burn', chance: 0.1 },
-  'flame-wheel':   { status: 'burn', chance: 0.1 },
-  'blaze-kick':    { status: 'burn', chance: 0.1 },
-  'heat-wave':     { status: 'burn', chance: 0.1 },
-  'sacred-fire':   { status: 'burn', chance: 0.5 },
-  'scald':         { status: 'burn', chance: 0.3 },
-  'lava-plume':    { status: 'burn', chance: 0.3 },
-  'magma-storm':   { status: 'burn', chance: 0.3 },
-  // Toxic / Poison
-  'toxic':         { status: 'toxic',  chance: 1 },
-  'poison-powder': { status: 'poison', chance: 1 },
-  'poison-gas':    { status: 'poison', chance: 1 },
-  'poison-sting':  { status: 'poison', chance: 0.3 },
-  'poison-jab':    { status: 'poison', chance: 0.3 },
-  'gunk-shot':     { status: 'poison', chance: 0.3 },
-  'cross-poison':  { status: 'poison', chance: 0.1 },
-  'sludge':        { status: 'poison', chance: 0.3 },
-  'sludge-bomb':   { status: 'poison', chance: 0.3 },
-  'sludge-wave':   { status: 'poison', chance: 0.1 },
-  // Sleep
-  'hypnosis':      { status: 'sleep', chance: 1 },
-  'sleep-powder':  { status: 'sleep', chance: 1 },
-  'spore':         { status: 'sleep', chance: 1 },
-  'lovely-kiss':   { status: 'sleep', chance: 1 },
-  'sing':          { status: 'sleep', chance: 1 },
-  'grass-whistle': { status: 'sleep', chance: 1 },
-  'dark-void':     { status: 'sleep', chance: 1 },
-  // Freeze
-  'ice-beam':      { status: 'freeze', chance: 0.1 },
-  'blizzard':      { status: 'freeze', chance: 0.1 },
-  'ice-punch':     { status: 'freeze', chance: 0.1 },
-  'freeze-dry':    { status: 'freeze', chance: 0.1 },
-  'powder-snow':   { status: 'freeze', chance: 0.1 },
-  // Confusion
-  'confuse-ray':   { status: 'confusion', chance: 1 },
-  'supersonic':    { status: 'confusion', chance: 1 },
-  'sweet-kiss':    { status: 'confusion', chance: 1 },
-  'teeter-dance':  { status: 'confusion', chance: 1 },
-  'flatter':       { status: 'confusion', chance: 1 },
-  'swagger':       { status: 'confusion', chance: 1 },
-  'dynamicpunch':  { status: 'confusion', chance: 1 },
-  'hurricane':     { status: 'confusion', chance: 0.3 },
-  'dizzy-punch':   { status: 'confusion', chance: 0.2 },
-  'confusion':     { status: 'confusion', chance: 0.1 },
-  'psybeam':       { status: 'confusion', chance: 0.1 },
-  'water-pulse':   { status: 'confusion', chance: 0.2 },
-};
-
-// Moves that change field weather.  These have no target — they affect the whole
-// battle.  The target the player submits is ignored during resolution.
-
-// Non-zero move priority values from the main series games.
-// Only moves that deviate from 0 are listed; everything else defaults to 0.
-const MOVE_PRIORITY: Record<string, number> = {
-  // +3
-  'detect': 3, 'endure': 3, 'protect': 3, 'kings-shield': 3, 'spiky-shield': 3,
-  'baneful-bunker': 3, 'obstruct': 3, 'quick-guard': 3, 'wide-guard': 3,
-  // +2
-  'extreme-speed': 2, 'feint': 2, 'first-impression': 2,
-  // +1
-  'aqua-jet': 1, 'baby-doll-eyes': 1, 'bullet-punch': 1, 'ice-shard': 1,
-  'mach-punch': 1, 'quick-attack': 1, 'shadow-sneak': 1, 'sucker-punch': 1,
-  'vacuum-wave': 1, 'water-shuriken': 1,
-  // -1
-  'vital-throw': -1,
-  // -3
-  'focus-punch': -3, 'revenge': -3, 'avalanche': -3,
-  // -4
-  'roar': -4, 'whirlwind': -4, 'dragon-tail': -4, 'circle-throw': -4,
-  // -5
-  'trick-room': -5,
-  // -6
-  'counter': -6, 'mirror-coat': -6,
-};
-
-// Moves that can cause the target to flinch (skip their turn if they haven't
-// moved yet). Keyed by PokeAPI move slug; value is flinch chance (0–1).
-const FLINCH_MOVES: Record<string, number> = {
-  'air-slash':       0.3,
-  'astonish':        0.3,
-  'bite':            0.3,
-  'bone-club':       0.1,
-  'dark-pulse':      0.2,
-  'dragon-rush':     0.2,
-  'extrasensory':    0.1,
-  'fake-out':        1.0,
-  'headbutt':        0.3,
-  'heart-stamp':     0.3,
-  'hyper-fang':      0.1,
-  'icicle-crash':    0.3,
-  'iron-head':       0.3,
-  'needle-arm':      0.3,
-  'rock-slide':      0.3,
-  'rolling-kick':    0.3,
-  'snore':           0.3,
-  'stomp':           0.3,
-  'twister':         0.2,
-  'waterfall':       0.2,
-  'zen-headbutt':    0.2,
-};
-
-type WeatherMoveEffect = {
-  weather: NonNullable<IBattle['weather']>;
-  startMessage: string;
-};
-const WEATHER_MOVES: Record<string, WeatherMoveEffect> = {
-  'sunny-day':        { weather: 'sun',       startMessage: 'The sunlight turned harsh!' },
-  'rain-dance':       { weather: 'rain',       startMessage: 'It started to rain!' },
-  'sandstorm':        { weather: 'sandstorm',  startMessage: 'A sandstorm kicked up!' },
-  'hail':             { weather: 'hail',       startMessage: 'It started to hail!' },
-  'snowscape':        { weather: 'snow',       startMessage: 'It started to snow!' },
-  'chilly-reception': { weather: 'snow',       startMessage: 'It started to snow!' },
-};
-
-// Moves that target only the user (stat boosts, recovery, etc.).
-// These require no enemy target — submitting an empty targets array is valid.
-const SELF_TARGETING_MOVES = new Set([
-  // Stat boosts
-  'swords-dance', 'calm-mind', 'nasty-plot', 'bulk-up', 'iron-defense',
-  'amnesia', 'agility', 'barrier', 'cosmic-power', 'growth', 'harden',
-  'withdraw', 'defense-curl', 'coil', 'quiver-dance', 'shift-gear',
-  'dragon-dance', 'shell-smash', 'geomancy', 'rock-polish', 'autotomize',
-  'charge', 'focus-energy', 'meditate', 'sharpen', 'work-up',
-  'double-team', 'minimize', 'acid-armor', 'clangorous-soul',
-  // Recovery
-  'recover', 'soft-boiled', 'roost', 'moonlight', 'morning-sun',
-  'synthesis', 'rest', 'slack-off', 'milk-drink', 'heal-order', 'shore-up',
-  // Other self-targeting
-  'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
-]);
-
-// Two-turn moves that require a charge turn before firing.
-// The charge condition stored on the Pokémon is `charging-<moveId>`.
-const CHARGE_MOVES = new Set([
-  'geomancy',
-  'solar-beam',
-  'fly', 'dig', 'dive', 'bounce', 'sky-attack',
-]);
-const CHARGE_MESSAGES: Record<string, string> = {
-  'geomancy':   'is absorbing power!',
-  'solar-beam': 'is absorbing sunlight!',
-  'fly':        'flew up high!',
-  'dig':        'dug a hole!',
-  'dive':       'dove underwater!',
-  'bounce':     'sprang up!',
-  'sky-attack': 'is glowing!',
-};
-// Moves that make the user semi-invulnerable during the charge turn (flavor only —
-// targeting is free-form in this app, but the volatile flags it for DM awareness).
-const SEMI_INVULNERABLE_MOVES = new Set(['fly', 'dig', 'dive', 'bounce', 'sky-attack']);
-
-// Stat stage effects for pure stat-change moves.
-// Opponent-debuff moves (growl, leer, etc.) target a foe and go through the
-// normal resolveMove path; self-boost moves are in SELF_TARGETING_MOVES.
-type StatEffect = { stat: keyof StatStages; stages: number; target: 'self' | 'foe'; chance?: number };
-
-const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
-  // ── Self-boost moves ───────────────────────────────────────────────────────
-  'swords-dance':    [{ stat: 'atk', stages: 2, target: 'self' }],
-  'nasty-plot':      [{ stat: 'spa', stages: 2, target: 'self' }],
-  'calm-mind':       [{ stat: 'spa', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
-  'bulk-up':         [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }],
-  'iron-defense':    [{ stat: 'def', stages: 2, target: 'self' }],
-  'amnesia':         [{ stat: 'spd', stages: 2, target: 'self' }],
-  'agility':         [{ stat: 'spe', stages: 2, target: 'self' }],
-  'rock-polish':     [{ stat: 'spe', stages: 2, target: 'self' }],
-  'barrier':         [{ stat: 'def', stages: 2, target: 'self' }],
-  'harden':          [{ stat: 'def', stages: 1, target: 'self' }],
-  'withdraw':        [{ stat: 'def', stages: 1, target: 'self' }],
-  'defense-curl':    [{ stat: 'def', stages: 1, target: 'self' }],
-  'acid-armor':      [{ stat: 'def', stages: 2, target: 'self' }],
-  'cosmic-power':    [{ stat: 'def', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
-  'growth':          [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'spa', stages: 1, target: 'self' }],
-  'coil':            [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }, { stat: 'acc', stages: 1, target: 'self' }],
-  'dragon-dance':    [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'spe', stages: 1, target: 'self' }],
-  'quiver-dance':    [{ stat: 'spa', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }, { stat: 'spe', stages: 1, target: 'self' }],
-  'geomancy':        [{ stat: 'spa', stages: 2, target: 'self' }, { stat: 'spd', stages: 2, target: 'self' }, { stat: 'spe', stages: 2, target: 'self' }],
-  'shell-smash':     [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }, { stat: 'atk', stages: 2, target: 'self' }, { stat: 'spa', stages: 2, target: 'self' }, { stat: 'spe', stages: 2, target: 'self' }],
-  'shift-gear':      [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'spe', stages: 2, target: 'self' }],
-  'autotomize':      [{ stat: 'spe', stages: 2, target: 'self' }],
-  'clangorous-soul': [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }, { stat: 'spa', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }, { stat: 'spe', stages: 1, target: 'self' }],
-  'work-up':         [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'spa', stages: 1, target: 'self' }],
-  'meditate':        [{ stat: 'atk', stages: 1, target: 'self' }],
-  'sharpen':         [{ stat: 'atk', stages: 1, target: 'self' }],
-  'double-team':     [{ stat: 'eva', stages: 1, target: 'self' }],
-  'minimize':        [{ stat: 'eva', stages: 2, target: 'self' }],
-  'charge':          [{ stat: 'spd', stages: 1, target: 'self' }],
-  'stockpile':       [{ stat: 'def', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
-  // ── Opponent-debuff moves ──────────────────────────────────────────────────
-  'growl':           [{ stat: 'atk', stages: -1, target: 'foe' }],
-  'tail-whip':       [{ stat: 'def', stages: -1, target: 'foe' }],
-  'leer':            [{ stat: 'def', stages: -1, target: 'foe' }],
-  'screech':         [{ stat: 'def', stages: -2, target: 'foe' }],
-  'charm':           [{ stat: 'atk', stages: -2, target: 'foe' }],
-  'feather-dance':   [{ stat: 'atk', stages: -2, target: 'foe' }],
-  'baby-doll-eyes':  [{ stat: 'atk', stages: -1, target: 'foe' }],
-  'tickle':          [{ stat: 'atk', stages: -1, target: 'foe' }, { stat: 'def', stages: -1, target: 'foe' }],
-  'tearful-look':    [{ stat: 'atk', stages: -1, target: 'foe' }, { stat: 'spa', stages: -1, target: 'foe' }],
-  'noble-roar':      [{ stat: 'atk', stages: -1, target: 'foe' }, { stat: 'spa', stages: -1, target: 'foe' }],
-  'captivate':       [{ stat: 'spa', stages: -2, target: 'foe' }],
-  'eerie-impulse':   [{ stat: 'spa', stages: -2, target: 'foe' }],
-  'fake-tears':      [{ stat: 'spd', stages: -2, target: 'foe' }],
-  'metal-sound':     [{ stat: 'spd', stages: -2, target: 'foe' }],
-  'scary-face':      [{ stat: 'spe', stages: -2, target: 'foe' }],
-  'string-shot':     [{ stat: 'spe', stages: -2, target: 'foe' }],
-  'cotton-spore':    [{ stat: 'spe', stages: -2, target: 'foe' }],
-  'sand-attack':     [{ stat: 'acc', stages: -1, target: 'foe' }],
-  'smokescreen':     [{ stat: 'acc', stages: -1, target: 'foe' }],
-  'flash':           [{ stat: 'acc', stages: -1, target: 'foe' }],
-  'kinesis':         [{ stat: 'acc', stages: -1, target: 'foe' }],
-  'sweet-scent':     [{ stat: 'eva', stages: -2, target: 'foe' }],
-  // ── Damaging moves — guaranteed self stat drop ─────────────────────────────
-  'close-combat':  [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }],
-  'superpower':    [{ stat: 'atk', stages: -1, target: 'self' }, { stat: 'def', stages: -1, target: 'self' }],
-  'overheat':      [{ stat: 'spa', stages: -2, target: 'self' }],
-  'draco-meteor':  [{ stat: 'spa', stages: -2, target: 'self' }],
-  'leaf-storm':    [{ stat: 'spa', stages: -2, target: 'self' }],
-  'psycho-boost':  [{ stat: 'spa', stages: -2, target: 'self' }],
-  'hammer-arm':    [{ stat: 'spe', stages: -1, target: 'self' }],
-  'v-create':      [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }, { stat: 'spe', stages: -1, target: 'self' }],
-  // ── Damaging moves — chance-based foe stat drop ────────────────────────────
-  'aurora-beam':   [{ stat: 'atk', stages: -1, target: 'foe', chance: 0.1 }],
-  'crunch':        [{ stat: 'def', stages: -1, target: 'foe', chance: 0.2 }],
-  'psychic':       [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
-  'shadow-ball':   [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.2 }],
-  'acid':          [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
-  'acid-spray':    [{ stat: 'spd', stages: -2, target: 'foe', chance: 1 }],
-  'bubble':        [{ stat: 'spe', stages: -1, target: 'foe', chance: 0.1 }],
-  'bubble-beam':   [{ stat: 'spe', stages: -1, target: 'foe', chance: 0.1 }],
-  'constrict':     [{ stat: 'spe', stages: -1, target: 'foe', chance: 0.1 }],
-  'icy-wind':      [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
-  'mud-shot':      [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
-  'mud-slap':      [{ stat: 'acc', stages: -1, target: 'foe', chance: 1 }],
-  'rock-smash':    [{ stat: 'def', stages: -1, target: 'foe', chance: 0.5 }],
-  'energy-ball':   [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
-  'flash-cannon':  [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
-  'luster-purge':  [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.5 }],
-  'mist-ball':     [{ stat: 'spa', stages: -1, target: 'foe', chance: 0.5 }],
-  'octazooka':     [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.5 }],
-  'muddy-water':   [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.3 }],
-  'mirror-shot':   [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.3 }],
-  // ── Damaging moves — chance-based self stat boost ──────────────────────────
-  'charge-beam':   [{ stat: 'spa', stages: 1, target: 'self', chance: 0.7 }],
-  'meteor-mash':   [{ stat: 'atk', stages: 1, target: 'self', chance: 0.2 }],
-};
-
-const STAT_DISPLAY_NAMES: Record<keyof StatStages, string> = {
-  atk: 'Attack', def: 'Defense', spa: 'Sp. Atk', spd: 'Sp. Def',
-  spe: 'Speed',  acc: 'Accuracy', eva: 'Evasiveness',
-};
-
-// Recovery moves — heal the user without targeting an enemy.
-// 'flat'    → always restores `fraction` of max HP (default 0.5)
-// 'weather' → 2/3 in sun, 1/2 with no weather, 1/4 in rain/sand/hail/snow
-// 'rest'    → full restore + inflict sleep 2 turns
-type RecoveryEffect = { type: 'flat'; fraction: number } | { type: 'weather' } | { type: 'rest' };
-
-const RECOVERY_MOVES: Record<string, RecoveryEffect> = {
-  'recover':     { type: 'flat', fraction: 0.5 },
-  'soft-boiled': { type: 'flat', fraction: 0.5 },
-  'milk-drink':  { type: 'flat', fraction: 0.5 },
-  'slack-off':   { type: 'flat', fraction: 0.5 },
-  'heal-order':  { type: 'flat', fraction: 0.5 },
-  'roost':       { type: 'flat', fraction: 0.5 },
-  'shore-up':    { type: 'flat', fraction: 0.5 },
-  'synthesis':   { type: 'weather' },
-  'moonlight':   { type: 'weather' },
-  'morning-sun': { type: 'weather' },
-  'rest':        { type: 'rest' },
-};
-
-// Physical moves that make contact and can trigger contact-based defender abilities
-// (Poison Point, Static, Flame Body, Rough Skin, Iron Barbs, Effect Spore).
-// Not exhaustive — covers the most commonly used moves in play.
-const CONTACT_MOVES = new Set([
-  // Normal
-  'scratch', 'tackle', 'pound', 'headbutt', 'body-slam', 'take-down', 'double-edge',
-  'quick-attack', 'extreme-speed', 'slam', 'strength', 'giga-impact', 'facade',
-  'return', 'frustration', 'retaliate', 'skull-bash', 'hyper-fang', 'super-fang',
-  'last-resort', 'double-hit', 'dizzy-punch', 'mega-punch', 'rage', 'rollout',
-  'stomp', 'covet', 'fake-out', 'rapid-spin', 'thrash', 'double-kick', 'triple-kick',
-  // Fighting
-  'low-kick', 'karate-chop', 'submission', 'seismic-toss', 'cross-chop', 'dynamic-punch',
-  'mach-punch', 'focus-punch', 'drain-punch', 'close-combat', 'high-jump-kick', 'jump-kick',
-  'sky-uppercut', 'force-palm', 'brick-break', 'hammer-arm', 'superpower', 'low-sweep',
-  'circle-throw', 'storm-throw', 'vital-throw', 'body-press',
-  // Flying
-  'peck', 'drill-peck', 'wing-attack', 'aerial-ace', 'brave-bird', 'sky-attack',
-  'fly', 'bounce', 'pluck', 'acrobatics', 'dual-wingbeat',
-  // Poison
-  'poison-jab', 'cross-poison', 'poison-sting', 'lunge',
-  // Ground
-  'dig', 'slash', 'high-horsepower',
-  // Rock
-  'rock-smash', 'head-smash',
-  // Bug
-  'x-scissor', 'bug-bite', 'u-turn', 'fury-cutter', 'leech-life',
-  'first-impression', 'fell-stinger',
-  // Ghost
-  'shadow-claw', 'shadow-sneak', 'lick', 'shadow-punch',
-  // Steel
-  'iron-tail', 'steel-wing', 'bullet-punch', 'meteor-mash', 'iron-head', 'smart-strike',
-  'sunsteel-strike', 'behemoth-blade', 'behemoth-bash',
-  // Fire
-  'fire-punch', 'fire-fang', 'flame-charge', 'flare-blitz', 'flame-wheel',
-  // Water
-  'waterfall', 'aqua-tail', 'liquidation', 'dive', 'aqua-jet', 'crabhammer',
-  // Electric
-  'thunder-punch', 'thunder-fang', 'spark', 'wild-charge', 'volt-tackle', 'plasma-fists',
-  // Ice
-  'ice-punch', 'ice-fang', 'ice-ball',
-  // Psychic
-  'zen-headbutt', 'psychic-fangs',
-  // Dark
-  'crunch', 'bite', 'night-slash', 'sucker-punch', 'foul-play', 'assurance',
-  'payback', 'revenge', 'spirit-break',
-  // Dragon
-  'dragon-claw', 'dragon-rush', 'outrage', 'dragon-tail', 'dual-chop', 'scale-shot',
-  // Grass
-  'vine-whip', 'leaf-blade', 'wood-hammer', 'power-whip', 'petal-dance',
-]);
-
-// Recoil moves — attacker takes damage after hitting.
-// 'damage'  → fraction of HP damage dealt to the target
-// 'max-hp'  → fraction of attacker's own max HP (Struggle)
-type RecoilEffect = { type: 'damage'; fraction: number } | { type: 'max-hp'; fraction: number };
-
-const RECOIL_MOVES: Record<string, RecoilEffect> = {
-  'take-down':    { type: 'damage', fraction: 1 / 4 },
-  'submission':   { type: 'damage', fraction: 1 / 4 },
-  'wild-charge':  { type: 'damage', fraction: 1 / 4 },
-  'head-charge':  { type: 'damage', fraction: 1 / 4 },
-  'double-edge':  { type: 'damage', fraction: 1 / 3 },
-  'brave-bird':   { type: 'damage', fraction: 1 / 3 },
-  'flare-blitz':  { type: 'damage', fraction: 1 / 3 },
-  'volt-tackle':  { type: 'damage', fraction: 1 / 3 },
-  'wood-hammer':  { type: 'damage', fraction: 1 / 3 },
-  'head-smash':   { type: 'damage', fraction: 1 / 2 },
-  'struggle':     { type: 'max-hp', fraction: 1 / 4 },
-};
-
-// Multi-hit moves — hit a fixed number of times or a random 2–5.
-type MultiHitEffect = { type: 'fixed'; count: number } | { type: 'variable' };
-
-const MULTI_HIT_MOVES: Record<string, MultiHitEffect> = {
-  // Fixed 2-hit
-  'double-kick':   { type: 'fixed', count: 2 },
-  'bonemerang':    { type: 'fixed', count: 2 },
-  'twineedle':     { type: 'fixed', count: 2 },
-  'double-hit':    { type: 'fixed', count: 2 },
-  'dual-chop':     { type: 'fixed', count: 2 },
-  'dual-wingbeat': { type: 'fixed', count: 2 },
-  'gear-grind':    { type: 'fixed', count: 2 },
-  // Variable 2–5 hit (Gen 5+ distribution: 1/3 × 2, 1/3 × 3, 1/6 × 4, 1/6 × 5)
-  'fury-attack':   { type: 'variable' },
-  'double-slap':   { type: 'variable' },
-  'comet-punch':   { type: 'variable' },
-  'fury-swipes':   { type: 'variable' },
-  'spike-cannon':  { type: 'variable' },
-  'bullet-seed':   { type: 'variable' },
-  'icicle-spear':  { type: 'variable' },
-  'rock-blast':    { type: 'variable' },
-  'arm-thrust':    { type: 'variable' },
-  'pin-missile':   { type: 'variable' },
-  'tail-slap':     { type: 'variable' },
-  'bone-rush':     { type: 'variable' },
-};
-
-function getHitCount(moveId: string): number {
-  const effect = MULTI_HIT_MOVES[moveId];
-  if (!effect) return 1;
-  if (effect.type === 'fixed') return effect.count;
-  return [2, 2, 3, 3, 4, 5][Math.floor(Math.random() * 6)];
-}
-
-// Drain moves — attacker restores HP equal to a fraction of damage dealt.
-type DrainEffect = { fraction: number };
-
-const DRAIN_MOVES: Record<string, DrainEffect> = {
-  'absorb':           { fraction: 0.5 },
-  'mega-drain':       { fraction: 0.5 },
-  'giga-drain':       { fraction: 0.5 },
-  'leech-life':       { fraction: 0.5 },
-  'horn-leech':       { fraction: 0.5 },
-  'parabolic-charge': { fraction: 0.5 },
-  'bouncy-bubble':    { fraction: 0.5 },
-  'dream-eater':      { fraction: 0.5 },
-  'draining-kiss':    { fraction: 0.75 },
-  'oblivion-wing':    { fraction: 0.75 },
-};
-
-// HP-triggered abilities that boost moves of a specific type when HP ≤ 1/3.
-// Key: PokeAPI ability slug. Value: the move type they boost (lowercase).
-const PINCH_ABILITIES: Record<string, string> = {
-  'torrent':  'water',
-  'blaze':    'fire',
-  'overgrow': 'grass',
-  'swarm':    'bug',
-};
-
-// Applies stat stage effects to a Pokémon in the battle's stage map and returns
-// turn-log narration strings. Call battle.markModified('statStages') after.
-function applyStatStageEffects(
-  stageMap:    Record<string, StatStages>,
-  pokemonId:   string,
-  effects:     StatEffect[],
-  name:        string,
-  abilitySlug?: string | null,
-): string[] {
-  if (!stageMap[pokemonId]) {
-    stageMap[pokemonId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
-  }
-  const stages = stageMap[pokemonId];
-  const events: string[] = [];
-
-  for (const effect of effects) {
-    let stageChange = effect.stages;
-    if (abilitySlug === 'contrary') stageChange = -stageChange;
-    if (abilitySlug === 'simple')   stageChange *= 2;
-
-    const current = stages[effect.stat];
-    const clamped = Math.max(-6, Math.min(6, current + stageChange));
-    const delta   = clamped - current;
-    stages[effect.stat] = clamped;
-
-    const label = STAT_DISPLAY_NAMES[effect.stat];
-    if (delta === 0) {
-      events.push(`${name}'s ${label} won't go ${stageChange > 0 ? 'any higher' : 'any lower'}!`);
-    } else {
-      const mag = Math.abs(delta) >= 3 ? 'drastically ' : Math.abs(delta) >= 2 ? 'sharply ' : '';
-      events.push(`${name}'s ${label} ${mag}${delta > 0 ? 'rose' : 'fell'}!`);
-    }
-  }
-
-  return events;
-}
-
-// All move IDs that require no enemy target selection.
-// Sent to the client via the state endpoint so the UI can skip the target picker.
-const NO_TARGET_MOVE_IDS = new Set([
-  ...Object.keys(WEATHER_MOVES),
-  ...SELF_TARGETING_MOVES,
-]);
-
-// Moves that gain +1 priority when used by a Pokémon with Prankster.
-// Derived from: pure status moves (chance === 1 in STATUS_MOVES), non-charging
-// self-targeting moves, and weather moves — all are "Status" category in PokeAPI.
-const PRANKSTER_MOVES = new Set([
-  ...Object.entries(STATUS_MOVES).filter(([, v]) => v.chance === 1).map(([k]) => k),
-  ...[...SELF_TARGETING_MOVES].filter(m => !CHARGE_MOVES.has(m)),
-  ...Object.keys(WEATHER_MOVES),
-]);
-
-// Item effects for healing and status_cure items usable in battle.
-// Mirrors the relevant entries in items.ts ITEM_EFFECTS.
-type BattleItemEffect =
-  | { kind: 'hp_flat';      amount: number }
-  | { kind: 'hp_full' }
-  | { kind: 'hp_full_cure' }
-  | { kind: 'revive';       amount: 'half' | 'full' }
-  | { kind: 'status_cure';  cures: string[] | 'all' };
-
-const BATTLE_ITEM_EFFECTS: Record<string, BattleItemEffect> = {
-  'potion':         { kind: 'hp_flat',     amount: 20 },
-  'super-potion':   { kind: 'hp_flat',     amount: 60 },
-  'hyper-potion':   { kind: 'hp_flat',     amount: 120 },
-  'max-potion':     { kind: 'hp_full' },
-  'full-restore':   { kind: 'hp_full_cure' },
-  'revive':         { kind: 'revive',      amount: 'half' },
-  'max-revive':     { kind: 'revive',      amount: 'full' },
-  'oran-berry':     { kind: 'hp_flat',     amount: 10 },
-  'sitrus-berry':   { kind: 'hp_flat',     amount: 25 },
-  'antidote':       { kind: 'status_cure', cures: ['poison', 'toxic'] },
-  'parlyz-heal':    { kind: 'status_cure', cures: ['paralysis'] },
-  'burn-heal':      { kind: 'status_cure', cures: ['burn'] },
-  'ice-heal':       { kind: 'status_cure', cures: ['freeze'] },
-  'awakening':      { kind: 'status_cure', cures: ['sleep'] },
-  'full-heal':      { kind: 'status_cure', cures: 'all' },
-  'cheri-berry':    { kind: 'status_cure', cures: ['paralysis'] },
-  'chesto-berry':   { kind: 'status_cure', cures: ['sleep'] },
-  'pecha-berry':    { kind: 'status_cure', cures: ['poison', 'toxic'] },
-  'rawst-berry':    { kind: 'status_cure', cures: ['burn'] },
-  'aspear-berry':   { kind: 'status_cure', cures: ['freeze'] },
-  'lum-berry':      { kind: 'status_cure', cures: 'all' },
-  'poke-flute':     { kind: 'status_cure', cures: ['sleep'] },
-  'blue-flute':     { kind: 'status_cure', cures: ['sleep'] },
-  'green-flute':    { kind: 'status_cure', cures: ['sleep'] },
-};
 
 // Checks whether a Pokémon is blocked by its status condition this turn.
 // Handles the sleep counter (decrement/wake-up), freeze thaw roll (20%),
@@ -837,22 +299,6 @@ async function resolveItemAction(entry: TurnQueueEntry): Promise<string[]> {
 // Resolves a switch action: recalls the outgoing Pokémon (clearing its volatile
 // statuses), sets the incoming Pokémon as active, and adds it to usedPokemonIds.
 // Returns turn-log event strings.
-// Abilities that set field weather when the Pokémon enters.
-// Ability-set weather is indefinite (weatherTurnsRemaining = null).
-const ENTRY_ABILITY_WEATHER: Partial<Record<string, NonNullable<IBattle['weather']>>> = {
-  'drought':      'sun',
-  'drizzle':      'rain',
-  'sand-stream':  'sandstorm',
-  'snow-warning': 'snow',
-};
-
-const ENTRY_WEATHER_MESSAGES: Record<NonNullable<IBattle['weather']>, string> = {
-  sun:       'The sunlight turned harsh!',
-  rain:      'It started to rain!',
-  sandstorm: 'A sandstorm kicked up!',
-  hail:      'It started to hail!',
-  snow:      'It started to snow!',
-};
 
 // Fires when any Pokémon is sent onto the field (send-out, dm-send-out, mid-battle switch).
 // Handles Intimidate and weather-setting abilities. Returns turn-log event strings.
@@ -1041,22 +487,6 @@ async function resolveSwitch(
 // Catch mechanics
 // ---------------------------------------------------------------------------
 
-// Static ball catch-rate multipliers. Context-dependent balls (quick, timer,
-// nest, net) are computed at resolution time using battle/Pokémon state.
-const BALL_MODIFIERS: Record<string, number> = {
-  'ultra-ball':  2.0,
-  'great-ball':  1.5,
-  'dive-ball':   2.0,
-  'dusk-ball':   2.0,
-  'dream-ball':  4.0,
-  'beast-ball':  0.1,
-};
-
-function statusCatchModifier(status: string | null): number {
-  if (status === 'sleep' || status === 'freeze') return 2.5;
-  if (['paralysis', 'burn', 'poison', 'toxic'].includes(status ?? '')) return 1.5;
-  return 1.0;
-}
 
 async function resolveCatchAction(
   battle: HydratedDocument<IBattle>,

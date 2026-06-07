@@ -112,3 +112,63 @@ const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
 export function getPocket(itemId: string): ItemPocket | null {
   return ITEM_POCKET_MAP[itemId] ?? null;
 }
+
+// ---------------------------------------------------------------------------
+// Battle item effects
+// Mirrors the relevant entries in items.ts ITEM_EFFECTS.
+// ---------------------------------------------------------------------------
+
+export type BattleItemEffect =
+  | { kind: 'hp_flat';      amount: number }
+  | { kind: 'hp_full' }
+  | { kind: 'hp_full_cure' }
+  | { kind: 'revive';       amount: 'half' | 'full' }
+  | { kind: 'status_cure';  cures: string[] | 'all' };
+
+export const BATTLE_ITEM_EFFECTS: Record<string, BattleItemEffect> = {
+  'potion':         { kind: 'hp_flat',     amount: 20 },
+  'super-potion':   { kind: 'hp_flat',     amount: 60 },
+  'hyper-potion':   { kind: 'hp_flat',     amount: 120 },
+  'max-potion':     { kind: 'hp_full' },
+  'full-restore':   { kind: 'hp_full_cure' },
+  'revive':         { kind: 'revive',      amount: 'half' },
+  'max-revive':     { kind: 'revive',      amount: 'full' },
+  'oran-berry':     { kind: 'hp_flat',     amount: 10 },
+  'sitrus-berry':   { kind: 'hp_flat',     amount: 25 },
+  'antidote':       { kind: 'status_cure', cures: ['poison', 'toxic'] },
+  'parlyz-heal':    { kind: 'status_cure', cures: ['paralysis'] },
+  'burn-heal':      { kind: 'status_cure', cures: ['burn'] },
+  'ice-heal':       { kind: 'status_cure', cures: ['freeze'] },
+  'awakening':      { kind: 'status_cure', cures: ['sleep'] },
+  'full-heal':      { kind: 'status_cure', cures: 'all' },
+  'cheri-berry':    { kind: 'status_cure', cures: ['paralysis'] },
+  'chesto-berry':   { kind: 'status_cure', cures: ['sleep'] },
+  'pecha-berry':    { kind: 'status_cure', cures: ['poison', 'toxic'] },
+  'rawst-berry':    { kind: 'status_cure', cures: ['burn'] },
+  'aspear-berry':   { kind: 'status_cure', cures: ['freeze'] },
+  'lum-berry':      { kind: 'status_cure', cures: 'all' },
+  'poke-flute':     { kind: 'status_cure', cures: ['sleep'] },
+  'blue-flute':     { kind: 'status_cure', cures: ['sleep'] },
+  'green-flute':    { kind: 'status_cure', cures: ['sleep'] },
+};
+
+// ---------------------------------------------------------------------------
+// Catch mechanics
+// ---------------------------------------------------------------------------
+
+// Static ball catch-rate multipliers. Context-dependent balls (quick, timer,
+// nest, net) are computed at resolution time using battle/Pokémon state.
+export const BALL_MODIFIERS: Record<string, number> = {
+  'ultra-ball':  2.0,
+  'great-ball':  1.5,
+  'dive-ball':   2.0,
+  'dusk-ball':   2.0,
+  'dream-ball':  4.0,
+  'beast-ball':  0.1,
+};
+
+export function statusCatchModifier(status: string | null): number {
+  if (status === 'sleep' || status === 'freeze') return 2.5;
+  if (['paralysis', 'burn', 'poison', 'toxic'].includes(status ?? '')) return 1.5;
+  return 1.0;
+}
