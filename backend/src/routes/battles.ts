@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import mongoose, { HydratedDocument } from 'mongoose';
+import { requireDm } from '../middleware/auth';
 import { Battle, IBattle, TurnQueueEntry, StatStages } from '../models/Battle';
 import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
@@ -14,6 +15,7 @@ import { canEvolve } from '../lib/evolution';
 import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier } from '../lib/itemData';
 import {
   GEN9,
+  type CachedAbility,
   slugToDisplayName,
   toCalcWeather,
   toCalcStatus,
@@ -60,6 +62,18 @@ import {
 
 const router = Router();
 
+// Finds or creates the log entry for the current turn and appends events to it.
+function appendToLog(battle: HydratedDocument<IBattle>, ...events: string[]): void {
+  if (events.length === 0) return;
+  let entry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+  if (!entry) {
+    battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+    entry = battle.turnLog[battle.turnLog.length - 1];
+  }
+  for (const ev of events) entry.events.push(ev);
+  battle.markModified('turnLog');
+}
+
 // ---------------------------------------------------------------------------
 // Helper: after every move submission, check whether every actor that has an
 // active Pokémon has now submitted. If so, sort the turnQueue by effective
@@ -84,7 +98,6 @@ async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void>
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
   const pokemonMap = new Map(pokemons.map(p => [p._id.toString(), p]));
 
-  type CachedAbility = { name: string; isHidden: boolean };
   const withSpeed = battle.turnQueue.map(entry => {
     const poke  = pokemonMap.get(entry.activePokemonId.toString());
     const cache = poke ? cacheMap.get(poke.speciesId) : null;
@@ -312,7 +325,6 @@ async function applyEntryAbilities(
   const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name abilities').lean();
   if (!cache) return [];
 
-  type CachedAbility = { name: string; isHidden: boolean };
   const abilities = (cache.abilities as CachedAbility[]) ?? [];
   const ability   = (poke.hasHiddenAbility as boolean)
     ? (abilities.find(a => a.isHidden) ?? abilities.find(a => !a.isHidden))
@@ -381,7 +393,6 @@ async function applySwitchOutAbilities(
 ): Promise<string[]> {
   if (!outgoing || !outCache) return [];
 
-  type CachedAbility = { name: string; isHidden: boolean };
   const abilitySlug = resolveAbilitySlug(
     (outCache.abilities as CachedAbility[]) ?? [],
     (outgoing.hasHiddenAbility as boolean) ?? false,
@@ -633,15 +644,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
     // Item actions are fully specified at submission time — auto-resolve without client input.
     if (entry.actionType === 'item') {
       const itemEvents = await resolveItemAction(entry as unknown as TurnQueueEntry);
-      if (itemEvents.length > 0) {
-        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-        if (!logEntry) {
-          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-          logEntry = battle.turnLog[battle.turnLog.length - 1];
-        }
-        for (const ev of itemEvents) logEntry.events.push(ev);
-        battle.markModified('turnLog');
-      }
+      appendToLog(battle, ...itemEvents);
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       continue;
@@ -650,27 +653,11 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
     // Catch actions are fully specified at submission time — auto-resolve, then check if battle ended.
     if (entry.actionType === 'catch') {
       const catchEvents = await resolveCatchAction(battle, entry as unknown as TurnQueueEntry);
-      if (catchEvents.length > 0) {
-        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-        if (!logEntry) {
-          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-          logEntry = battle.turnLog[battle.turnLog.length - 1];
-        }
-        for (const ev of catchEvents) logEntry.events.push(ev);
-        battle.markModified('turnLog');
-      }
+      appendToLog(battle, ...catchEvents);
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       const endEvents = await checkBattleEnd(battle);
-      if (endEvents.length > 0) {
-        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-        if (!logEntry) {
-          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-          logEntry = battle.turnLog[battle.turnLog.length - 1];
-        }
-        for (const ev of endEvents) logEntry.events.push(ev);
-        battle.markModified('turnLog');
-      }
+      appendToLog(battle, ...endEvents);
       if (battle.status === 'complete') break;
       continue;
     }
@@ -680,13 +667,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
       const poke  = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
       const cache = poke ? await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean() : null;
       const name  = poke?.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
-      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-      if (!logEntry) {
-        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-        logEntry = battle.turnLog[battle.turnLog.length - 1];
-      }
-      logEntry.events.push(`${name} dashes away to reposition!`);
-      battle.markModified('turnLog');
+      appendToLog(battle, `${name} dashes away to reposition!`);
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       continue;
@@ -695,15 +676,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
     // Switch actions are fully specified at submission time — auto-resolve without client input.
     if (entry.actionType === 'switch') {
       const switchEvents = await resolveSwitch(battle, entry as unknown as TurnQueueEntry);
-      if (switchEvents.length > 0) {
-        let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-        if (!logEntry) {
-          battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-          logEntry = battle.turnLog[battle.turnLog.length - 1];
-        }
-        for (const ev of switchEvents) logEntry.events.push(ev);
-        battle.markModified('turnLog');
-      }
+      appendToLog(battle, ...switchEvents);
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       continue;
@@ -726,13 +699,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
     if (entry.flinched) {
       const flinchCache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
       const flinchName  = poke.nickname ?? (flinchCache ? slugToDisplayName(flinchCache.name as string) : 'Pokémon');
-      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-      if (!logEntry) {
-        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-        logEntry = battle.turnLog[battle.turnLog.length - 1];
-      }
-      logEntry.events.push(`${flinchName} flinched and couldn't move!`);
-      battle.markModified('turnLog');
+      appendToLog(battle, `${flinchName} flinched and couldn't move!`);
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       continue;
@@ -751,15 +718,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
     );
 
     // Log events before the break check — wake-up and thaw emit events with blocked:false
-    if (events.length > 0) {
-      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-      if (!logEntry) {
-        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-        logEntry = battle.turnLog[battle.turnLog.length - 1];
-      }
-      for (const event of events) logEntry.events.push(event);
-      battle.markModified('turnLog');
-    }
+    appendToLog(battle, ...events);
 
     if (!blocked) break; // this actor moves normally — stop skipping
 
@@ -793,7 +752,6 @@ async function checkConfusion(
   const displayName = poke.nickname ?? (cache ? slugToDisplayName(cache.name as string) : 'Pokémon');
 
   // If the Pokémon has an immunity ability, snap it out immediately rather than rolling the 50% check.
-  type CachedAbility = { name: string; isHidden: boolean };
   const abilitySlug = resolveAbilitySlug(
     (cache?.abilities as CachedAbility[]) ?? [],
     poke.hasHiddenAbility as boolean,
@@ -866,7 +824,6 @@ async function applyStatusEffect(
   );
   if (isImmune) return [];
 
-  type CachedAbility = { name: string; isHidden: boolean };
   const abilitySlug = resolveAbilitySlug(
     (cache?.abilities as CachedAbility[]) ?? [],
     target.hasHiddenAbility as boolean,
@@ -949,7 +906,6 @@ async function resolveMove(
 
   // First non-hidden ability from each species cache, converted to the display
   // name format @smogon/calc expects ("speed-boost" → "Speed Boost").
-  type CachedAbility = { name: string; isHidden: boolean };
   const attackerAbilities = (attackerCache.abilities as CachedAbility[]) ?? [];
   const targetAbilities   = (targetCache.abilities   as CachedAbility[]) ?? [];
   const attackerAbility = attacker.hasHiddenAbility
@@ -1304,7 +1260,6 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       : [];
     const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
 
-    type CachedAbility = { name: string; isHidden: boolean };
 
     // Track running HP so stacked end-of-round damage sources don't overwrite each other.
     const runningHp = new Map(activePokemons.map(p => [p._id.toString(), p.currentHp]));
@@ -1487,15 +1442,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
     }
 
 
-    if (allEvents.length > 0) {
-      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-      if (!logEntry) {
-        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-        logEntry = battle.turnLog[battle.turnLog.length - 1];
-      }
-      for (const event of allEvents) logEntry.events.push(event);
-      battle.markModified('turnLog');
-    }
+    appendToLog(battle, ...allEvents);
   }
 
   // --- Weather countdown ---
@@ -1514,13 +1461,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       battle.weather               = null;
       battle.weatherTurnsRemaining = null;
 
-      let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-      if (!logEntry) {
-        battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-        logEntry = battle.turnLog[battle.turnLog.length - 1];
-      }
-      logEntry.events.push(endMessage);
-      battle.markModified('turnLog');
+      appendToLog(battle, endMessage);
     } else {
       battle.weatherTurnsRemaining = newTurns;
     }
@@ -1529,16 +1470,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
   // Detect faints and check for battle end after end-of-round damage
   const eorFaintEvents = await applyFaints(battle);
   const eorEndEvents   = await checkBattleEnd(battle);
-  if (eorFaintEvents.length > 0 || eorEndEvents.length > 0) {
-    let eorLog = battle.turnLog.find(t => t.turn === battle.turnNumber);
-    if (!eorLog) {
-      battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-      eorLog = battle.turnLog[battle.turnLog.length - 1];
-    }
-    for (const ev of eorFaintEvents) eorLog.events.push(ev);
-    for (const ev of eorEndEvents)   eorLog.events.push(ev);
-    battle.markModified('turnLog');
-  }
+  appendToLog(battle, ...eorFaintEvents, ...eorEndEvents);
 
   // Hold at end_of_round so the DM can read the log before advancing.
   // Only park here if the battle is still active — if checkBattleEnd ended it, leave it complete.
@@ -1740,13 +1672,7 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 // DM only — activates a waiting battle.
 // Changes status from 'waiting' → 'active' and sets turnNumber to 1.
 // ---------------------------------------------------------------------------
-router.post('/:id/start', async (req: Request, res: Response): Promise<void> => {
-  const { role } = req.user!;
-  if (role !== 'dm' && role !== 'admin') {
-    res.status(403).json({ data: null, error: 'DM only' });
-    return;
-  }
-
+router.post('/:id/start', requireDm, async (req: Request, res: Response): Promise<void> => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
     res.status(400).json({ data: null, error: 'Invalid battle ID' });
     return;
@@ -1855,15 +1781,7 @@ router.post('/:id/send-out', async (req: Request, res: Response): Promise<void> 
   }
 
   const entryEvents = await applyEntryAbilities(battle, pokeId, 'player');
-  if (entryEvents.length > 0) {
-    let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-    if (!logEntry) {
-      battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-      logEntry = battle.turnLog[battle.turnLog.length - 1];
-    }
-    for (const ev of entryEvents) logEntry.events.push(ev);
-    battle.markModified('turnLog');
-  }
+  appendToLog(battle, ...entryEvents);
 
   battle.lastUpdatedAt = new Date();
   await battle.save();
@@ -1876,13 +1794,7 @@ router.post('/:id/send-out', async (req: Request, res: Response): Promise<void> 
 // DM only — sets the active Pokémon for an NPC slot on the enemy side.
 // Body: { npcId: string, pokemonId: string }
 // ---------------------------------------------------------------------------
-router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<void> => {
-  const { role } = req.user!;
-  if (role !== 'dm' && role !== 'admin') {
-    res.status(403).json({ data: null, error: 'DM only' });
-    return;
-  }
-
+router.post('/:id/dm-send-out', requireDm, async (req: Request, res: Response): Promise<void> => {
   const { npcId, pokemonId, slotIndex = 0 } = req.body as {
     npcId: string;
     pokemonId: string;
@@ -1961,15 +1873,7 @@ router.post('/:id/dm-send-out', async (req: Request, res: Response): Promise<voi
   npcEntry.activePokemonId = pokeId;
 
   const npcEntryEvents = await applyEntryAbilities(battle, pokeId, 'enemy');
-  if (npcEntryEvents.length > 0) {
-    let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-    if (!logEntry) {
-      battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-      logEntry = battle.turnLog[battle.turnLog.length - 1];
-    }
-    for (const ev of npcEntryEvents) logEntry.events.push(ev);
-    battle.markModified('turnLog');
-  }
+  appendToLog(battle, ...npcEntryEvents);
 
   battle.lastUpdatedAt = new Date();
   await battle.save();
@@ -2257,13 +2161,7 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
 // Body (move):   { npcId, moveId }
 // Body (switch): { npcId, actionType: 'switch', switchToPokemonId }
 // ---------------------------------------------------------------------------
-router.post('/:id/dm-submit-move', async (req: Request, res: Response): Promise<void> => {
-  const { role } = req.user!;
-  if (role !== 'dm' && role !== 'admin') {
-    res.status(403).json({ data: null, error: 'DM only' });
-    return;
-  }
-
+router.post('/:id/dm-submit-move', requireDm, async (req: Request, res: Response): Promise<void> => {
   const { npcId, moveId, actionType = 'move', switchToPokemonId, activePokemonId: slotPokemonId } = req.body as {
     npcId: string;
     moveId?: string;
@@ -2687,7 +2585,6 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
         if (statEffects) {
           const selfEffects = statEffects.filter(e => e.target === 'self');
           if (selfEffects.length > 0) {
-            type CachedAbility   = { name: string; isHidden: boolean };
             const stageMap       = battle.statStages as Record<string, StatStages>;
             const atkAbilitySlug = attacker && atkCache
               ? resolveAbilitySlug((atkCache.abilities as CachedAbility[]) ?? [], attacker.hasHiddenAbility as boolean)
@@ -2748,7 +2645,6 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
         : null;
 
       // Resolve attacker ability once — used for Serene Grace, Contrary/Simple, type-changing, etc.
-      type CachedAbility = { name: string; isHidden: boolean };
       const attackerAbilitySlug = atkSnap && atkSnapCache
         ? resolveAbilitySlug((atkSnapCache.abilities as CachedAbility[]) ?? [], atkSnap.hasHiddenAbility ?? false)
         : null;
@@ -2835,7 +2731,6 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
 
         // Anger Point: if any hit was a critical hit, the defender's Atk jumps to +6
         if (anyCrit) {
-          type CachedAbility = { name: string; isHidden: boolean };
           const apTgt   = await Pokemon.findById(targetId, 'nickname speciesId hasHiddenAbility').lean();
           const apCache = apTgt ? await PokedexCache.findOne({ pokeApiId: apTgt.speciesId }, 'name abilities').lean() : null;
           const apAbility = apTgt && apCache
@@ -2862,7 +2757,6 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
         if (statEffects) {
           const foeEffects = statEffects.filter(e => e.target === 'foe' && Math.random() < (sereneGrace ? Math.min(1, (e.chance ?? 1) * 2) : (e.chance ?? 1)));
           if (foeEffects.length > 0) {
-            type CachedAbility = { name: string; isHidden: boolean };
             const tgt        = await Pokemon.findById(targetId, 'nickname speciesId hasHiddenAbility').lean();
             const tgtCache   = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name abilities').lean() : null;
             const tgtName    = tgt?.nickname ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'Pokémon');
@@ -2944,7 +2838,6 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
             const defCache = await PokedexCache.findOne(
               { pokeApiId: defPoke.speciesId }, 'name abilities baseStats',
             ).lean();
-            type CachedAbility = { name: string; isHidden: boolean };
             const defAbilitySlug = resolveAbilitySlug(
               (defCache?.abilities as CachedAbility[]) ?? [],
               defPoke.hasHiddenAbility as boolean,
@@ -2998,7 +2891,6 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       // On-KO stat boosts: Moxie (+1 Atk) and Beast Boost (+1 highest base stat)
       const koCount = targets.filter(id => (targetHpMap.get(id) ?? 1) <= 0).length;
       if (koCount > 0) {
-        type CachedAbility = { name: string; isHidden: boolean };
         let koAbilitySlug  = attackerAbilitySlug;
         let koAtkCache: { name?: unknown; baseStats?: unknown; abilities?: unknown } | null = atkSnapCache;
         let koAtkName      = atkSnap
@@ -3051,22 +2943,12 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
   // Mark the entry resolved and write events to the turn log
   battle.turnQueue[idx].resolved = true;
 
-  let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-  if (!logEntry) {
-    battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-    logEntry = battle.turnLog[battle.turnLog.length - 1];
-  }
-  for (const event of moveEvents) {
-    logEntry.events.push(event);
-  }
+  appendToLog(battle, ...moveEvents);
 
   // Detect faints caused by this move and check whether the battle has ended
   const faintEvents = await applyFaints(battle);
   const endEvents   = await checkBattleEnd(battle);
-  for (const ev of faintEvents) logEntry.events.push(ev);
-  for (const ev of endEvents)   logEntry.events.push(ev);
-
-  battle.markModified('turnLog');
+  appendToLog(battle, ...faintEvents, ...endEvents);
 
   battle.currentTargetIndex = idx + 1;
   // Skip further resolution if the battle ended mid-round
@@ -3089,13 +2971,7 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
 // Clears the turnQueue, increments turnNumber, and resets phase to
 // 'move_submission' so the next round can begin.
 // ---------------------------------------------------------------------------
-router.post('/:id/advance-round', async (req: Request, res: Response): Promise<void> => {
-  const { role } = req.user!;
-  if (role !== 'dm' && role !== 'admin') {
-    res.status(403).json({ data: null, error: 'DM only' });
-    return;
-  }
-
+router.post('/:id/advance-round', requireDm, async (req: Request, res: Response): Promise<void> => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
     res.status(400).json({ data: null, error: 'Invalid battle ID' });
     return;
@@ -3137,13 +3013,7 @@ router.post('/:id/advance-round', async (req: Request, res: Response): Promise<v
 // Body: { weather: 'rain'|'sun'|'sandstorm'|'hail'|'snow'|null, turnsRemaining?: number|null }
 // turnsRemaining null means indefinite (no countdown).
 // ---------------------------------------------------------------------------
-router.post('/:id/weather', async (req: Request, res: Response): Promise<void> => {
-  const { role } = req.user!;
-  if (role !== 'dm' && role !== 'admin') {
-    res.status(403).json({ data: null, error: 'DM only' });
-    return;
-  }
-
+router.post('/:id/weather', requireDm, async (req: Request, res: Response): Promise<void> => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
     res.status(400).json({ data: null, error: 'Invalid battle ID' });
     return;
@@ -3188,13 +3058,7 @@ router.post('/:id/weather', async (req: Request, res: Response): Promise<void> =
     ? `The DM set the weather to ${WEATHER_DISPLAY[weather]}!`
     : 'The weather was cleared by the DM.';
 
-  let logEntry = battle.turnLog.find(t => t.turn === battle.turnNumber);
-  if (!logEntry) {
-    battle.turnLog.push({ turn: battle.turnNumber, events: [] });
-    logEntry = battle.turnLog[battle.turnLog.length - 1];
-  }
-  logEntry.events.push(logMessage);
-  battle.markModified('turnLog');
+  appendToLog(battle, logMessage);
 
   battle.lastUpdatedAt = new Date();
   await battle.save();
@@ -3206,13 +3070,7 @@ router.post('/:id/weather', async (req: Request, res: Response): Promise<void> =
 // DELETE /api/battles/:id
 // DM only — permanently deletes a battle.
 // ---------------------------------------------------------------------------
-router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
-  const { role } = req.user!;
-  if (role !== 'dm' && role !== 'admin') {
-    res.status(403).json({ data: null, error: 'DM only' });
-    return;
-  }
-
+router.delete('/:id', requireDm, async (req: Request, res: Response): Promise<void> => {
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
     res.status(400).json({ data: null, error: 'Invalid battle ID' });
     return;

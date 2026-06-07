@@ -4,6 +4,8 @@ import { StatEffect, STAT_DISPLAY_NAMES } from './moveData';
 
 export const GEN9 = Generations.get(9);
 
+export type CachedAbility = { name: string; isHidden: boolean };
+
 // Convert a PokeAPI slug to a display name. "ice-beam" → "Ice Beam"
 export function slugToDisplayName(slug: string): string {
   return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
@@ -30,7 +32,7 @@ export function toCalcStatus(status: string | null | undefined): string | undefi
 // Resolves which ability slug is active given a species' ability list and the
 // hidden-ability toggle. Returns null if no abilities are cached.
 export function resolveAbilitySlug(
-  abilities: Array<{ name: string; isHidden: boolean }>,
+  abilities: CachedAbility[],
   hasHiddenAbility: boolean,
 ): string | null {
   const ability = hasHiddenAbility
