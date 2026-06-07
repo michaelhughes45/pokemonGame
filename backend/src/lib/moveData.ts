@@ -137,8 +137,21 @@ export const SELF_TARGETING_MOVES = new Set([
   'recover', 'soft-boiled', 'roost', 'moonlight', 'morning-sun',
   'synthesis', 'rest', 'slack-off', 'milk-drink', 'heal-order', 'shore-up',
   // Other self-targeting
-  'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
+  'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile', 'curse',
+  // Protect family
+  'protect', 'detect', 'kings-shield', 'spiky-shield', 'baneful-bunker', 'obstruct',
 ]);
+
+// Maps each protect-family move to the volatile condition it pushes.
+// The condition name encodes which variant was used so the hit loop can apply the correct contact side-effect.
+export const PROTECT_VOLATILE: Record<string, string> = {
+  'protect':        'protecting',
+  'detect':         'protecting',
+  'kings-shield':   'protecting-kings-shield',
+  'spiky-shield':   'protecting-spiky-shield',
+  'baneful-bunker': 'protecting-baneful-bunker',
+  'obstruct':       'protecting-obstruct',
+};
 
 // Two-turn moves that require a charge turn before firing.
 export const CHARGE_MOVES = new Set([
@@ -194,6 +207,8 @@ export const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'minimize':        [{ stat: 'eva', stages: 2, target: 'self' }],
   'charge':          [{ stat: 'spd', stages: 1, target: 'self' }],
   'stockpile':       [{ stat: 'def', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
+  // Curse: non-Ghost variant (+1 Atk, +1 Def, −1 Spe). Ghost variant is handled separately in battles.ts.
+  'curse':           [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }, { stat: 'spe', stages: -1, target: 'self' }],
   // ── Opponent-debuff moves ──────────────────────────────────────────────────
   'growl':           [{ stat: 'atk', stages: -1, target: 'foe' }],
   'tail-whip':       [{ stat: 'def', stages: -1, target: 'foe' }],
@@ -217,6 +232,9 @@ export const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'flash':           [{ stat: 'acc', stages: -1, target: 'foe' }],
   'kinesis':         [{ stat: 'acc', stages: -1, target: 'foe' }],
   'sweet-scent':     [{ stat: 'eva', stages: -2, target: 'foe' }],
+  // ── Confusion + stat-boost moves (confusion handled by STATUS_MOVES) ─────────
+  'swagger':         [{ stat: 'atk', stages: 2, target: 'foe' }],
+  'flatter':         [{ stat: 'spa', stages: 1, target: 'foe' }],
   // ── Damaging moves — guaranteed self stat drop ─────────────────────────────
   'close-combat':  [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }],
   'superpower':    [{ stat: 'atk', stages: -1, target: 'self' }, { stat: 'def', stages: -1, target: 'self' }],

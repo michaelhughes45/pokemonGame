@@ -49,6 +49,7 @@ import {
   RecoveryEffect,
   RECOVERY_MOVES,
   CONTACT_MOVES,
+  PROTECT_VOLATILE,
   RecoilEffect,
   RECOIL_MOVES,
   MultiHitEffect,
@@ -902,7 +903,9 @@ async function resolveMove(
     };
   }
 
-  const isCrit = Math.random() < 1 / 24; // Gen 6+ base crit rate
+  const attackerVolatiles = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+  const hasFocusEnergy    = attackerVolatiles.some(v => v.condition === 'focus-energy');
+  const isCrit = Math.random() < (hasFocusEnergy ? 1 / 6 : 1 / 24); // Gen 6+ base; Focus Energy raises to 1/6
 
   // First non-hidden ability from each species cache, converted to the display
   // name format @smogon/calc expects ("speed-boost" → "Speed Boost").
@@ -1351,12 +1354,15 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       }
     }
 
-    // Clear roosting volatile — only lasts until end of the round it was used
+    // Clear single-turn volatiles: Roost (Flying removal), Endure (HP clamp), and all Protect variants.
+    // These are only valid for the turn they were used and must not carry into the next round.
     for (const poke of activePokemons) {
-      const hasRoosting = ((poke.volatileStatus as Array<{ condition: string }>) ?? [])
-        .some(v => v.condition === 'roosting');
-      if (hasRoosting) {
-        await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: 'roosting' } } });
+      const vol     = (poke.volatileStatus as Array<{ condition: string }>) ?? [];
+      const toClear = vol
+        .filter(v => v.condition === 'roosting' || v.condition === 'enduring' || v.condition.startsWith('protecting'))
+        .map(v => v.condition);
+      if (toClear.length > 0) {
+        await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: { $in: toClear } } } });
       }
     }
 
@@ -1441,6 +1447,83 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       }
     }
 
+    // --- Volatile end-of-round effects (Ingrain, Aqua Ring, Leech Seed, Cursed) ---
+    // Build a set of active IDs per side for Leech Seed restore targeting.
+    const playerActiveIds = new Set(battle.playerSide.map(e => e.activePokemonId?.toString()).filter(Boolean));
+    const enemyActiveIds  = new Set(battle.enemySide.map(e => e.activePokemonId?.toString()).filter(Boolean));
+
+    for (const poke of activePokemons) {
+      const cache    = cacheMap.get(poke.speciesId);
+      if (!cache) continue;
+      const maxHp    = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp;
+      const pokeName = poke.nickname ?? slugToDisplayName(cache.name as string);
+      const pokeId   = poke._id.toString();
+      const volStatus = (poke.volatileStatus as Array<{ condition: string }>) ?? [];
+
+      // Ingrain: heal 1/16 maxHp per round
+      if (volStatus.some(v => v.condition === 'ingrain')) {
+        const curHp  = runningHp.get(pokeId) ?? poke.currentHp;
+        if (curHp < maxHp) {
+          const healAmt = Math.max(1, Math.floor(maxHp / 16));
+          const newHp   = Math.min(maxHp, curHp + healAmt);
+          runningHp.set(pokeId, newHp);
+          await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+          allEvents.push(`${pokeName}'s Ingrain restored ${newHp - curHp} HP!`);
+        }
+      }
+
+      // Aqua Ring: heal 1/16 maxHp per round
+      if (volStatus.some(v => v.condition === 'aqua-ring')) {
+        const curHp  = runningHp.get(pokeId) ?? poke.currentHp;
+        if (curHp < maxHp) {
+          const healAmt = Math.max(1, Math.floor(maxHp / 16));
+          const newHp   = Math.min(maxHp, curHp + healAmt);
+          runningHp.set(pokeId, newHp);
+          await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+          allEvents.push(`${pokeName}'s Aqua Ring restored ${newHp - curHp} HP!`);
+        }
+      }
+
+      // Leech Seed: drain 1/8 maxHp, restore to the first opposing active Pokémon with HP > 0
+      if (volStatus.some(v => v.condition === 'leech-seed')) {
+        const curHp = runningHp.get(pokeId) ?? poke.currentHp;
+        const drain = Math.max(1, Math.floor(maxHp / 8));
+        const newHp = Math.max(0, curHp - drain);
+        runningHp.set(pokeId, newHp);
+        await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+        allEvents.push(`${pokeName} had its energy drained by Leech Seed! (${drain} damage)`);
+
+        // Restore to the first active Pokémon on the opposing side that still has HP
+        const opposingIds = playerActiveIds.has(pokeId) ? enemyActiveIds : playerActiveIds;
+        const recipientId = [...opposingIds].find(id => id && (runningHp.get(id) ?? 0) > 0);
+        if (recipientId) {
+          const recipient  = activePokemons.find(p => p._id.toString() === recipientId);
+          const rCache     = recipient ? cacheMap.get(recipient.speciesId) : null;
+          if (recipient && rCache) {
+            const rMaxHp  = computeStats(rCache.baseStats as BaseStats, recipient.level, recipient.nature).hp;
+            const rCurHp  = runningHp.get(recipientId) ?? recipient.currentHp;
+            const restore = Math.min(drain, rMaxHp - rCurHp);
+            if (restore > 0) {
+              const rNewHp = rCurHp + restore;
+              runningHp.set(recipientId, rNewHp);
+              await Pokemon.updateOne({ _id: recipient._id }, { $set: { currentHp: rNewHp } });
+              const rName = recipient.nickname ?? slugToDisplayName(rCache.name as string);
+              allEvents.push(`${rName} absorbed the drained energy! (+${restore} HP)`);
+            }
+          }
+        }
+      }
+
+      // Cursed (Ghost Curse): deal 1/4 maxHp damage each round
+      if (volStatus.some(v => v.condition === 'cursed')) {
+        const curHp  = runningHp.get(pokeId) ?? poke.currentHp;
+        const damage = Math.max(1, Math.floor(maxHp / 4));
+        const newHp  = Math.max(0, curHp - damage);
+        runningHp.set(pokeId, newHp);
+        await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+        allEvents.push(`${pokeName} is afflicted by the curse! (${damage} damage, ${newHp} HP remaining)`);
+      }
+    }
 
     appendToLog(battle, ...allEvents);
   }
@@ -2491,7 +2574,7 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
   }
 
   // Verify targets are alive
-  const targetPokemons = await Pokemon.find({ _id: { $in: targets } }, 'currentHp').lean();
+  const targetPokemons = await Pokemon.find({ _id: { $in: targets } }, 'currentHp volatileStatus').lean();
   const fainted = targetPokemons.filter(p => p.currentHp <= 0);
   if (fainted.length > 0) {
     res.status(400).json({ data: null, error: 'Cannot target a fainted Pokémon' });
@@ -2501,6 +2584,23 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
   // Build a HP map from the liveness check above so we can compute new HP
   // without an extra DB round-trip per target.
   const targetHpMap = new Map(targetPokemons.map(p => [p._id.toString(), p.currentHp]));
+
+  // Targets that used Endure this turn — their HP is clamped to 1 instead of 0.
+  const enduringTargets = new Set(
+    targetPokemons
+      .filter(p => ((p.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'enduring'))
+      .map(p => p._id.toString()),
+  );
+
+  // Maps target ID → protecting volatile condition (e.g. 'protecting-kings-shield'), or null.
+  // Used in the hit loop to skip damage and apply variant contact side-effects.
+  const protectingTargets = new Map(
+    targetPokemons.map(p => {
+      const vol    = (p.volatileStatus as Array<{ condition: string }>) ?? [];
+      const protVol = vol.find(v => v.condition.startsWith('protecting'));
+      return [p._id.toString(), protVol?.condition ?? null];
+    }),
+  );
 
   // Fill targets and immediately resolve damage (sequential speed-order design)
   battle.turnQueue[idx].targets = targets.map(t => new mongoose.Types.ObjectId(t));
@@ -2542,7 +2642,7 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
         currentEntry.activePokemonId, 'nickname speciesId currentHp nature level volatileStatus hasHiddenAbility',
       ).lean();
       const atkCache = attacker
-        ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats abilities').lean()
+        ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats abilities types').lean()
         : null;
       const attackerName = attacker?.nickname ?? (atkCache ? slugToDisplayName(atkCache.name as string) : 'Pokémon');
 
@@ -2581,8 +2681,12 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
       if (applyEffects) {
         moveEvents.push(`${attackerName} used ${slugToDisplayName(currentEntry.moveId)}!`);
 
+        // Ghost-type Curse uses HP sacrifice + cursed volatile instead of stat stages.
+        const isGhostCurse = currentEntry.moveId === 'curse' &&
+          ((atkCache?.types as string[]) ?? []).includes('ghost');
+
         const statEffects = STAT_STAGE_MOVES[currentEntry.moveId];
-        if (statEffects) {
+        if (statEffects && !isGhostCurse) {
           const selfEffects = statEffects.filter(e => e.target === 'self');
           if (selfEffects.length > 0) {
             const stageMap       = battle.statStages as Record<string, StatStages>;
@@ -2625,6 +2729,124 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
                 { $push: { volatileStatus: { condition: 'roosting', turnsRemaining: 0 } } },
               );
             }
+          }
+        }
+
+        // Focus Energy: raise crit rate stage — push volatile so resolveMove uses 1/6 rate
+        if (currentEntry.moveId === 'focus-energy' && attacker) {
+          const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+          if (volStatus.some(v => v.condition === 'focus-energy')) {
+            moveEvents.push(`${attackerName} is already focusing!`);
+          } else {
+            await Pokemon.updateOne(
+              { _id: currentEntry.activePokemonId },
+              { $push: { volatileStatus: { condition: 'focus-energy', turnsRemaining: 99 } } },
+            );
+            moveEvents.push(`${attackerName} is getting pumped!`);
+          }
+        }
+
+        // Endure: brace for the turn — volatile causes the damage clamp in the target loop
+        if (currentEntry.moveId === 'endure' && attacker) {
+          const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+          if (volStatus.some(v => v.condition === 'enduring')) {
+            moveEvents.push(`${attackerName} is already braced!`);
+          } else {
+            await Pokemon.updateOne(
+              { _id: currentEntry.activePokemonId },
+              { $push: { volatileStatus: { condition: 'enduring', turnsRemaining: 0 } } },
+            );
+            moveEvents.push(`${attackerName} braced itself!`);
+          }
+        }
+
+        // Belly Drum: cut HP by half and max out Attack stage
+        if (currentEntry.moveId === 'belly-drum' && attacker && atkCache?.baseStats) {
+          const maxHp  = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature).hp;
+          const curHp  = attacker.currentHp as number;
+          const costHp = Math.floor(maxHp / 2);
+          if (curHp <= costHp) {
+            moveEvents.push(`${attackerName} doesn't have enough HP!`);
+          } else {
+            await Pokemon.updateOne({ _id: currentEntry.activePokemonId }, { $set: { currentHp: curHp - costHp } });
+            const stageMap = battle.statStages as Record<string, StatStages>;
+            const atkId    = currentEntry.activePokemonId.toString();
+            if (!stageMap[atkId]) stageMap[atkId] = {} as StatStages;
+            stageMap[atkId].atk = 6;
+            battle.markModified('statStages');
+            moveEvents.push(`${attackerName} cut its own HP and maximized its Attack!`);
+          }
+        }
+
+        // Ingrain: root the user — heals 1/16 maxHp each end-of-round
+        if (currentEntry.moveId === 'ingrain' && attacker) {
+          const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+          if (volStatus.some(v => v.condition === 'ingrain')) {
+            moveEvents.push(`${attackerName} is already rooted!`);
+          } else {
+            await Pokemon.updateOne(
+              { _id: currentEntry.activePokemonId },
+              { $push: { volatileStatus: { condition: 'ingrain', turnsRemaining: 99 } } },
+            );
+            moveEvents.push(`${attackerName} planted its roots!`);
+          }
+        }
+
+        // Aqua Ring: veil of water — heals 1/16 maxHp each end-of-round
+        if (currentEntry.moveId === 'aqua-ring' && attacker) {
+          const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+          if (volStatus.some(v => v.condition === 'aqua-ring')) {
+            moveEvents.push(`${attackerName} is already surrounded by water!`);
+          } else {
+            await Pokemon.updateOne(
+              { _id: currentEntry.activePokemonId },
+              { $push: { volatileStatus: { condition: 'aqua-ring', turnsRemaining: 99 } } },
+            );
+            moveEvents.push(`${attackerName} surrounded itself with a veil of water!`);
+          }
+        }
+
+        // Protect family: push the variant's volatile so incoming hit-loop checks see it
+        const protectVolatile = PROTECT_VOLATILE[currentEntry.moveId];
+        if (protectVolatile && attacker) {
+          const vol = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+          if (vol.some(v => v.condition.startsWith('protecting'))) {
+            moveEvents.push(`${attackerName} can't protect itself!`);
+          } else {
+            await Pokemon.updateOne(
+              { _id: currentEntry.activePokemonId },
+              { $push: { volatileStatus: { condition: protectVolatile, turnsRemaining: 0 } } },
+            );
+            moveEvents.push(`${attackerName} protected itself!`);
+          }
+        }
+
+        // Ghost Curse: sacrifice half HP to inflict the cursed volatile on one opposing Pokémon
+        if (isGhostCurse && attacker && atkCache?.baseStats) {
+          const opposing = currentEntry.actorType === 'player' ? battle.enemySide : battle.playerSide;
+          const target   = opposing.find(e => e.activePokemonId != null);
+          if (target?.activePokemonId) {
+            const maxHp  = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature).hp;
+            const costHp = Math.floor(maxHp / 2);
+            const newHp  = Math.max(0, (attacker.currentHp as number) - costHp);
+            const tgtPoke  = await Pokemon.findById(target.activePokemonId, 'nickname speciesId volatileStatus').lean();
+            const tgtCache = tgtPoke
+              ? await PokedexCache.findOne({ pokeApiId: (tgtPoke as any).speciesId }, 'name').lean()
+              : null;
+            const tgtName  = (tgtPoke?.nickname as string | null) ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'the target');
+            const alreadyCursed = ((tgtPoke?.volatileStatus as Array<{ condition: string }>) ?? [])
+              .some(v => v.condition === 'cursed');
+            if (alreadyCursed) {
+              moveEvents.push(`${tgtName} is already cursed!`);
+            } else {
+              await Promise.all([
+                Pokemon.updateOne({ _id: currentEntry.activePokemonId }, { $set: { currentHp: newHp } }),
+                Pokemon.updateOne({ _id: target.activePokemonId }, { $push: { volatileStatus: { condition: 'cursed', turnsRemaining: 99 } } }),
+              ]);
+              moveEvents.push(`${attackerName} cut its own HP to curse ${tgtName}!`);
+            }
+          } else {
+            moveEvents.push(`${attackerName} used Curse, but there's no target!`);
           }
         }
       }
@@ -2676,6 +2898,59 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
           }
         }
 
+        // Pain Split: average current HP between user and target, capped at each's maxHp
+        if (currentEntry.moveId === 'pain-split' && atkSnap && atkSnapCache?.baseStats) {
+          const tgt      = await Pokemon.findById(targetId, 'currentHp nickname speciesId level nature').lean();
+          const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name baseStats').lean() : null;
+          if (tgt && tgtCache?.baseStats) {
+            const atkMaxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature).hp;
+            const tgtMaxHp = computeStats(tgtCache.baseStats as BaseStats, (tgt as any).level, (tgt as any).nature).hp;
+            const atkCurHp = atkSnap.currentHp;
+            const tgtCurHp = targetHpMap.get(targetId) ?? (tgt as any).currentHp;
+            const average  = Math.floor((atkCurHp + tgtCurHp) / 2);
+            const newAtkHp = Math.min(atkMaxHp, average);
+            const newTgtHp = Math.min(tgtMaxHp, average);
+            await Promise.all([
+              Pokemon.updateOne({ _id: currentEntry.activePokemonId }, { $set: { currentHp: newAtkHp } }),
+              Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newTgtHp } }),
+            ]);
+            atkSnap.currentHp = newAtkHp;
+            targetHpMap.set(targetId, newTgtHp);
+            const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
+            const tgtName = (tgt as any).nickname ?? slugToDisplayName(((tgtCache as any).name ?? '') as string);
+            moveEvents.push(`${atkName} used Pain Split on ${tgtName}!`);
+            moveEvents.push(`They split the pain! (${atkName}: ${newAtkHp} HP, ${tgtName}: ${newTgtHp} HP)`);
+          }
+          continue; // skip normal resolveMove flow
+        }
+
+        // Leech Seed: plant a seed on the target — drains 1/8 maxHp each end-of-round
+        if (currentEntry.moveId === 'leech-seed') {
+          const tgt      = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
+          const tgtCache = tgt
+            ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types').lean()
+            : null;
+          const tgtName  = (tgt?.nickname as string | null) ?? (tgtCache ? slugToDisplayName(tgtCache.name as string) : 'Pokémon');
+          const atkName  = atkSnap?.nickname ?? (atkSnapCache ? slugToDisplayName((atkSnapCache.name ?? '') as string) : 'Pokémon');
+          const tgtTypes = (tgtCache?.types as string[]) ?? [];
+          if (tgtTypes.includes('grass')) {
+            moveEvents.push(`${atkName} used Leech Seed! It had no effect on ${tgtName}!`);
+          } else {
+            const alreadySeeded = ((tgt?.volatileStatus as Array<{ condition: string }>) ?? [])
+              .some(v => v.condition === 'leech-seed');
+            if (alreadySeeded) {
+              moveEvents.push(`${tgtName} is already seeded!`);
+            } else {
+              await Pokemon.updateOne(
+                { _id: targetId },
+                { $push: { volatileStatus: { condition: 'leech-seed', turnsRemaining: 99 } } },
+              );
+              moveEvents.push(`${atkName} used Leech Seed! ${tgtName} was seeded!`);
+            }
+          }
+          continue;
+        }
+
         // Type-changing ability narration (fires before the attack, once per target)
         if (typeChangeMoveType && atkSnap && atkSnapCache) {
           const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
@@ -2695,6 +2970,40 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
         for (let hit = 1; hit <= hitCount; hit++) {
           // Stop hitting if the target already fainted from a previous hit
           if ((targetHpMap.get(targetId) ?? 0) <= 0) break;
+
+          // Protect check: skip damage and apply variant contact side-effects
+          const protectCondition = protectingTargets.get(targetId);
+          if (protectCondition) {
+            const tgtDoc  = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+            const tgtC    = tgtDoc ? await PokedexCache.findOne({ pokeApiId: (tgtDoc as any).speciesId }, 'name').lean() : null;
+            const tgtName = (tgtDoc?.nickname as string | null) ?? (tgtC ? slugToDisplayName(tgtC.name as string) : 'Pokémon');
+            moveEvents.push(`${tgtName} protected itself!`);
+
+            if (CONTACT_MOVES.has(currentEntry.moveId) && atkSnap && atkSnapCache) {
+              const atkName = atkSnap.nickname ?? slugToDisplayName((atkSnapCache.name ?? '') as string);
+              if (protectCondition === 'protecting-kings-shield') {
+                moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), [{ stat: 'atk', stages: -2, target: 'self' }], atkName, attackerAbilitySlug));
+                battle.markModified('statStages');
+              } else if (protectCondition === 'protecting-obstruct') {
+                moveEvents.push(...applyStatStageEffects(stageMap, currentEntry.activePokemonId.toString(), [{ stat: 'def', stages: -2, target: 'self' }], atkName, attackerAbilitySlug));
+                battle.markModified('statStages');
+              } else if (protectCondition === 'protecting-spiky-shield' && atkSnapCache.baseStats) {
+                const maxHp   = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature).hp;
+                const chipDmg = Math.max(1, Math.floor(maxHp / 8));
+                const newHp   = Math.max(0, atkSnap.currentHp - chipDmg);
+                await Pokemon.updateOne({ _id: currentEntry.activePokemonId }, { $set: { currentHp: newHp } });
+                atkSnap.currentHp = newHp;
+                moveEvents.push(`${atkName} was hurt by Spiky Shield! (${chipDmg} damage)`);
+              } else if (protectCondition === 'protecting-baneful-bunker') {
+                const statusEvents = await applyStatusEffect(currentEntry.activePokemonId, { status: 'poison', chance: 1 });
+                if (statusEvents.length) {
+                  moveEvents.push(`${atkName} was poisoned by Baneful Bunker!`);
+                  moveEvents.push(...statusEvents);
+                }
+              }
+            }
+            break; // no further hits against a protected target
+          }
 
           const { damage, isCrit, events } = await resolveMove(
             currentEntry.activePokemonId,
@@ -2716,11 +3025,14 @@ router.post('/:id/submit-target', async (req: Request, res: Response): Promise<v
           }
 
           if (damage > 0) {
-            const currentHp = targetHpMap.get(targetId) ?? 0;
-            const newHp     = Math.max(0, currentHp - damage);
+            const currentHp  = targetHpMap.get(targetId) ?? 0;
+            const isEnduring = enduringTargets.has(targetId);
+            const rawNewHp   = currentHp - damage;
+            const newHp      = isEnduring && rawNewHp <= 0 ? 1 : Math.max(0, rawNewHp);
             await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
             targetHpMap.set(targetId, newHp);
             totalDamage += damage;
+            if (isEnduring && rawNewHp <= 0) moveEvents.push('It endured the hit!');
           }
           actualHits++;
         }
