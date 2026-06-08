@@ -5,9 +5,11 @@ import mongoose, { Schema } from 'mongoose';
 // ---------------------------------------------------------------------------
 
 // PvE encounters: reference campaign NPCs by ID.
-// The NPC document owns the full party — we just point at it.
+// slotCount: how many simultaneous active slots this NPC gets in the battle.
+// null = match playerIds.length at launch time (original behaviour).
 type EnemyEntry = {
-  npcId: mongoose.Types.ObjectId;
+  npcId:      mongoose.Types.ObjectId;
+  slotCount:  number | null;
 };
 
 // Wild encounters: one entry per Pokémon that will be generated at launch.
@@ -58,8 +60,9 @@ const EncounterSchema = new Schema<IEncounter>(
 
     enemies: [
       {
-        npcId: { type: Schema.Types.ObjectId, ref: 'Npc', required: true },
-        _id:   false,
+        npcId:     { type: Schema.Types.ObjectId, ref: 'Npc', required: true },
+        slotCount: { type: Number, default: null },
+        _id:       false,
       },
     ],
 

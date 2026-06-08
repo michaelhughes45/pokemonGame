@@ -10,18 +10,20 @@ export type ItemPocket =
   | 'escape';
 
 type IItem = {
-  ownerId:  mongoose.Types.ObjectId;
-  itemId:   string;       // PokeAPI slug, e.g. "super-potion"
-  quantity: number;
-  pocket:   ItemPocket;
+  ownerId:   mongoose.Types.ObjectId;
+  ownerType: 'player' | 'npc';
+  itemId:    string;       // PokeAPI slug, e.g. "super-potion"
+  quantity:  number;
+  pocket:    ItemPocket;
 };
 
 const ItemSchema = new Schema<IItem>(
   {
-    ownerId:  { type: Schema.Types.ObjectId, required: true, ref: 'User' },
-    itemId:   { type: String, required: true },
-    quantity: { type: Number, required: true, min: 1 },
-    pocket:   {
+    ownerId:   { type: Schema.Types.ObjectId, required: true },
+    ownerType: { type: String, enum: ['player', 'npc'], default: 'player' },
+    itemId:    { type: String, required: true },
+    quantity:  { type: Number, required: true, min: 1 },
+    pocket:    {
       type: String,
       enum: ['healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape'],
       required: true,

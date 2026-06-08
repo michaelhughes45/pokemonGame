@@ -146,9 +146,8 @@ router.get('/pc', verifyToken, async (req: Request, res: Response): Promise<void
 // ---------------------------------------------------------------------------
 // POST /api/pokemon/party/swap
 // Moves a PC pokemon into the party.
-//   - If party has fewer than 6: body only needs { pcPokemonId }
-//   - If party is full: body needs { pcPokemonId, partyPokemonId } — the two
-//     are swapped (party member goes to PC, PC pokemon takes its slot).
+//   - Without partyPokemonId: appends the Pokémon to the next open slot.
+//   - With partyPokemonId: swaps the two (party member goes to PC, PC pokemon takes its slot).
 // ---------------------------------------------------------------------------
 router.post('/party/swap', verifyToken, async (req: Request, res: Response): Promise<void> => {
   try {
@@ -205,19 +204,11 @@ router.post('/party/swap', verifyToken, async (req: Request, res: Response): Pro
         { isInParty: true, partySlot: slot }
       );
     } else {
-      // ── Add mode: party has room, just add ──────────────────────────────
+      // ── Add mode: append to next open slot ──────────────────────────────
       const partyCount = await Pokemon.countDocuments({
         ownerId:   req.user!.userId,
         isInParty: true,
       });
-
-      if (partyCount >= 6) {
-        res.status(400).json({
-          data:  null,
-          error: 'Party is full. Provide partyPokemonId to swap a member out.',
-        });
-        return;
-      }
 
       await Pokemon.updateOne(
         { _id: pcPokemonId },

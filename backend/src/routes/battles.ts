@@ -585,14 +585,15 @@ async function resolveCatchAction(
   await Item.deleteMany({ ownerId: actorId, itemId, quantity: { $lte: 0 } });
 
   if (caught) {
-    // Find the lowest open party slot (1–6) for this player
+    // Find the lowest open party slot for this player (no hard cap)
     const partyPokemon = await Pokemon.find(
       { ownerId: actorId, ownerType: 'player', isInParty: true },
       'partySlot',
     ).lean();
     const usedSlots = new Set(partyPokemon.map(p => p.partySlot));
-    const nextSlot  = [1, 2, 3, 4, 5, 6].find(s => !usedSlots.has(s));
-    const goesToParty = nextSlot !== undefined;
+    let nextSlot = 1;
+    while (usedSlots.has(nextSlot)) nextSlot++;
+    const goesToParty = true;
 
     const healedMoves = ((wildPoke as any).moves ?? []).map((m: any) => ({ ...m, currentPP: m.maxPP }));
     await Pokemon.updateOne(
@@ -2245,15 +2246,20 @@ router.post('/:id/submit-move', async (req: Request, res: Response): Promise<voi
 // Body (switch): { npcId, actionType: 'switch', switchToPokemonId }
 // ---------------------------------------------------------------------------
 router.post('/:id/dm-submit-move', requireDm, async (req: Request, res: Response): Promise<void> => {
-  const { npcId, moveId, actionType = 'move', switchToPokemonId, activePokemonId: slotPokemonId } = req.body as {
+  const {
+    npcId, moveId, actionType = 'move', switchToPokemonId,
+    activePokemonId: slotPokemonId, itemId, targetPokemonId,
+  } = req.body as {
     npcId: string;
     moveId?: string;
-    actionType?: 'move' | 'switch';
+    actionType?: 'move' | 'switch' | 'item';
     switchToPokemonId?: string;
     // Optional: the activePokemonId of the specific slot to submit for.
     // Required when an NPC has multiple active slots (one per player).
     // Omit for single-slot battles — the only active Pokémon is used.
     activePokemonId?: string;
+    itemId?: string;
+    targetPokemonId?: string;
   };
 
   if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
@@ -2313,6 +2319,46 @@ router.post('/:id/dm-submit-move', requireDm, async (req: Request, res: Response
   // Wild Pokémon cannot switch
   if (battle.type === 'wild' && actionType === 'switch') {
     res.status(400).json({ data: null, error: 'Wild Pokémon cannot switch' });
+    return;
+  }
+
+  // ---- item action ----
+  if (actionType === 'item') {
+    if (!itemId) {
+      res.status(400).json({ data: null, error: 'itemId is required for item actions' });
+      return;
+    }
+    if (!targetPokemonId || !mongoose.Types.ObjectId.isValid(targetPokemonId)) {
+      res.status(400).json({ data: null, error: 'A valid targetPokemonId is required for item actions' });
+      return;
+    }
+    if (!npcEntry.activePokemonId) {
+      res.status(400).json({ data: null, error: 'NPC has not sent out a Pokémon yet' });
+      return;
+    }
+
+    const npcObjId = new mongoose.Types.ObjectId(npcId);
+    const bagItem  = await Item.findOne({ ownerId: npcObjId, itemId }).lean();
+    if (!bagItem || bagItem.quantity < 1) {
+      res.status(400).json({ data: null, error: 'Item not found in NPC bag' });
+      return;
+    }
+
+    battle.turnQueue.push({
+      actorId:         npcObjId,
+      actorType:       'npc',
+      activePokemonId: npcEntry.activePokemonId,
+      actionType:      'item',
+      itemId,
+      targets:         [new mongoose.Types.ObjectId(targetPokemonId)],
+      resolved:        false,
+    });
+
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
     return;
   }
 
@@ -2402,6 +2448,226 @@ router.post('/:id/dm-submit-move', requireDm, async (req: Request, res: Response
   await battle.save();
 
   res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// estimateDamage — run @smogon/calc in read-only mode and return the average
+// damage roll. Returns 0 on any error (unrecognised move / Pokémon name).
+// Used by the optimal AI strategy in dm-auto-submit.
+// ---------------------------------------------------------------------------
+async function estimateDamage(
+  attacker: { currentHp: number; nature: string; level: number },
+  attackerCache: { name: unknown },
+  attackerAbilitySlug: string | null,
+  moveId: string,
+  target: { currentHp: number; nature: string; level: number },
+  targetCache: { name: unknown },
+  targetAbilitySlug: string | null,
+  weather: string | null,
+): Promise<number> {
+  try {
+    const cap     = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+    const zeroes  = { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 };
+    const calcAtk = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), {
+      level:   attacker.level,
+      nature:  cap(attacker.nature) as any,
+      evs:     zeroes,
+      ivs:     zeroes,
+      curHP:   attacker.currentHp,
+      ability: attackerAbilitySlug ? slugToDisplayName(attackerAbilitySlug) as any : undefined,
+    });
+    const calcTgt = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string), {
+      level:   target.level,
+      nature:  cap(target.nature) as any,
+      evs:     zeroes,
+      ivs:     zeroes,
+      curHP:   target.currentHp,
+      ability: targetAbilitySlug ? slugToDisplayName(targetAbilitySlug) as any : undefined,
+    });
+    const result = calculate(GEN9, calcAtk, calcTgt, new CalcMove(GEN9, slugToDisplayName(moveId)), new Field({ weather: toCalcWeather(weather as any) as any }));
+    const rolls  = Array.isArray(result.damage) ? (result.damage as number[]) : [result.damage as number];
+    return rolls.reduce((s, r) => s + r, 0) / rolls.length;
+  } catch {
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/battles/:id/dm-auto-submit
+// DM only. Submits move choices for every unsubmitted NPC and wild slot using
+// each NPC's aiStrategy. Wild Pokémon always use random.
+//
+// Strategies:
+//   random    — picks a random move with PP > 0
+//   defensive — if HP < 30%: try healing item → try Rest → fall back to random
+//   optimal   — picks the move with the highest average @smogon/calc damage
+//   custom    — falls back to random (custom notes are not machine-readable)
+//
+// Targets are left empty ([]); the DM fills them during the targeting phase.
+// Returns { submitted: N, phase } so the frontend can update its view.
+// ---------------------------------------------------------------------------
+router.post('/:id/dm-auto-submit', requireDm, async (req: Request, res: Response): Promise<void> => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id as string)) {
+    res.status(400).json({ data: null, error: 'Invalid battle ID' });
+    return;
+  }
+
+  const battle = await Battle.findById(req.params.id);
+  if (!battle) {
+    res.status(404).json({ data: null, error: 'Battle not found' });
+    return;
+  }
+  if (battle.status !== 'active' || battle.phase !== 'move_submission') {
+    res.status(400).json({ data: null, error: 'Battle is not in move submission phase' });
+    return;
+  }
+
+  let submitted = 0;
+
+  for (const slot of battle.enemySide) {
+    if (!slot.activePokemonId) continue;
+
+    const isWild  = !slot.npcId;
+    const actorId = isWild ? slot.activePokemonId : slot.npcId!;
+
+    // Skip slots that already have a submission this turn
+    const alreadySubmitted = battle.turnQueue.some(
+      e => e.actorId.toString() === actorId.toString()
+        && e.actorType === 'npc'
+        && e.activePokemonId?.toString() === slot.activePokemonId!.toString(),
+    );
+    if (alreadySubmitted) continue;
+
+    const poke = await Pokemon.findById(
+      slot.activePokemonId,
+      'moves currentHp nature level speciesId hasHiddenAbility',
+    ).lean();
+    if (!poke) continue;
+
+    const movesWithPP = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
+      .filter(m => m.currentPP > 0);
+    if (movesWithPP.length === 0) continue;
+
+    // Determine AI strategy (wild always random)
+    type AiStrategy = 'random' | 'optimal' | 'defensive' | 'custom';
+    const npcDoc = (!isWild && slot.npcId)
+      ? await Npc.findById(slot.npcId, 'aiStrategy').lean()
+      : null;
+    const strategy: AiStrategy = (npcDoc?.aiStrategy as AiStrategy | undefined) ?? 'random';
+
+    const actorObjId = new mongoose.Types.ObjectId(actorId.toString());
+
+    // ── Defensive: heal or rest when HP < 30% ────────────────────────────
+    if (strategy === 'defensive') {
+      const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'baseStats').lean();
+      const maxHp = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp : poke.currentHp;
+
+      if (poke.currentHp < Math.floor(maxHp * 0.3)) {
+        const healItem = await Item.findOne({
+          ownerId:   actorObjId,
+          ownerType: 'npc',
+          pocket:    'healing',
+          quantity:  { $gt: 0 },
+        }).lean();
+
+        if (healItem) {
+          battle.turnQueue.push({
+            actorId:         actorObjId,
+            actorType:       'npc',
+            activePokemonId: slot.activePokemonId!,
+            actionType:      'item',
+            itemId:          healItem.itemId,
+            targets:         [slot.activePokemonId!],
+            resolved:        false,
+          });
+          submitted++;
+          continue;
+        }
+
+        const restSlot = movesWithPP.find(m => m.moveId === 'rest');
+        if (restSlot) {
+          battle.turnQueue.push({
+            actorId:         actorObjId,
+            actorType:       'npc',
+            activePokemonId: slot.activePokemonId!,
+            actionType:      'move',
+            moveId:          'rest',
+            targets:         [],
+            resolved:        false,
+          });
+          submitted++;
+          continue;
+        }
+        // Fall through to random below
+      }
+    }
+
+    // ── Optimal: highest average damage across all targets ────────────────
+    let chosenMoveId: string;
+
+    if (strategy === 'optimal') {
+      const activePlayerIds = battle.playerSide
+        .filter(e => e.activePokemonId != null)
+        .map(e => e.activePokemonId!);
+
+      const atkCache = await PokedexCache.findOne(
+        { pokeApiId: poke.speciesId },
+        'name abilities',
+      ).lean();
+      const atkAbility = atkCache
+        ? resolveAbilitySlug(atkCache.abilities as CachedAbility[], poke.hasHiddenAbility ?? false)
+        : null;
+
+      const targetPokes = activePlayerIds.length > 0
+        ? await Pokemon.find({ _id: { $in: activePlayerIds } }, 'currentHp nature level speciesId hasHiddenAbility').lean()
+        : [];
+      const tCaches = targetPokes.length > 0
+        ? await PokedexCache.find({ pokeApiId: { $in: targetPokes.map(t => t.speciesId) } }, 'pokeApiId name abilities').lean()
+        : [];
+      const cacheBySpecies = new Map(tCaches.map(c => [c.pokeApiId as number, c]));
+
+      let bestScore = -1;
+      for (const mv of movesWithPP) {
+        if (NO_TARGET_MOVE_IDS.has(mv.moveId)) continue;
+        for (const tgt of targetPokes) {
+          const tCache = cacheBySpecies.get(tgt.speciesId);
+          if (!tCache) continue;
+          const tAbility = resolveAbilitySlug(tCache.abilities as CachedAbility[], tgt.hasHiddenAbility ?? false);
+          const score = await estimateDamage(
+            poke, atkCache ?? { name: poke.speciesId }, atkAbility,
+            mv.moveId,
+            tgt, tCache, tAbility,
+            battle.weather as string | null,
+          );
+          if (score > bestScore) { bestScore = score; chosenMoveId = mv.moveId; }
+        }
+      }
+      // If no damaging move found (all self-targeting), fall back to random
+      chosenMoveId ??= movesWithPP[Math.floor(Math.random() * movesWithPP.length)].moveId;
+    } else {
+      // random / defensive-fallback / custom
+      chosenMoveId = movesWithPP[Math.floor(Math.random() * movesWithPP.length)].moveId;
+    }
+
+    battle.turnQueue.push({
+      actorId:         actorObjId,
+      actorType:       'npc',
+      activePokemonId: slot.activePokemonId!,
+      actionType:      'move',
+      moveId:          chosenMoveId,
+      targets:         [],
+      resolved:        false,
+    });
+    submitted++;
+  }
+
+  if (submitted > 0) {
+    await checkAndAdvance(battle);
+  }
+  battle.lastUpdatedAt = new Date();
+  await battle.save();
+
+  res.json({ data: { submitted, phase: battle.phase }, error: null });
 });
 
 // ---------------------------------------------------------------------------

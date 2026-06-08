@@ -193,7 +193,8 @@ export default function EncounterFormPage() {
   // ── Form fields ────────────────────────────────────────────────────────
   const [title,              setTitle]              = useState('');
   const [type,               setType]               = useState<'pve' | 'wild'>('pve');
-  const [selectedNpcIds,     setSelectedNpcIds]     = useState<Set<string>>(new Set());
+  // Map of npcId → slotCount (null = auto-match player count at launch)
+  const [npcSlotCounts, setNpcSlotCounts] = useState<Map<string, number | null>>(new Map());
   const [wildEntries,        setWildEntries]        = useState<WildEntry[]>([]);
   const [playerPokemonLimit, setPlayerPokemonLimit] = useState('');
   const [npcPokemonLimit,    setNpcPokemonLimit]    = useState('');
@@ -228,9 +229,11 @@ export default function EncounterFormPage() {
           setNpcPokemonLimit(enc.npcPokemonLimit !== null ? String(enc.npcPokemonLimit) : '');
 
           if (enc.type === 'pve') {
-            setSelectedNpcIds(
-              new Set((enc.enemies as Array<{ npcId: string }>).map(e => e.npcId)),
-            );
+            const map = new Map<string, number | null>();
+            (enc.enemies as Array<{ npcId: string; slotCount?: number | null }>).forEach(e => {
+              map.set(e.npcId, e.slotCount ?? null);
+            });
+            setNpcSlotCounts(map);
           }
 
           if (enc.type === 'wild' && Array.isArray(enc.wildPokemon) && enc.wildPokemon.length > 0) {
@@ -271,13 +274,17 @@ export default function EncounterFormPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  // ── NPC toggle ─────────────────────────────────────────────────────────
+  // ── NPC toggle + slot count ────────────────────────────────────────────
   function toggleNpc(npcId: string) {
-    setSelectedNpcIds(prev => {
-      const next = new Set(prev);
-      if (next.has(npcId)) { next.delete(npcId); } else { next.add(npcId); }
+    setNpcSlotCounts(prev => {
+      const next = new Map(prev);
+      if (next.has(npcId)) { next.delete(npcId); } else { next.set(npcId, null); }
       return next;
     });
+  }
+
+  function setNpcSlotCount(npcId: string, value: number | null) {
+    setNpcSlotCounts(prev => new Map(prev).set(npcId, value));
   }
 
   // ── Wild entry helpers ─────────────────────────────────────────────────
@@ -305,7 +312,7 @@ export default function EncounterFormPage() {
       setSubmitError('Title is required.');
       return;
     }
-    if (type === 'pve' && selectedNpcIds.size === 0) {
+    if (type === 'pve' && npcSlotCounts.size === 0) {
       setSubmitError('Select at least one NPC for a PvE encounter.');
       return;
     }
@@ -338,7 +345,10 @@ export default function EncounterFormPage() {
     };
 
     if (type === 'pve') {
-      body.enemies = Array.from(selectedNpcIds).map(npcId => ({ npcId }));
+      body.enemies = Array.from(npcSlotCounts.entries()).map(([npcId, slotCount]) => ({
+        npcId,
+        ...(slotCount !== null ? { slotCount } : {}),
+      }));
     } else {
       body.wildPokemon = wildEntries.map(wp => ({
         speciesId: wp.speciesId,
@@ -441,24 +451,45 @@ export default function EncounterFormPage() {
                       <Link to="/dm" className="underline">Create one on the DM panel.</Link>
                     </p>
                   ) : (
-                    <div className="flex flex-col gap-2 border rounded-md p-3">
-                      {npcs.map(npc => (
-                        <label
-                          key={npc._id}
-                          className="flex items-center gap-2 text-sm cursor-pointer min-h-9"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={selectedNpcIds.has(npc._id)}
-                            onChange={() => toggleNpc(npc._id)}
-                            className="h-4 w-4"
-                          />
-                          <span>{npc.name}</span>
-                          <span className="text-muted-foreground text-xs">
-                            ({npc.partyCount} Pokémon)
-                          </span>
-                        </label>
-                      ))}
+                    <div className="flex flex-col gap-3 border rounded-md p-3">
+                      {npcs.map(npc => {
+                        const isChecked  = npcSlotCounts.has(npc._id);
+                        const slotValue  = npcSlotCounts.get(npc._id) ?? null;
+                        return (
+                          <div key={npc._id} className="flex flex-col gap-1.5">
+                            <label className="flex items-center gap-2 text-sm cursor-pointer min-h-9">
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => toggleNpc(npc._id)}
+                                className="h-4 w-4"
+                              />
+                              <span>{npc.name}</span>
+                              <span className="text-muted-foreground text-xs">
+                                ({npc.partyCount} Pokémon)
+                              </span>
+                            </label>
+                            {isChecked && (
+                              <div className="flex items-center gap-2 pl-6">
+                                <Label className="text-xs text-muted-foreground shrink-0">
+                                  Slots
+                                </Label>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  placeholder="Auto (= player count)"
+                                  value={slotValue !== null ? String(slotValue) : ''}
+                                  onChange={e => {
+                                    const v = e.target.value.trim();
+                                    setNpcSlotCount(npc._id, v ? Number(v) : null);
+                                  }}
+                                  className="h-8 text-sm"
+                                />
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -506,7 +537,6 @@ export default function EncounterFormPage() {
                   id="enc-player-limit"
                   type="number"
                   min={1}
-                  max={6}
                   placeholder="e.g. 3"
                   value={playerPokemonLimit}
                   onChange={e => setPlayerPokemonLimit(e.target.value)}
@@ -526,7 +556,6 @@ export default function EncounterFormPage() {
                     id="enc-npc-limit"
                     type="number"
                     min={1}
-                    max={12}
                     placeholder="e.g. 3"
                     value={npcPokemonLimit}
                     onChange={e => setNpcPokemonLimit(e.target.value)}

@@ -166,10 +166,10 @@ router.post('/players/:username/pokemon', async (req: Request, res: Response): P
     resolvedGender = 'male';
   }
 
-  // Slot into party if there's room, otherwise send to PC
+  // Always slot into party at the next position
   const partyCount = await Pokemon.countDocuments({ ownerId: user._id, isInParty: true });
-  const inParty   = partyCount < 6;
-  const partySlot = inParty ? partyCount + 1 : null;
+  const inParty    = true;
+  const partySlot  = partyCount + 1;
 
   // Last 4 moves the Pokémon would have learned by this level, most recent first.
   // levelUpMoves is sorted ascending by level, so .slice(-4) grabs the most recent 4.
@@ -348,7 +348,7 @@ router.post('/npcs', async (req: Request, res: Response): Promise<void> => {
 // ---------------------------------------------------------------------------
 // POST /api/dm/npcs/:npcId/pokemon
 // Gives a Pokémon to an NPC. Mirrors the player give-pokemon endpoint but
-// uses ownerType 'npc' and adds the Pokémon to the NPC's party array (max 12).
+// uses ownerType 'npc' and adds the Pokémon to the NPC's party array.
 // Body: { species, level?, nature?, gender? }
 // ---------------------------------------------------------------------------
 router.post('/npcs/:npcId/pokemon', async (req: Request, res: Response): Promise<void> => {
@@ -388,11 +388,6 @@ router.post('/npcs/:npcId/pokemon', async (req: Request, res: Response): Promise
     res.status(404).json({ data: null, error: 'NPC not found in your campaign' });
     return;
   }
-  if (npc.party.length >= 12) {
-    res.status(400).json({ data: null, error: 'NPC party is full (max 12)' });
-    return;
-  }
-
   const isNumeric  = /^\d+$/.test(String(species));
   const lookupQuery = isNumeric ? { pokeApiId: Number(species) } : { name: String(species).toLowerCase() };
   const fetchKey   = isNumeric ? Number(species) : String(species).toLowerCase();
@@ -665,6 +660,95 @@ router.post('/npcs/:npcId/heal', async (req: Request, res: Response): Promise<vo
   }));
 
   res.json({ data: { message: `${npc.name}'s party has been healed!` }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/npcs/:npcId/bag
+// Returns all items in an NPC's bag.
+// ---------------------------------------------------------------------------
+router.get('/npcs/:npcId/bag', async (req: Request, res: Response): Promise<void> => {
+  const { npcId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(npcId as string)) {
+    res.status(400).json({ data: null, error: 'Invalid NPC ID' });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const npc = await Npc.findOne({ _id: npcId, campaignId: campaign._id }).lean();
+  if (!npc) {
+    res.status(404).json({ data: null, error: 'NPC not found in your campaign' });
+    return;
+  }
+
+  const items = await Item.find(
+    { ownerId: new mongoose.Types.ObjectId(npcId as string), ownerType: 'npc' },
+  ).lean();
+
+  res.json({ data: items, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs/:npcId/give-item
+// Give items to an NPC's bag.
+// Body: { itemId, quantity? }
+// ---------------------------------------------------------------------------
+router.post('/npcs/:npcId/give-item', async (req: Request, res: Response): Promise<void> => {
+  const { npcId } = req.params;
+  const { itemId, quantity = 1 } = req.body as { itemId: string; quantity?: number };
+
+  if (!mongoose.Types.ObjectId.isValid(npcId as string)) {
+    res.status(400).json({ data: null, error: 'Invalid NPC ID' });
+    return;
+  }
+  if (!itemId?.trim()) {
+    res.status(400).json({ data: null, error: 'itemId is required' });
+    return;
+  }
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    res.status(400).json({ data: null, error: 'quantity must be an integer between 1 and 99' });
+    return;
+  }
+
+  const pocket = getPocket(itemId.trim());
+  if (!pocket) {
+    res.status(400).json({
+      data:  null,
+      error: `"${itemId}" is not a recognised item. Check the PokeAPI slug (e.g. "super-potion", "poke-ball").`,
+    });
+    return;
+  }
+
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    res.status(403).json({ data: null, error: 'You do not have an active campaign' });
+    return;
+  }
+
+  const npc = await Npc.findOne({ _id: npcId, campaignId: campaign._id }).lean();
+  if (!npc) {
+    res.status(404).json({ data: null, error: 'NPC not found in your campaign' });
+    return;
+  }
+
+  const item = await Item.findOneAndUpdate(
+    { ownerId: new mongoose.Types.ObjectId(npcId as string), itemId: itemId.trim() },
+    {
+      $inc:         { quantity },
+      $setOnInsert: { pocket, ownerType: 'npc' },
+    },
+    { upsert: true, new: true },
+  );
+
+  res.status(201).json({
+    data: { itemId: item.itemId, quantity: item.quantity, pocket: item.pocket },
+    error: null,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1061,13 +1145,14 @@ router.delete('/encounters/:id', async (req: Request, res: Response): Promise<vo
 // Body: { playerIds: string[] }  — which campaign players join this battle
 //
 // PvE logic:
-//   For each NPC in encounter.enemies, enemySide gets playerIds.length slots
-//   all pointing to the same npcId (activePokemonId: null). This gives the NPC
-//   one simultaneous active slot per player — the DM sends out a different
-//   party Pokémon into each slot via dm-send-out.
+//   For each NPC in encounter.enemies, enemySide gets slotCount slots (or
+//   playerIds.length if slotCount is null) all pointing to the same npcId
+//   (activePokemonId: null). The DM sends out a different party Pokémon into
+//   each slot via dm-send-out with a slotIndex param.
 //
-//   Example: 3 players + 1 NPC → 3 enemySide entries, same npcId, all null.
-//   Example: 3 players + 2 NPCs → 6 enemySide entries (3 per NPC).
+//   Example: 3 players + 1 NPC (slotCount null) → 3 enemySide entries.
+//   Example: 3 players + 1 NPC (slotCount 7)    → 7 enemySide entries.
+//   Example: 3 players + 2 NPCs (slotCount null) → 6 enemySide entries (3 per NPC).
 //
 // The encounter's playerPokemonLimit and npcPokemonLimit are carried into the
 // Battle document. encounterId is set so the battle can be traced back.
@@ -1115,7 +1200,7 @@ router.post('/encounters/:id/launch', async (req: Request, res: Response): Promi
   let enemySide: EnemySlot[] = [];
 
   if (encounter.type === 'pve') {
-    const enemies = encounter.enemies as Array<{ npcId: mongoose.Types.ObjectId }>;
+    const enemies = encounter.enemies as Array<{ npcId: mongoose.Types.ObjectId; slotCount: number | null }>;
     if (enemies.length === 0) {
       res.status(400).json({ data: null, error: 'This encounter has no NPCs configured' });
       return;
@@ -1131,9 +1216,10 @@ router.post('/encounters/:id/launch', async (req: Request, res: Response): Promi
       return;
     }
 
-    // One slot per player for each NPC
+    // One slot per configured slotCount (or per player if slotCount is null) for each NPC
     for (const enemy of enemies) {
-      for (let i = 0; i < playerIds.length; i++) {
+      const slots = enemy.slotCount ?? playerIds.length;
+      for (let i = 0; i < slots; i++) {
         enemySide.push({
           npcId:           new mongoose.Types.ObjectId(enemy.npcId.toString()),
           activePokemonId: null,

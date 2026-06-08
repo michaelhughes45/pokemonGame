@@ -273,7 +273,10 @@ export default function BattlePage() {
   const [npcParties,          setNpcParties]          = useState<Record<string, NpcPartyPokemon[]>>({});
   const [partyLoading,        setPartyLoading]        = useState<string | null>(null);
   const [expandedSendOut,     setExpandedSendOut]     = useState<string | null>(null);
-  const [npcActionTab,        setNpcActionTab]        = useState<Record<string, 'move' | 'switch'>>({});
+  const [npcActionTab,        setNpcActionTab]        = useState<Record<string, 'move' | 'switch' | 'item'>>({});
+  const [npcBags,             setNpcBags]             = useState<Record<string, BagItem[]>>({});
+  const [npcBagLoading,       setNpcBagLoading]       = useState<string | null>(null);
+  const [npcSelectedItem,     setNpcSelectedItem]     = useState<Record<string, string | null>>({});
   const [weatherInput,        setWeatherInput]        = useState('');
   const [weatherTurns,        setWeatherTurns]        = useState('');
   const [weatherActionError,  setWeatherActionError]  = useState('');
@@ -617,6 +620,44 @@ export default function BattlePage() {
       );
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to submit switch.'));
+    } finally { setSubmitting(false); }
+  }
+
+  async function fetchNpcBag(npcId: string) {
+    if (npcBags[npcId]) return;
+    setNpcBagLoading(npcId);
+    try {
+      const res = await axios.get(`${API}/api/dm/npcs/${npcId}/bag`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      setNpcBags(prev => ({ ...prev, [npcId]: res.data.data ?? [] }));
+    } catch { /* silently fail — list stays empty */ }
+    finally { setNpcBagLoading(null); }
+  }
+
+  async function handleDmSubmitItem(npcId: string, itemId: string, targetPokemonId: string, slotKey: string, slotPokemonId?: string) {
+    if (!id) return;
+    setSubmitting(true); setActionError('');
+    try {
+      await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
+        { npcId, actionType: 'item', itemId, targetPokemonId, ...(slotPokemonId ? { activePokemonId: slotPokemonId } : {}) },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setNpcSelectedItem(prev => ({ ...prev, [slotKey]: null }));
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to use item.'));
+    } finally { setSubmitting(false); }
+  }
+
+  async function handleDmAutoSubmit() {
+    if (!id) return;
+    setSubmitting(true); setActionError('');
+    try {
+      await axios.post(`${API}/api/battles/${id}/dm-auto-submit`, {}, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to auto-submit NPC moves.'));
     } finally { setSubmitting(false); }
   }
 
@@ -1120,7 +1161,32 @@ export default function BattlePage() {
         {/* DM: NPC actions during move submission */}
         {isDm && battle.status === 'active' && battle.phase === 'move_submission' && battle.enemySide.length > 0 && (
           <Card>
-            <CardHeader><CardTitle className="text-base">NPC Actions</CardTitle></CardHeader>
+            <CardHeader>
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-base">NPC Actions</CardTitle>
+                {(() => {
+                  const npcSlotsWithPokemon = battle.enemySide.filter(e => e.activePokemonId);
+                  const allSubmitted = npcSlotsWithPokemon.length > 0 && npcSlotsWithPokemon.every(e => {
+                    const actorId = e.npcId ?? e.activePokemonId!;
+                    return battle.turnQueue.some(
+                      q => q.actorId === actorId && q.actorType === 'npc'
+                        && q.activePokemonId === e.activePokemonId,
+                    );
+                  });
+                  return (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleDmAutoSubmit}
+                      disabled={submitting || allSubmitted || npcSlotsWithPokemon.length === 0}
+                      className="min-h-9 text-xs"
+                    >
+                      Auto NPCs
+                    </Button>
+                  );
+                })()}
+              </div>
+            </CardHeader>
             <CardContent className="flex flex-col gap-4">
               {(() => {
                 // Group NPC entries by npcId; wild entries render 1:1 in natural order.
@@ -1257,11 +1323,15 @@ export default function BattlePage() {
                             ) : activePokemon ? (
                               <Tabs
                                 value={npcActionTab[slotKey] ?? 'move'}
-                                onValueChange={v => setNpcActionTab(prev => ({ ...prev, [slotKey]: v as 'move' | 'switch' }))}
+                                onValueChange={v => {
+                                  setNpcActionTab(prev => ({ ...prev, [slotKey]: v as 'move' | 'switch' | 'item' }));
+                                  if (v === 'item') fetchNpcBag(npcId);
+                                }}
                               >
                                 <TabsList>
                                   <TabsTrigger value="move">Move</TabsTrigger>
                                   <TabsTrigger value="switch">Switch</TabsTrigger>
+                                  <TabsTrigger value="item">Item</TabsTrigger>
                                 </TabsList>
 
                                 <TabsContent value="move">
@@ -1314,6 +1384,63 @@ export default function BattlePage() {
                                         );
                                       })}
                                   </div>
+                                </TabsContent>
+
+                                <TabsContent value="item">
+                                  {npcBagLoading === npcId ? (
+                                    <p className="text-sm text-muted-foreground">Loading bag…</p>
+                                  ) : (() => {
+                                    const battleItems = (npcBags[npcId] ?? []).filter(
+                                      i => i.pocket === 'healing' || i.pocket === 'status_cure',
+                                    );
+                                    const selectedItemId = npcSelectedItem[slotKey] ?? null;
+                                    if (battleItems.length === 0) {
+                                      return <p className="text-sm text-muted-foreground">No usable items in bag.</p>;
+                                    }
+                                    return (
+                                      <div className="flex flex-col gap-3">
+                                        <div className="grid grid-cols-2 gap-2">
+                                          {battleItems.map(item => {
+                                            const isSelected = selectedItemId === item.itemId;
+                                            return (
+                                              <button
+                                                key={item.itemId}
+                                                onClick={() => setNpcSelectedItem(prev => ({
+                                                  ...prev,
+                                                  [slotKey]: isSelected ? null : item.itemId,
+                                                }))}
+                                                className={[
+                                                  'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                                  isSelected ? 'bg-accent border-primary' : 'hover:bg-accent cursor-pointer',
+                                                ].join(' ')}
+                                              >
+                                                <span className="font-medium">{formatMove(item.itemId)}</span>
+                                                <span className="text-muted-foreground text-xs mt-0.5">x{item.quantity}</span>
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                        {selectedItemId && (
+                                          <div className="flex flex-col gap-2">
+                                            <p className="text-sm text-muted-foreground">Use on:</p>
+                                            {party.map((p: NpcPartyPokemon) => (
+                                              <button
+                                                key={p._id}
+                                                onClick={() => !submitting && handleDmSubmitItem(npcId, selectedItemId, p._id, slotKey, slot.activePokemonId!)}
+                                                disabled={submitting}
+                                                className="flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left min-h-11 transition-colors hover:bg-accent cursor-pointer"
+                                              >
+                                                <span className="font-medium">{p.nickname ?? p.speciesName}</span>
+                                                <span className="text-muted-foreground text-xs">
+                                                  Lv.{p.level} · HP {p.currentHp}
+                                                </span>
+                                              </button>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
                                 </TabsContent>
                               </Tabs>
                             ) : (
