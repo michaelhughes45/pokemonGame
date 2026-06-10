@@ -14,6 +14,7 @@ import BattlePage from './pages/BattlePage';
 import TownPage from './pages/TownPage';
 import EncountersPage from './pages/EncountersPage';
 import EncounterFormPage from './pages/EncounterFormPage';
+import DmPlayersPage from './pages/DmPlayersPage';
 
 function RequireDm({ children }: { children: React.ReactNode }) {
   const { token, user, loading } = useAuth();
@@ -137,6 +138,14 @@ function AppRoutes() {
         element={
           <RequireDm>
             <EncounterFormPage />
+          </RequireDm>
+        }
+      />
+      <Route
+        path="/dm/players"
+        element={
+          <RequireDm>
+            <DmPlayersPage />
           </RequireDm>
         }
       />

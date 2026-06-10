@@ -1217,6 +1217,17 @@ export default function DmPage() {
           </div>
         </Link>
 
+        {/* Quick-nav to the player Pokémon panel */}
+        <Link to="/dm/players">
+          <div className="flex items-center justify-between rounded-md border px-4 py-3 hover:bg-muted/50 transition-colors cursor-pointer min-h-14">
+            <div className="flex flex-col gap-0.5">
+              <span className="text-sm font-medium">Player Pokémon</span>
+              <span className="text-xs text-muted-foreground">View rosters, award EXP, level up</span>
+            </div>
+            <span className="text-sm text-muted-foreground">→</span>
+          </div>
+        </Link>
+
         <CampaignCard token={token} />
         <ActiveBattlesCard token={token} />
         <NpcCard token={token} />

@@ -11,6 +11,8 @@ import { Battle } from '../models/Battle';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
 import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
+import { canEvolve } from '../lib/evolution';
+import { slugToDisplayName } from '../lib/battleCalc';
 
 const router = Router();
 
@@ -1333,6 +1335,208 @@ router.post('/encounters/:id/launch', async (req: Request, res: Response): Promi
     data:  { battleId: battle._id, type: battle.type, status: battle.status },
     error: null,
   });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/pokemon/:pokemonId/award-exp
+// Awards a specific EXP amount to a campaign player's Pokémon, running the
+// full level-up and evolution chain exactly as distributeExp does.
+// Body: { exp: number }
+// ---------------------------------------------------------------------------
+router.post('/pokemon/:pokemonId/award-exp', async (req: Request, res: Response): Promise<void> => {
+  const { pokemonId } = req.params;
+  const { exp: expGain } = req.body as { exp?: number };
+
+  if (typeof expGain !== 'number' || !Number.isInteger(expGain) || expGain <= 0) {
+    res.status(400).json({ data: null, error: 'exp must be a positive integer' });
+    return;
+  }
+
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, pokemonId as string, res);
+  if (!pokemon) return;
+
+  const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId })
+    .select('name expGroup baseStats')
+    .lean();
+  if (!cache) {
+    res.status(400).json({ data: null, error: 'Species data not found in cache.' });
+    return;
+  }
+
+  const displayName = pokemon.nickname ?? slugToDisplayName(cache.name as string);
+  const events: string[] = [`${displayName} gained ${expGain} EXP!`];
+
+  const newExp      = (pokemon.exp as number) + expGain;
+  let newLevel      = pokemon.level as number;
+  let newHp         = pokemon.currentHp as number;
+  let newSpeciesId  = pokemon.speciesId as number;
+  const expGroup    = (cache.expGroup as string) || 'medium-fast';
+  const baseStats   = cache.baseStats as BaseStats | undefined;
+  const overrides   = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
+
+  while (newLevel < 100 && newExp >= expForLevel(newLevel + 1, expGroup)) {
+    if (baseStats && newHp > 0) {
+      const oldMaxHp = computeStats(baseStats, newLevel, pokemon.nature as string).hp;
+      newLevel += 1;
+      const newMaxHp = computeStats(baseStats, newLevel, pokemon.nature as string).hp;
+      newHp += (newMaxHp - oldMaxHp);
+    } else {
+      newLevel += 1;
+    }
+    events.push(`${displayName} grew to level ${newLevel}!`);
+
+    const evolveIntoId = await canEvolve({ speciesId: newSpeciesId, level: newLevel, evolutionOverrides: overrides });
+    if (evolveIntoId !== null) {
+      let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
+      if (!evolvedCache) {
+        try {
+          const fetched = await fetchSpecies(evolveIntoId);
+          const created = await PokedexCache.create(fetched);
+          evolvedCache = created.toObject();
+        } catch { /* leave null — name falls back */ }
+      }
+      if (evolvedCache?.baseStats) {
+        newHp = computeStats(evolvedCache.baseStats as BaseStats, newLevel, pokemon.nature as string).hp;
+      }
+      const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
+      events.push(`${displayName} evolved into ${evolvedName}!`);
+      newSpeciesId = evolveIntoId;
+    }
+  }
+
+  await Pokemon.updateOne(
+    { _id: pokemon._id },
+    { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId } },
+  );
+
+  res.json({ data: { events, level: newLevel, exp: newExp, speciesId: newSpeciesId }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/pokemon/:pokemonId/level-up
+// Increments a campaign player's Pokémon by one level (Rare Candy equivalent).
+// Adjusts currentHp by the maxHp delta and checks for evolution.
+// ---------------------------------------------------------------------------
+router.post('/pokemon/:pokemonId/level-up', async (req: Request, res: Response): Promise<void> => {
+  const { pokemonId } = req.params;
+
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, pokemonId as string, res);
+  if (!pokemon) return;
+
+  if ((pokemon.level as number) >= 100) {
+    res.status(400).json({ data: null, error: 'That Pokémon is already at level 100.' });
+    return;
+  }
+
+  const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId })
+    .select('name baseStats evolutionChain')
+    .lean();
+  if (!cache) {
+    res.status(400).json({ data: null, error: 'Species data not found in cache.' });
+    return;
+  }
+
+  const displayName = pokemon.nickname ?? slugToDisplayName(cache.name as string);
+  const events: string[] = [];
+  const baseStats = cache.baseStats as BaseStats | undefined;
+
+  if (baseStats) {
+    const oldMaxHp = computeStats(baseStats, pokemon.level as number, pokemon.nature as string).hp;
+    pokemon.level = (pokemon.level as number) + 1;
+    const newMaxHp = computeStats(baseStats, pokemon.level as number, pokemon.nature as string).hp;
+    pokemon.currentHp = (pokemon.currentHp as number) + (newMaxHp - oldMaxHp);
+  } else {
+    pokemon.level = (pokemon.level as number) + 1;
+  }
+
+  events.push(`${displayName} grew to level ${pokemon.level}!`);
+
+  const overrides = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
+  const evolveIntoId = await canEvolve({
+    speciesId:          pokemon.speciesId as number,
+    level:              pokemon.level as number,
+    evolutionOverrides: overrides,
+  });
+  if (evolveIntoId !== null) {
+    pokemon.speciesId = evolveIntoId;
+    let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
+    if (!evolvedCache) {
+      try {
+        const fetched = await fetchSpecies(evolveIntoId);
+        const created = await PokedexCache.create(fetched);
+        evolvedCache = created.toObject();
+      } catch { /* leave null */ }
+    }
+    if (evolvedCache?.baseStats) {
+      pokemon.currentHp = computeStats(evolvedCache.baseStats as BaseStats, pokemon.level as number, pokemon.nature as string).hp;
+    }
+    const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
+    events.push(`${displayName} evolved into ${evolvedName}!`);
+  }
+
+  await pokemon.save();
+
+  res.json({ data: { events, level: pokemon.level, exp: pokemon.exp, speciesId: pokemon.speciesId }, error: null });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/players/:username/roster
+// Returns all Pokémon owned by a campaign player, split into party and PC,
+// each enriched with species name, maxHp, and EXP progress fields.
+// ---------------------------------------------------------------------------
+router.get('/players/:username/roster', async (req: Request, res: Response): Promise<void> => {
+  const { username } = req.params;
+
+  const user = await assertCampaignPlayer(req.user!.userId, username as string, res);
+  if (!user) return;
+
+  const pokemons = await Pokemon.find({ ownerId: user._id, ownerType: 'player' })
+    .select('speciesId nickname level exp currentHp nature gender statusCondition heldItem isInParty partySlot')
+    .lean();
+
+  if (pokemons.length === 0) {
+    res.json({ data: { party: [], pc: [] }, error: null });
+    return;
+  }
+
+  const uniqueSpeciesIds = [...new Set(pokemons.map(p => p.speciesId as number))];
+  const speciesDocs = await PokedexCache.find({ pokeApiId: { $in: uniqueSpeciesIds } })
+    .select('pokeApiId name baseStats expGroup')
+    .lean();
+  const speciesMap = new Map(speciesDocs.map(s => [s.pokeApiId as number, s]));
+
+  const enriched = pokemons.map(poke => {
+    const species = speciesMap.get(poke.speciesId as number);
+    const expGroup = (species?.expGroup as string) || 'medium-fast';
+    const baseStats = species?.baseStats as BaseStats | undefined;
+    const maxHp = baseStats ? computeStats(baseStats, poke.level as number, poke.nature as string).hp : 0;
+
+    return {
+      _id:               poke._id,
+      speciesId:         poke.speciesId,
+      speciesName:       species?.name ?? `#${poke.speciesId}`,
+      nickname:          poke.nickname,
+      level:             poke.level,
+      exp:               poke.exp,
+      expForCurrentLevel: expForLevel(poke.level as number, expGroup),
+      expForNextLevel:   (poke.level as number) >= 100 ? null : expForLevel((poke.level as number) + 1, expGroup),
+      currentHp:         poke.currentHp,
+      maxHp,
+      nature:            poke.nature,
+      gender:            poke.gender,
+      statusCondition:   poke.statusCondition,
+      heldItem:          poke.heldItem,
+      isInParty:         poke.isInParty,
+      partySlot:         poke.partySlot,
+    };
+  });
+
+  const party = enriched
+    .filter(p => p.isInParty)
+    .sort((a, b) => ((a.partySlot as number) ?? 99) - ((b.partySlot as number) ?? 99));
+  const pc = enriched.filter(p => !p.isInParty);
+
+  res.json({ data: { party, pc }, error: null });
 });
 
 export default router;
