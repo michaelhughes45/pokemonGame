@@ -15,7 +15,7 @@ type Move = {
   name: string; type: string; category: string;
   power: number | null; accuracy: number | null;
   pp: number | null; priority: number;
-  effect: string; flavorText: string; implemented: boolean;
+  effect: string; flavorText: string; target: string; implemented: boolean;
 };
 
 type EvolutionStep = { speciesId: number; condition: string; value: string };
@@ -197,6 +197,7 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
       priority:    data.priority ?? 0,
       effect:      entry?.short_effect ?? entry?.effect ?? '',
       flavorText:  flavorEntry?.flavor_text?.replace(/\n|\f/g, ' ') ?? '',
+      target:      data.target?.name ?? '',
       implemented: false,
     };
   });

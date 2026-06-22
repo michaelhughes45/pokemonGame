@@ -59,6 +59,7 @@ import {
   DRAIN_MOVES,
   NO_TARGET_MOVE_IDS,
   PRANKSTER_MOVES,
+  getMoveTargetCategory,
 } from '../lib/moveData';
 
 const router = Router();
@@ -3775,13 +3776,32 @@ router.get('/:id/state', async (req: Request, res: Response): Promise<void> => {
       && entry.fainted.length >= battle.npcPokemonLimit,
   }));
 
+  // Determine the target category for the current targeting actor's move so the
+  // frontend knows whether to show a picker (single) or auto-submit (auto).
+  let currentMoveTargetCategory: 'single' | 'auto' | null = null;
+  if (battle.phase === 'targeting' && battle.currentTargetIndex < battle.turnQueue.length) {
+    const currentEntry = battle.turnQueue[battle.currentTargetIndex];
+    if (currentEntry.moveId && currentEntry.activePokemonId) {
+      const actorPoke = pokemonMap.get(currentEntry.activePokemonId.toString());
+      if (actorPoke) {
+        const moveCache = await PokedexCache.findOne(
+          { pokeApiId: actorPoke.speciesId, 'moves.name': currentEntry.moveId },
+          { 'moves.$': 1 },
+        ).lean();
+        const moveTarget = (moveCache?.moves?.[0] as any)?.target ?? '';
+        if (moveTarget) currentMoveTargetCategory = getMoveTargetCategory(moveTarget);
+      }
+    }
+  }
+
   res.json({
     data: {
       ...battle,
-      playerSide:       playerSideWithNames,
-      enemySide:        enemySideWithInfo,
-      noTargetMoveIds:  [...NO_TARGET_MOVE_IDS],
-      wildCatchable:    battle.wildCatchable,
+      playerSide:                playerSideWithNames,
+      enemySide:                 enemySideWithInfo,
+      noTargetMoveIds:           [...NO_TARGET_MOVE_IDS],
+      currentMoveTargetCategory,
+      wildCatchable:             battle.wildCatchable,
     },
     error: null,
   });

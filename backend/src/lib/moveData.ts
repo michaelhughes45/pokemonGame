@@ -423,3 +423,21 @@ export const PRANKSTER_MOVES = new Set([
   ...[...SELF_TARGETING_MOVES].filter(m => !CHARGE_MOVES.has(m)),
   ...Object.keys(WEATHER_MOVES),
 ]);
+
+// PokeAPI `target` values that mean "hit all active enemies" — no target picker needed.
+// Friendly fire (all-adjacent hitting allies) is intentionally omitted for simplicity.
+const AUTO_TARGET_VALUES = new Set([
+  'all-opponents',
+  'all-adjacent-foes',
+  'all-adjacent',
+  'all-pokemon',
+  'all-other-pokemon',
+  'entire-field',
+]);
+
+// Returns 'auto' for spread/field moves that hit all active enemies without a picker,
+// 'single' for everything else (player picks exactly one target). Falls back to 'single'
+// when the target field is empty or unrecognised.
+export function getMoveTargetCategory(target: string): 'single' | 'auto' {
+  return AUTO_TARGET_VALUES.has(target) ? 'auto' : 'single';
+}

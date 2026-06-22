@@ -95,6 +95,7 @@ type BattleState = {
   weather: string | null;
   weatherTurnsRemaining: number | null;
   noTargetMoveIds: string[];
+  currentMoveTargetCategory: 'single' | 'auto' | null;
   playerPokemonLimit: number | null;
   wildCatchable: boolean;
   turnLog: TurnLogEntry[];
@@ -438,6 +439,9 @@ export default function BattlePage() {
     ? (battle?.noTargetMoveIds ?? []).includes(currentTargetEntry.moveId)
     : false;
 
+  const isAutoTargetMove = !isNoTargetMove && battle?.currentMoveTargetCategory === 'auto';
+  const isSingleTargetMove = !isNoTargetMove && !isAutoTargetMove;
+
   // Valid targets the current actor can choose from (opposing side, active and alive)
   const opposingTargets: ActivePokemonInfo[] = (() => {
     if (!currentTargetEntry || !battle) return [];
@@ -703,6 +707,21 @@ export default function BattlePage() {
     setActionError('');
     try {
       await axios.post(`${API}/api/battles/${id}/submit-target`, { targets: [] }, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to submit move.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleAutoTargetMove(targetIds: string[]) {
+    if (!id || targetIds.length === 0 || submitting) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(`${API}/api/battles/${id}/submit-target`, { targets: targetIds }, {
         headers: { Authorization: `Bearer ${token}` },
       });
     } catch (err: unknown) {
@@ -1474,10 +1493,16 @@ export default function BattlePage() {
                     <span className="font-medium text-foreground">
                       {formatMove(currentTargetEntry.moveId)}
                     </span>
-                    {isNoTargetMove ? '.' : ' — select one or more targets below.'}
+                    {isNoTargetMove
+                      ? '.'
+                      : isAutoTargetMove
+                        ? ' — hits all active targets automatically.'
+                        : isSingleTargetMove
+                          ? ' — select one target below.'
+                          : ' — select one or more targets below.'}
                   </p>
 
-                  {!isNoTargetMove && (
+                  {!isNoTargetMove && !isAutoTargetMove && (
                     opposingTargets.length === 0 ? (
                       <p className="text-sm text-muted-foreground">No valid targets available.</p>
                     ) : (
@@ -1488,11 +1513,13 @@ export default function BattlePage() {
                             <button
                               key={info._id}
                               onClick={() =>
-                                setSelectedTargets(prev =>
-                                  prev.includes(info._id)
-                                    ? prev.filter(t => t !== info._id)
-                                    : [...prev, info._id]
-                                )
+                                isSingleTargetMove
+                                  ? setSelectedTargets([info._id])
+                                  : setSelectedTargets(prev =>
+                                      prev.includes(info._id)
+                                        ? prev.filter(t => t !== info._id)
+                                        : [...prev, info._id]
+                                    )
                               }
                               className={[
                                 'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
@@ -1527,6 +1554,16 @@ export default function BattlePage() {
                       className="w-full min-h-11"
                     >
                       {submitting ? 'Confirming…' : `Use ${formatMove(currentTargetEntry.moveId)}`}
+                    </Button>
+                  ) : isAutoTargetMove ? (
+                    <Button
+                      onClick={() => handleAutoTargetMove(opposingTargets.map(t => t._id))}
+                      disabled={submitting || opposingTargets.length === 0}
+                      className="w-full min-h-11"
+                    >
+                      {submitting
+                        ? 'Confirming…'
+                        : `Use ${formatMove(currentTargetEntry.moveId)} — hits all (${opposingTargets.length})`}
                     </Button>
                   ) : (
                     <Button

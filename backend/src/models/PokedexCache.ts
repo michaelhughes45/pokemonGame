@@ -21,6 +21,7 @@ const MoveSchema = new Schema(
     priority:    { type: Number, default: 0 },
     effect:      { type: String, default: '' },
     flavorText:  { type: String, default: '' },
+    target:      { type: String, default: '' },
     implemented: { type: Boolean, default: false },
   },
   { _id: false }
