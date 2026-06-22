@@ -6,9 +6,25 @@ export const GEN9 = Generations.get(9);
 
 export type CachedAbility = { name: string; isHidden: boolean };
 
+// Capitalize the first character of a string. Used to format names for @smogon/calc.
+export const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
+
+// Zero-valued stat block in @smogon/calc's stat key format. Used as a fallback
+// when a Pokémon's base stats are unavailable.
+export const ZERO_STATS = { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 } as const;
+
 // Convert a PokeAPI slug to a display name. "ice-beam" → "Ice Beam"
 export function slugToDisplayName(slug: string): string {
   return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
+// Returns the display name for a Pokémon: nickname if set, otherwise species name from cache.
+export function pokeDisplayName(
+  poke:     { nickname?: unknown } | null | undefined,
+  cache:    { name?: unknown }    | null | undefined,
+  fallback = 'Pokémon',
+): string {
+  return (poke?.nickname as string | null | undefined) ?? (cache ? slugToDisplayName(cache.name as string) : fallback);
 }
 
 // Map our battle weather strings to the values @smogon/calc expects.
