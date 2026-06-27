@@ -1,3 +1,4 @@
+import type { HydratedDocument } from 'mongoose';
 import { Generations } from '@smogon/calc';
 import { IBattle, StatStages } from '../models/Battle';
 import { StatEffect, STAT_DISPLAY_NAMES } from './moveData';
@@ -92,4 +93,16 @@ export function applyStatStageEffects(
   }
 
   return events;
+}
+
+// Finds or creates the log entry for the current turn and appends events to it.
+export function appendToLog(battle: HydratedDocument<IBattle>, ...events: string[]): void {
+  if (events.length === 0) return;
+  let entry = battle.turnLog.find(t => t.turn === battle.turnNumber);
+  if (!entry) {
+    battle.turnLog.push({ turn: battle.turnNumber, events: [] });
+    entry = battle.turnLog[battle.turnLog.length - 1];
+  }
+  for (const ev of events) entry.events.push(ev);
+  battle.markModified('turnLog');
 }
