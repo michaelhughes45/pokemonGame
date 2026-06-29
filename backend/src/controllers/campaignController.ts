@@ -1,0 +1,276 @@
+import { Request, Response } from 'express';
+import mongoose from 'mongoose';
+import { Campaign } from '../models/Campaign';
+import { User } from '../models/User';
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+function sendError(res: Response, status: number, message: string): void {
+  res.status(status).json({ data: null, error: message });
+}
+
+function sendOk(res: Response, data: unknown, status = 200): void {
+  res.status(status).json({ data, error: null });
+}
+
+async function findActiveCampaignByDm(userId: string) {
+  return Campaign.findOne({ dmId: userId, isActive: true });
+}
+
+async function findUserByUsername(username: string) {
+  return User.findOne({ username }).lean();
+}
+
+async function removePlayerFromCampaign(
+  campaign: InstanceType<typeof Campaign>,
+  playerId: string | mongoose.Types.ObjectId,
+): Promise<void> {
+  campaign.playerIds = campaign.playerIds.filter(id => !id.equals(playerId));
+  await campaign.save();
+  await User.updateOne({ _id: playerId }, { currentCampaignId: null });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/campaigns/mine
+// Returns the current user's campaign.
+//   DM/admin → the campaign where they are the DM (if any)
+//   Player   → the campaign they have accepted and joined (if any)
+// Returns { data: null } if the user has no campaign — not an error.
+// ---------------------------------------------------------------------------
+export async function getMine(req: Request, res: Response): Promise<void> {
+  const { userId, role } = req.user!;
+
+  let campaign;
+
+  if (role === 'dm' || role === 'admin') {
+    campaign = await findActiveCampaignByDm(userId);
+  } else {
+    const user = await User.findById(userId).lean();
+    if (!user?.currentCampaignId) return sendOk(res, null);
+    campaign = await Campaign.findById(user.currentCampaignId);
+  }
+
+  if (!campaign) return sendOk(res, null);
+
+  const players = await User.find({ _id: { $in: campaign.playerIds } })
+    .select('username')
+    .lean();
+
+  const inviteUserIds = campaign.pendingInvites.map(i => i.userId);
+  const inviteUsers = await User.find({ _id: { $in: inviteUserIds } })
+    .select('username')
+    .lean();
+  const inviteUsernameMap = new Map(inviteUsers.map(u => [u._id.toString(), u.username]));
+
+  const pendingInvites = campaign.pendingInvites.map(i => ({
+    userId:   i.userId,
+    username: inviteUsernameMap.get(i.userId.toString()) ?? 'Unknown',
+    sentAt:   i.sentAt,
+  }));
+
+  sendOk(res, {
+    _id:            campaign._id,
+    name:           campaign.name,
+    dmId:           campaign.dmId,
+    players,
+    pendingInvites,
+    isActive:       campaign.isActive,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/campaigns/invites
+// Returns all campaigns this user has a pending invite to.
+// Used by the player's dashboard to show the accept/decline UI.
+// ---------------------------------------------------------------------------
+export async function getInvites(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+
+  const campaigns = await Campaign.find({
+    'pendingInvites.userId': new mongoose.Types.ObjectId(userId),
+    isActive: true,
+  }).lean();
+
+  // Batch-fetch all DMs in one query instead of one per campaign
+  const dmIds = campaigns.map(c => c.dmId);
+  const dms = await User.find({ _id: { $in: dmIds } }).select('username').lean();
+  const dmMap = new Map(dms.map(d => [d._id.toString(), d.username]));
+
+  const result = campaigns.map(c => ({
+    _id:        c._id,
+    name:       c.name,
+    dmUsername: dmMap.get(c.dmId.toString()) ?? 'Unknown',
+  }));
+
+  sendOk(res, result);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/campaigns
+// DM creates a new campaign. A DM can only have one active campaign at a time.
+// Body: { name }
+// ---------------------------------------------------------------------------
+export async function createCampaign(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { name } = req.body as { name?: string };
+
+  if (!name?.trim()) {
+    return sendError(res, 400, 'Campaign name is required');
+  }
+
+  const existing = await findActiveCampaignByDm(userId);
+  if (existing) {
+    return sendError(res, 400, 'You already have an active campaign');
+  }
+
+  const campaign = await Campaign.create({ name: name.trim(), dmId: userId });
+
+  sendOk(res, { _id: campaign._id, name: campaign.name }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/campaigns/invite
+// DM invites a player to their campaign by username.
+// Body: { username }
+// Guards: player must exist, not already in a campaign, not already invited.
+// ---------------------------------------------------------------------------
+export async function invitePlayer(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { username } = req.body as { username?: string };
+
+  if (!username?.trim()) {
+    return sendError(res, 400, 'username is required');
+  }
+
+  const campaign = await findActiveCampaignByDm(userId);
+  if (!campaign) {
+    return sendError(res, 400, 'You do not have an active campaign. Create one first.');
+  }
+
+  const target = await findUserByUsername(username.trim());
+  if (!target) {
+    return sendError(res, 404, `Player "${username}" not found`);
+  }
+  if (target.role !== 'player') {
+    return sendError(res, 400, 'Only players can be invited to a campaign');
+  }
+  if (target.currentCampaignId) {
+    return sendError(res, 400, `"${username}" is already in a campaign`);
+  }
+
+  const targetId = target._id as mongoose.Types.ObjectId;
+
+  if (campaign.playerIds.some(id => id.equals(targetId))) {
+    return sendError(res, 400, `"${username}" is already in your campaign`);
+  }
+  if (campaign.pendingInvites.some(i => i.userId.equals(targetId))) {
+    return sendError(res, 400, `"${username}" already has a pending invite`);
+  }
+
+  campaign.pendingInvites.push({ userId: targetId, sentAt: new Date() });
+  await campaign.save();
+
+  sendOk(res, { invited: username });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/campaigns/invite/respond
+// Player accepts or declines a campaign invite.
+// Body: { campaignId, action: 'accept' | 'decline' }
+// On accept: player is added to playerIds, invite removed, currentCampaignId set.
+// On decline: invite is simply removed.
+// ---------------------------------------------------------------------------
+export async function respondToInvite(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { campaignId, action } = req.body as { campaignId?: string; action?: string };
+
+  if (!campaignId || !action) {
+    return sendError(res, 400, 'campaignId and action are required');
+  }
+  if (action !== 'accept' && action !== 'decline') {
+    return sendError(res, 400, 'action must be "accept" or "decline"');
+  }
+
+  const campaign = await Campaign.findById(campaignId);
+  if (!campaign || !campaign.isActive) {
+    return sendError(res, 404, 'Campaign not found');
+  }
+
+  const inviteIndex = campaign.pendingInvites.findIndex(i => i.userId.equals(userId));
+  if (inviteIndex === -1) {
+    return sendError(res, 400, 'You do not have a pending invite to this campaign');
+  }
+
+  campaign.pendingInvites.splice(inviteIndex, 1);
+
+  if (action === 'accept') {
+    const user = await User.findById(userId).lean();
+    if (user?.currentCampaignId) {
+      return sendError(res, 400, 'You are already in a campaign. Leave it before joining another.');
+    }
+
+    campaign.playerIds.push(new mongoose.Types.ObjectId(userId));
+    await campaign.save();
+    await User.updateOne({ _id: userId }, { currentCampaignId: campaign._id });
+
+    sendOk(res, { joined: campaign.name });
+  } else {
+    await campaign.save();
+    sendOk(res, { declined: campaign.name });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/campaigns/leave
+// Player leaves their current campaign.
+// Removes them from playerIds and clears currentCampaignId.
+// ---------------------------------------------------------------------------
+export async function leaveCampaign(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+
+  const user = await User.findById(userId).lean();
+  if (!user?.currentCampaignId) {
+    return sendError(res, 400, 'You are not in a campaign');
+  }
+
+  const campaign = await Campaign.findById(user.currentCampaignId);
+  if (!campaign) {
+    // Campaign was deleted — just clear the dangling reference
+    await User.updateOne({ _id: userId }, { currentCampaignId: null });
+    return sendOk(res, { left: true });
+  }
+
+  await removePlayerFromCampaign(campaign, userId);
+  sendOk(res, { left: campaign.name });
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/campaigns/players/:username
+// DM removes a player from their campaign.
+// Also clears the player's currentCampaignId.
+// ---------------------------------------------------------------------------
+export async function removePlayer(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const username = String(req.params.username);
+
+  const campaign = await findActiveCampaignByDm(userId);
+  if (!campaign) {
+    return sendError(res, 400, 'You do not have an active campaign');
+  }
+
+  const target = await findUserByUsername(username);
+  if (!target) {
+    return sendError(res, 404, `Player "${username}" not found`);
+  }
+
+  const targetId = target._id as mongoose.Types.ObjectId;
+
+  if (!campaign.playerIds.some(id => id.equals(targetId))) {
+    return sendError(res, 400, `"${username}" is not in your campaign`);
+  }
+
+  await removePlayerFromCampaign(campaign, targetId);
+  sendOk(res, { removed: username });
+}

@@ -354,11 +354,17 @@ pokemonGame/
       lib/
         db.ts                ← MongoDB connection (connectDB)
         statCalc.ts          ← computeStats (Gen 3+ formula) — shared utility
-        itemData.ts          ← getPocket(itemId) lookup table — itemId → ItemPocket
+        itemData.ts          ← getPocket(itemId) lookup table; BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier
         pokeapi.ts           ← fetchSpecies (PokeAPI fetch + transform)
-      middleware/            ← auth middleware (JWT verify)
-      models/                ← Mongoose models (User, Pokemon, Item, PokedexCache)
-      routes/                ← Express routers (auth, pokemon, items, starter, dm, admin, pokedex)
+        moveData.ts          ← all move tables + types + getHitCount + getMoveTargetCategory + derived sets
+        abilityData.ts       ← STATUS_IMMUNITY_ABILITIES, ILATE_MAP, PINCH_ABILITIES, WEATHER_SPEED_DOUBLERS
+        weatherData.ts       ← WEATHER_MOVES, ENTRY_ABILITY_WEATHER, ENTRY_WEATHER_MESSAGES
+        battleCalc.ts        ← GEN9, CachedAbility, slugToDisplayName, pokeDisplayName, toCalcWeather, toCalcStatus, resolveAbilitySlug, applyStatStageEffects, cap, ZERO_STATS, appendToLog
+      middleware/            ← auth middleware (JWT verify, requireDm)
+      models/                ← Mongoose models (User, Pokemon, Item, PokedexCache, Battle, etc.)
+      controllers/
+        battleController.ts  ← all battle route handlers + helpers (~1,900 lines); routes/battles.ts imports from here
+      routes/                ← Express routers (auth, pokemon, items, starter, dm, admin, pokedex, battles)
       index.ts               ← app entry point, port 4000
     .env                     ← MONGODB_URI, JWT_SECRET, PORT, FRONTEND_URL
   .gitignore
@@ -515,7 +521,7 @@ pokemonGame/
 - [x] **4.14** DM EXP/Pokémon panel — `GET /api/dm/players/:username/roster` returns enriched party + PC arrays with HP/EXP progress data; `POST /api/dm/pokemon/:pokemonId/award-exp` runs full level-up + evolution loop (same as `distributeExp`); `POST /api/dm/pokemon/:pokemonId/level-up` is Rare Candy equivalent; `DmPlayersPage` at `/dm/players` — player picker, Party + PC roster cards with HP/EXP bars, per-Pokémon Award EXP input + Level Up button, roster auto-refreshes after each action; "Player Pokémon" nav link added to DM panel
 - [x] **4.15** Move targeting enforcement — `target` field added to `PokedexCache.moves[]` schema and fetched from PokeAPI in `fetchSpecies`; `getMoveTargetCategory(target)` helper in `lib/moveData.ts` categorises moves as `'auto'` (spread/field: all-opponents, all-adjacent-foes, all-adjacent, all-pokemon, all-other-pokemon, entire-field) or `'single'` (everything else); state endpoint looks up the current actor's move target from cache and returns `currentMoveTargetCategory: 'single' | 'auto' | null`; frontend: auto moves show "Use [Move] — hits all (N)" button that submits all active opposing Pokémon IDs via `handleAutoTargetMove`; single moves enforce one selection (click replaces, not toggles); adjacency remains self-reported from physical table — no position tracking added
 - [x] **4.16** `battles.ts` cleanup — `submit-target` `if (!hitSelf)` block split into three named async helpers (`resolveWeatherMove`, `resolveSelfTargetMove`, `resolveDamagingMove`) with `ActiveEntry` type alias; 5 duplicate 1/16-heal blocks in `applyEndOfRound` consolidated into `applyFractionHeal` helper (Rain Dish, Ice Body, Dry Skin rain, Ingrain, Aqua Ring); `cap` / `ZERO_STATS` exported from `lib/battleCalc.ts` replacing two inline re-declarations
-- [ ] **4.17** Controllers/routes split — extract the 13 route handler functions into named exports in `controllers/battleController.ts` (`createBattle`, `startBattle`, `sendOut`, `dmSendOut`, `submitMove`, `dmSubmitMove`, `submitTarget`, `advanceRound`, `setWeather`, `deleteBattle`, `getBattleState`, `getDmBattles`, `getActiveBattle`); `routes/battles.ts` becomes a thin manifest of `router.xyz(path, handler)` calls matching the controllers/routes pattern used elsewhere
+- [x] **4.17** Controllers/routes split — all route handlers and every battle helper extracted from `routes/battles.ts` into `controllers/battleController.ts`; `routes/battles.ts` reduced from ~3,800 lines to a 68-line annotated route manifest (`router.verb(path, middleware?, handler)` per line); exported handlers: `createBattle`, `startBattle`, `sendOut`, `dmSendOut`, `submitMove`, `dmSubmitMove`, `submitTarget`, `advanceRound`, `setWeather`, `deleteBattle`, `getBattleState`, `getDmBattles`, `getActiveBattle`, `dmAutoSubmit`; private helpers stay in the same file (not exported); `checkAndAdvance` and `applyEntryAbilities` exported because DM routes call them directly
 - [ ] **5.1** EV award engine — post-battle evYield distribution, 252/510 caps
 - [ ] **5.2** EV tools — DM EV panel, EV-reducing berries from bag
 - [ ] **5.3** Trainer IV activation — +20 stat bonus passed to @smogon/calc
@@ -529,8 +535,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 4.17 — Controllers/routes split (extract 13 handler functions into `controllers/battleController.ts`)
-- **Just finished:** 4.16 — `battles.ts` cleanup (sub-function split of `submit-target`, `applyFractionHeal` helper, `cap`/`ZERO_STATS` extracted to `lib/battleCalc.ts`). Committed and tagged v4.16.
+- **Starting:** 5.1 — EV award engine (post-battle evYield distribution, 252/510 caps)
+- **Just finished:** 4.17 — Controllers/routes split (all handlers + helpers moved to `controllers/battleController.ts`; `routes/battles.ts` is now a 68-line annotated manifest). Committed and tagged v4.17.
 - **Known issues / blockers:** none
 
 ---

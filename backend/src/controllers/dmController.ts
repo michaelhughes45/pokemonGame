@@ -1,0 +1,1192 @@
+import { Request, Response } from 'express';
+import mongoose from 'mongoose';
+import { User } from '../models/User';
+import { Pokemon } from '../models/Pokemon';
+import { PokedexCache } from '../models/PokedexCache';
+import { Item } from '../models/Item';
+import { Campaign } from '../models/Campaign';
+import { Npc } from '../models/Npc';
+import { Encounter } from '../models/Encounter';
+import { Battle } from '../models/Battle';
+import { getPocket } from '../lib/itemData';
+import { fetchSpecies } from '../lib/pokeapi';
+import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
+import { canEvolve } from '../lib/evolution';
+import { slugToDisplayName } from '../lib/battleCalc';
+
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+type LeanCampaign = {
+  _id: mongoose.Types.ObjectId;
+  playerIds: mongoose.Types.ObjectId[];
+  [key: string]: unknown;
+};
+
+type LevelUpMoveEntry = { moveId: string; level: number };
+type MoveEntry        = { name: string; pp: number | null };
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+function sendError(res: Response, status: number, message: string): void {
+  res.status(status).json({ data: null, error: message });
+}
+
+function sendOk(res: Response, data: unknown, status = 200): void {
+  res.status(status).json({ data, error: null });
+}
+
+// Returns the DM's active campaign or sends a 403 and returns null.
+async function assertDmCampaign(dmUserId: string, res: Response): Promise<LeanCampaign | null> {
+  const campaign = await Campaign.findOne({ dmId: dmUserId, isActive: true }).lean();
+  if (!campaign) {
+    sendError(res, 403, 'You do not have an active campaign');
+    return null;
+  }
+  return campaign as LeanCampaign;
+}
+
+// Verifies the DM has an active campaign and the target username is a member.
+// Returns the target user document or null (after sending the appropriate error).
+async function assertCampaignPlayer(
+  dmUserId: string,
+  username: string,
+  res: Response,
+): Promise<{ _id: mongoose.Types.ObjectId; [key: string]: unknown } | null> {
+  const campaign = await assertDmCampaign(dmUserId, res);
+  if (!campaign) return null;
+
+  const target = await User.findOne({ username }).lean();
+  if (!target) {
+    sendError(res, 404, `Player "${username}" not found`);
+    return null;
+  }
+
+  const targetId = (target._id as mongoose.Types.ObjectId).toString();
+  if (!campaign.playerIds.some(id => id.toString() === targetId)) {
+    sendError(res, 403, `"${username}" is not in your campaign`);
+    return null;
+  }
+
+  return target as { _id: mongoose.Types.ObjectId; [key: string]: unknown };
+}
+
+// Validates an NPC ID, verifies the DM's campaign, and confirms the NPC belongs to it.
+// Returns the hydrated Npc document (needed for party.push/save callers) or null.
+async function assertDmNpc(
+  dmUserId: string,
+  npcId: string,
+  res: Response,
+): Promise<InstanceType<typeof Npc> | null> {
+  if (!mongoose.Types.ObjectId.isValid(npcId)) {
+    sendError(res, 400, 'Invalid NPC ID');
+    return null;
+  }
+  const campaign = await assertDmCampaign(dmUserId, res);
+  if (!campaign) return null;
+  const npc = await Npc.findOne({ _id: npcId, campaignId: campaign._id });
+  if (!npc) {
+    sendError(res, 404, 'NPC not found in your campaign');
+    return null;
+  }
+  return npc;
+}
+
+// Verifies the DM has an active campaign and owns the given Pokémon via campaign membership.
+async function assertDmOwnsPokemon(
+  dmUserId: string,
+  pokemonId: string,
+  res: Response,
+): Promise<InstanceType<typeof Pokemon> | null> {
+  const campaign = await assertDmCampaign(dmUserId, res);
+  if (!campaign) return null;
+
+  if (!mongoose.Types.ObjectId.isValid(pokemonId)) {
+    sendError(res, 400, 'Invalid Pokémon ID');
+    return null;
+  }
+
+  const pokemon = await Pokemon.findById(pokemonId);
+  if (!pokemon || pokemon.ownerType !== 'player') {
+    sendError(res, 404, 'Pokémon not found');
+    return null;
+  }
+
+  if (!campaign.playerIds.some(id => id.toString() === pokemon.ownerId.toString())) {
+    sendError(res, 403, 'That Pokémon does not belong to a player in your campaign');
+    return null;
+  }
+
+  return pokemon;
+}
+
+// Validates an encounter ID and verifies it belongs to the DM's active campaign.
+// Returns { encounter, campaign } so callers avoid a second campaign query.
+async function assertDmEncounter(dmUserId: string, encounterId: string, res: Response) {
+  if (!mongoose.Types.ObjectId.isValid(encounterId)) {
+    sendError(res, 400, 'Invalid encounter ID');
+    return null;
+  }
+  const campaign = await Campaign.findOne({ dmId: dmUserId, isActive: true }).lean() as LeanCampaign | null;
+  if (!campaign) {
+    sendError(res, 403, 'You do not have an active campaign');
+    return null;
+  }
+  const encounter = await Encounter.findOne({
+    _id:        encounterId,
+    campaignId: campaign._id,
+  }).lean();
+  if (!encounter) {
+    sendError(res, 404, 'Encounter not found in your campaign');
+    return null;
+  }
+  return { encounter, campaign };
+}
+
+// Looks up a species from the PokedexCache, fetching from PokeAPI when absent.
+// Also refreshes the levelUpMoves field if missing from an existing cache entry.
+// Returns the species document or null (after sending a 404).
+async function resolveSpeciesDoc(species: string | number, res: Response) {
+  const isNumeric   = /^\d+$/.test(String(species));
+  const lookupQuery = isNumeric ? { pokeApiId: Number(species) } : { name: String(species).toLowerCase() };
+  const fetchKey    = isNumeric ? Number(species) : String(species).toLowerCase();
+
+  let speciesDoc = await PokedexCache.findOne(lookupQuery).lean();
+
+  if (!speciesDoc) {
+    try {
+      const transformed = await fetchSpecies(fetchKey);
+      speciesDoc = (await PokedexCache.create(transformed)).toObject();
+    } catch {
+      sendError(res, 404, `Species "${species}" not found in PokeAPI.`);
+      return null;
+    }
+  } else if (!speciesDoc.levelUpMoves?.length) {
+    try {
+      const transformed = await fetchSpecies(fetchKey);
+      await PokedexCache.updateOne(
+        { pokeApiId: transformed.pokeApiId },
+        { $set: { levelUpMoves: transformed.levelUpMoves } },
+      );
+      // Cast to any: lean() returns a plain object at runtime; this is purely a TS annotation issue.
+      (speciesDoc as any).levelUpMoves = transformed.levelUpMoves;
+    } catch {
+      // non-fatal — Pokémon will be created without learnable moves
+    }
+  }
+
+  return speciesDoc;
+}
+
+// Derives gender from species data, with an optional explicit override.
+function resolveGender(
+  genderRatio: number,
+  requestedGender?: string,
+): 'male' | 'female' | 'none' {
+  if (requestedGender === 'male' || requestedGender === 'female' || requestedGender === 'none') {
+    return requestedGender;
+  }
+  if (genderRatio === -1) return 'none';   // genderless species (Magnemite, etc.)
+  if (genderRatio === 0)  return 'female'; // always female (Chansey, etc.)
+  return 'male';
+}
+
+// Derives the last 4 level-up moves learnable at or below the given level.
+function deriveStartingMoves(
+  speciesDoc: { levelUpMoves?: unknown; moves?: unknown },
+  level: number,
+) {
+  const levelUpMoves  = (speciesDoc.levelUpMoves ?? []) as LevelUpMoveEntry[];
+  const moveEntries   = (speciesDoc.moves         ?? []) as MoveEntry[];
+  const moveDetailMap = new Map(moveEntries.map(m => [m.name, m]));
+
+  return levelUpMoves
+    .filter(m => m.level <= level && m.level > 0)
+    .slice(-4)
+    .map(entry => {
+      const detail = moveDetailMap.get(entry.moveId);
+      return { moveId: entry.moveId, currentPP: detail?.pp ?? 10, maxPP: detail?.pp ?? 10 };
+    });
+}
+
+// Resolves the pocket for an item slug; sends a 400 and returns null if unrecognised.
+function resolveItemPocket(itemId: string, res: Response): string | null {
+  const pocket = getPocket(itemId);
+  if (!pocket) {
+    sendError(res, 400,
+      `"${itemId}" is not a recognised item. Check the PokeAPI slug (e.g. "super-potion", "poke-ball").`,
+    );
+    return null;
+  }
+  return pocket;
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/dm/players/:username/starter
+// Deletes all Pokémon belonging to the player so they can pick a new starter.
+// ---------------------------------------------------------------------------
+export async function deletePlayerStarter(req: Request, res: Response): Promise<void> {
+  const username = String(req.params.username);
+  const user = await assertCampaignPlayer(req.user!.userId, username, res);
+  if (!user) return;
+
+  const result = await Pokemon.deleteMany({ ownerId: user._id });
+  sendOk(res, { deleted: result.deletedCount, username });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/players/:username/pokemon
+// DM gives a Pokémon directly to a player. Always slots into party.
+// Body: { species, level?, nature?, gender? }
+// ---------------------------------------------------------------------------
+export async function givePlayerPokemon(req: Request, res: Response): Promise<void> {
+  const username = String(req.params.username);
+  const { species, level = 5, nature: rawNature = 'random', gender } = req.body as {
+    species: string | number;
+    level?: number;
+    nature?: string;
+    gender?: string;
+  };
+
+  const nature = rawNature.toLowerCase() === 'random'
+    ? NATURES[Math.floor(Math.random() * NATURES.length)]
+    : rawNature;
+
+  if (!species && species !== 0) {
+    return sendError(res, 400, 'species is required (name or dex number)');
+  }
+  if (!NATURES.includes(nature)) {
+    return sendError(res, 400, `Invalid nature. Valid values: ${NATURES.join(', ')}`);
+  }
+
+  const user = await assertCampaignPlayer(req.user!.userId, username, res);
+  if (!user) return;
+
+  const speciesDoc = await resolveSpeciesDoc(species, res);
+  if (!speciesDoc) return;
+
+  // Gen 3+ HP formula (no IVs/EVs until Phase 5)
+  const maxHp         = Math.floor((2 * speciesDoc.baseStats.hp * level) / 100) + level + 10;
+  const resolvedGender = resolveGender(speciesDoc.genderRatio as number, gender);
+  const moves          = deriveStartingMoves(speciesDoc, level);
+  const partyCount     = await Pokemon.countDocuments({ ownerId: user._id, isInParty: true });
+
+  const pokemon = await Pokemon.create({
+    speciesId: speciesDoc.pokeApiId,
+    ownerId:   user._id,
+    ownerType: 'player',
+    nickname:  null,
+    level,
+    exp:       expForLevel(level, (speciesDoc.expGroup as string) || 'medium-fast'),
+    currentHp: maxHp,
+    nature,
+    gender:    resolvedGender,
+    heldItem:  null,
+    moves,
+    isInParty: true,
+    partySlot: partyCount + 1,
+  });
+
+  sendOk(res, {
+    _id:         pokemon._id,
+    speciesId:   pokemon.speciesId,
+    speciesName: speciesDoc.name,
+    level:       pokemon.level,
+    nature:      pokemon.nature,
+    gender:      pokemon.gender,
+    isInParty:   pokemon.isInParty,
+    partySlot:   pokemon.partySlot,
+  }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/items/give
+// Give items directly to a player's bag.
+// Body: { username, itemId, quantity? }
+// ---------------------------------------------------------------------------
+export async function givePlayerItem(req: Request, res: Response): Promise<void> {
+  const { username, itemId, quantity = 1 } = req.body as {
+    username?: string;
+    itemId?: string;
+    quantity?: number;
+  };
+
+  if (!username?.trim()) {
+    return sendError(res, 400, 'username is required');
+  }
+  if (!itemId?.trim()) {
+    return sendError(res, 400, 'itemId is required');
+  }
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    return sendError(res, 400, 'quantity must be an integer between 1 and 99');
+  }
+
+  const pocket = resolveItemPocket(itemId.trim(), res);
+  if (!pocket) return;
+
+  const user = await assertCampaignPlayer(req.user!.userId, username.trim(), res);
+  if (!user) return;
+
+  const item = await Item.findOneAndUpdate(
+    { ownerId: user._id, itemId: itemId.trim() },
+    { $inc: { quantity }, $setOnInsert: { pocket } },
+    { upsert: true, new: true },
+  );
+
+  sendOk(res, { itemId: item.itemId, quantity: item.quantity, pocket: item.pocket, username }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/npcs
+// Returns all NPCs belonging to the DM's active campaign.
+// Returns { data: [] } (not a 403) when the DM has no campaign yet.
+// ---------------------------------------------------------------------------
+export async function getNpcs(req: Request, res: Response): Promise<void> {
+  const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
+  if (!campaign) {
+    return sendOk(res, []);
+  }
+
+  const npcs = await Npc.find({ campaignId: campaign._id })
+    .select('name type party')
+    .lean();
+
+  sendOk(res, npcs.map(n => ({
+    _id:        n._id,
+    name:       n.name,
+    type:       n.type,
+    partyCount: n.party.length,
+  })));
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs
+// Creates a new NPC in the DM's active campaign.
+// Body: { name, type? }
+// ---------------------------------------------------------------------------
+export async function createNpc(req: Request, res: Response): Promise<void> {
+  const { name, type = 'trainer' } = req.body as { name?: string; type?: string };
+
+  if (!name?.trim()) {
+    return sendError(res, 400, 'name is required');
+  }
+  if (!['trainer', 'wild'].includes(type)) {
+    return sendError(res, 400, "type must be 'trainer' or 'wild'");
+  }
+
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const npc = await Npc.create({
+    campaignId:  campaign._id,
+    createdByDm: req.user!.userId,
+    name:        name.trim(),
+    type,
+    party:       [],
+    aiStrategy:  'random',
+  });
+
+  sendOk(res, { _id: npc._id, name: npc.name, type: npc.type, partyCount: 0 }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs/:npcId/pokemon
+// Gives a Pokémon to an NPC and adds it to the NPC's party array.
+// Body: { species, level?, nature?, gender? }
+// ---------------------------------------------------------------------------
+export async function giveNpcPokemon(req: Request, res: Response): Promise<void> {
+  const npcId = String(req.params.npcId);
+  const { species, level = 5, nature: rawNature = 'random', gender } = req.body as {
+    species: string | number;
+    level?: number;
+    nature?: string;
+    gender?: string;
+  };
+
+  const nature = rawNature.toLowerCase() === 'random'
+    ? NATURES[Math.floor(Math.random() * NATURES.length)]
+    : rawNature;
+
+  if (!species && species !== 0) {
+    return sendError(res, 400, 'species is required (name or dex number)');
+  }
+  if (!NATURES.includes(nature)) {
+    return sendError(res, 400, `Invalid nature. Valid values: ${NATURES.join(', ')}`);
+  }
+
+  const npc = await assertDmNpc(req.user!.userId, npcId, res);
+  if (!npc) return;
+
+  const speciesDoc = await resolveSpeciesDoc(species, res);
+  if (!speciesDoc) return;
+
+  const maxHp          = Math.floor((2 * speciesDoc.baseStats.hp * level) / 100) + level + 10;
+  const resolvedGender = resolveGender(speciesDoc.genderRatio as number, gender);
+  const moves          = deriveStartingMoves(speciesDoc, level);
+
+  const pokemon = await Pokemon.create({
+    speciesId: speciesDoc.pokeApiId,
+    ownerId:   npc._id,
+    ownerType: 'npc',
+    nickname:  null,
+    level,
+    exp:       expForLevel(level, (speciesDoc.expGroup as string) || 'medium-fast'),
+    currentHp: maxHp,
+    nature,
+    gender:    resolvedGender,
+    heldItem:  null,
+    moves,
+    isInParty: true,
+    partySlot: null,
+  });
+
+  npc.party.push(pokemon._id);
+  await npc.save();
+
+  sendOk(res, {
+    _id:         pokemon._id,
+    speciesId:   pokemon.speciesId,
+    speciesName: speciesDoc.name,
+    level:       pokemon.level,
+    nature:      pokemon.nature,
+  }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/npcs/:npcId/party
+// Returns the full party Pokémon list for an NPC.
+// ---------------------------------------------------------------------------
+export async function getNpcParty(req: Request, res: Response): Promise<void> {
+  const npcId = String(req.params.npcId);
+  const npc = await assertDmNpc(req.user!.userId, npcId, res);
+  if (!npc) return;
+
+  const pokemons = await Pokemon.find(
+    { ownerId: npc._id, ownerType: 'npc' },
+    'speciesId nickname level currentHp nature moves',
+  ).lean();
+
+  const speciesIds = [...new Set(pokemons.map(p => p.speciesId))];
+  const caches = speciesIds.length > 0
+    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name').lean()
+    : [];
+  const nameMap = new Map(caches.map(c => [c.pokeApiId as number, c.name]));
+
+  sendOk(res, pokemons.map(p => ({
+    _id:         p._id,
+    speciesId:   p.speciesId,
+    speciesName: nameMap.get(p.speciesId) ?? `#${p.speciesId}`,
+    nickname:    p.nickname,
+    level:       p.level,
+    currentHp:   p.currentHp,
+    moves:       p.moves,
+  })));
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/pokemon/:pokemonId/evolution-override  — block evolution
+// DELETE /api/dm/pokemon/:pokemonId/evolution-override — lift the block
+// ---------------------------------------------------------------------------
+export async function blockEvolution(req: Request, res: Response): Promise<void> {
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, String(req.params.pokemonId), res);
+  if (!pokemon) return;
+
+  if (pokemon.evolutionOverrides.some(o => o.condition === 'prevent')) {
+    return sendOk(res, { message: 'Evolution is already blocked for this Pokémon' });
+  }
+
+  pokemon.evolutionOverrides.push({ condition: 'prevent', value: '' });
+  await pokemon.save();
+  sendOk(res, { message: 'Evolution blocked' });
+}
+
+export async function unblockEvolution(req: Request, res: Response): Promise<void> {
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, String(req.params.pokemonId), res);
+  if (!pokemon) return;
+
+  const before = pokemon.evolutionOverrides.length;
+  pokemon.evolutionOverrides = pokemon.evolutionOverrides.filter(
+    o => o.condition !== 'prevent',
+  ) as typeof pokemon.evolutionOverrides;
+
+  if (pokemon.evolutionOverrides.length === before) {
+    return sendOk(res, { message: 'No evolution block was set' });
+  }
+
+  await pokemon.save();
+  sendOk(res, { message: 'Evolution block lifted' });
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/dm/pokemon/:pokemonId/hidden-ability — toggle hidden ability on/off
+// ---------------------------------------------------------------------------
+export async function toggleHiddenAbility(req: Request, res: Response): Promise<void> {
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, String(req.params.pokemonId), res);
+  if (!pokemon) return;
+
+  pokemon.hasHiddenAbility = !pokemon.hasHiddenAbility;
+  await pokemon.save();
+  sendOk(res, { hasHiddenAbility: pokemon.hasHiddenAbility });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs/:npcId/heal
+// Restores every Pokémon in the NPC's party to full HP + PP, clears status.
+// ---------------------------------------------------------------------------
+export async function healNpc(req: Request, res: Response): Promise<void> {
+  const npc = await assertDmNpc(req.user!.userId, String(req.params.npcId), res);
+  if (!npc) return;
+
+  const party = await Pokemon.find({ ownerId: npc._id, ownerType: 'npc' }).lean();
+
+  if (party.length === 0) {
+    return sendOk(res, { message: 'This NPC has no Pokémon.' });
+  }
+
+  const speciesIds = [...new Set(party.map(p => p.speciesId))];
+  const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
+  const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+  await Promise.all(party.map(poke => {
+    const cache      = cacheMap.get(poke.speciesId);
+    const maxHp      = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp : poke.currentHp;
+    const fullMoves  = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
+      .map(m => ({ ...m, currentPP: m.maxPP }));
+    return Pokemon.updateOne(
+      { _id: poke._id },
+      { $set: { currentHp: maxHp, statusCondition: null, statusCounter: null, volatileStatus: [], moves: fullMoves } },
+    );
+  }));
+
+  sendOk(res, { message: `${npc.name}'s party has been healed!` });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/npcs/:npcId/bag
+// Returns all items in an NPC's bag.
+// ---------------------------------------------------------------------------
+export async function getNpcBag(req: Request, res: Response): Promise<void> {
+  const npc = await assertDmNpc(req.user!.userId, String(req.params.npcId), res);
+  if (!npc) return;
+
+  const items = await Item.find({ ownerId: npc._id, ownerType: 'npc' }).lean();
+  sendOk(res, items);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/npcs/:npcId/give-item
+// Give items to an NPC's bag.
+// Body: { itemId, quantity? }
+// ---------------------------------------------------------------------------
+export async function giveNpcItem(req: Request, res: Response): Promise<void> {
+  const npcId = String(req.params.npcId);
+  const { itemId, quantity = 1 } = req.body as { itemId?: string; quantity?: number };
+
+  if (!itemId?.trim()) {
+    return sendError(res, 400, 'itemId is required');
+  }
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    return sendError(res, 400, 'quantity must be an integer between 1 and 99');
+  }
+
+  const pocket = resolveItemPocket(itemId.trim(), res);
+  if (!pocket) return;
+
+  const npc = await assertDmNpc(req.user!.userId, npcId, res);
+  if (!npc) return;
+
+  const item = await Item.findOneAndUpdate(
+    { ownerId: npc._id, itemId: itemId.trim() },
+    { $inc: { quantity }, $setOnInsert: { pocket, ownerType: 'npc' } },
+    { upsert: true, new: true },
+  );
+
+  sendOk(res, { itemId: item.itemId, quantity: item.quantity, pocket: item.pocket }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/fix-pokemon-exp
+// One-time migration: bumps any Pokémon below their level minimum EXP.
+// Safe to run multiple times.
+// ---------------------------------------------------------------------------
+export async function fixPokemonExp(req: Request, res: Response): Promise<void> {
+  const allPokemon = await Pokemon.find({}, '_id speciesId level exp').lean();
+
+  const speciesIds = [...new Set(allPokemon.map(p => p.speciesId))];
+  const caches = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId expGroup').lean();
+  const expGroupMap = new Map(
+    caches.map(c => [c.pokeApiId as number, (c.expGroup as string) || 'medium-fast']),
+  );
+
+  const toFix = allPokemon.filter(poke => {
+    const expGroup = expGroupMap.get(poke.speciesId) ?? 'medium-fast';
+    return poke.exp < expForLevel(poke.level, expGroup);
+  });
+
+  await Promise.all(toFix.map(poke => {
+    const expGroup = expGroupMap.get(poke.speciesId) ?? 'medium-fast';
+    return Pokemon.updateOne({ _id: poke._id }, { $set: { exp: expForLevel(poke.level, expGroup) } });
+  }));
+
+  sendOk(res, { fixed: toFix.length, total: allPokemon.length });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/encounters
+// Returns all encounters for the DM's active campaign.
+// ---------------------------------------------------------------------------
+export async function getEncounters(req: Request, res: Response): Promise<void> {
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const encounters = await Encounter.find({ campaignId: campaign._id }).lean();
+  sendOk(res, encounters);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/encounters
+// Creates a new encounter for the DM's active campaign.
+// Body: { title, type, enemies?, wildPokemon?, playerPokemonLimit?, npcPokemonLimit?,
+//         expMultiplier?, notes?, isActive? }
+// ---------------------------------------------------------------------------
+export async function createEncounter(req: Request, res: Response): Promise<void> {
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const {
+    title,
+    type,
+    enemies = [],
+    wildPokemon = [],
+    playerPokemonLimit = null,
+    npcPokemonLimit = null,
+    expMultiplier = 1,
+    notes = '',
+    isActive = true,
+  } = req.body as {
+    title?: string;
+    type?: string;
+    enemies?: { npcId: string }[];
+    wildPokemon?: { speciesId: number; level: number; catchable?: boolean }[];
+    playerPokemonLimit?: number | null;
+    npcPokemonLimit?: number | null;
+    expMultiplier?: number;
+    notes?: string;
+    isActive?: boolean;
+  };
+
+  if (!title || typeof title !== 'string' || title.trim() === '') {
+    return sendError(res, 400, 'title is required');
+  }
+  if (!['pve', 'wild'].includes(type ?? '')) {
+    return sendError(res, 400, "type must be 'pve' or 'wild'");
+  }
+  if (playerPokemonLimit !== null && (!Number.isInteger(playerPokemonLimit) || playerPokemonLimit < 1)) {
+    return sendError(res, 400, 'playerPokemonLimit must be a positive integer or null');
+  }
+  if (npcPokemonLimit !== null && (!Number.isInteger(npcPokemonLimit) || npcPokemonLimit < 1)) {
+    return sendError(res, 400, 'npcPokemonLimit must be a positive integer or null');
+  }
+  if (typeof expMultiplier !== 'number' || expMultiplier <= 0) {
+    return sendError(res, 400, 'expMultiplier must be a positive number');
+  }
+
+  if (type === 'pve') {
+    if (!Array.isArray(enemies) || enemies.length === 0) {
+      return sendError(res, 400, 'PvE encounters require at least one enemy NPC');
+    }
+    if (!enemies.every(e => mongoose.Types.ObjectId.isValid(e.npcId))) {
+      return sendError(res, 400, 'All enemy npcIds must be valid');
+    }
+    const npcIds     = enemies.map(e => new mongoose.Types.ObjectId(e.npcId));
+    const foundNpcs  = await Npc.find({ _id: { $in: npcIds }, campaignId: campaign._id }, '_id').lean();
+    if (foundNpcs.length !== npcIds.length) {
+      return sendError(res, 403, 'One or more NPCs do not belong to your campaign');
+    }
+  }
+
+  if (type === 'wild') {
+    if (!Array.isArray(wildPokemon) || wildPokemon.length === 0) {
+      return sendError(res, 400, 'Wild encounters require at least one wild Pokémon entry');
+    }
+    for (const wp of wildPokemon) {
+      if (!Number.isInteger(wp.speciesId) || wp.speciesId < 1) {
+        return sendError(res, 400, 'Each wildPokemon entry must have a valid speciesId');
+      }
+      if (!Number.isInteger(wp.level) || wp.level < 1 || wp.level > 100) {
+        return sendError(res, 400, 'Each wildPokemon level must be between 1 and 100');
+      }
+    }
+  }
+
+  const encounter = await Encounter.create({
+    campaignId:  campaign._id,
+    createdByDm: req.user!.userId,
+    title:       title.trim(),
+    type,
+    enemies:    type === 'pve'
+      ? enemies.map(e => ({ npcId: new mongoose.Types.ObjectId(e.npcId) }))
+      : [],
+    wildPokemon: type === 'wild'
+      ? wildPokemon.map(wp => ({ speciesId: wp.speciesId, level: wp.level, catchable: wp.catchable ?? true }))
+      : [],
+    playerPokemonLimit,
+    npcPokemonLimit,
+    expMultiplier,
+    notes,
+    isActive,
+  });
+
+  sendOk(res, encounter, 201);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/encounters/:id
+// Returns a single encounter by ID.
+// ---------------------------------------------------------------------------
+export async function getEncounter(req: Request, res: Response): Promise<void> {
+  const result = await assertDmEncounter(req.user!.userId, String(req.params.id), res);
+  if (!result) return;
+  sendOk(res, result.encounter);
+}
+
+// ---------------------------------------------------------------------------
+// PUT /api/dm/encounters/:id
+// Updates an encounter. Only provided fields change; all rules re-validated.
+// ---------------------------------------------------------------------------
+export async function updateEncounter(req: Request, res: Response): Promise<void> {
+  const result = await assertDmEncounter(req.user!.userId, String(req.params.id), res);
+  if (!result) return;
+  const { encounter: existing, campaign } = result;
+
+  const {
+    title, type, enemies, wildPokemon,
+    playerPokemonLimit, npcPokemonLimit, expMultiplier, notes, isActive,
+  } = req.body as {
+    title?: string;
+    type?: string;
+    enemies?: { npcId: string }[];
+    wildPokemon?: { speciesId: number; level: number; catchable?: boolean }[];
+    playerPokemonLimit?: number | null;
+    npcPokemonLimit?: number | null;
+    expMultiplier?: number;
+    notes?: string;
+    isActive?: boolean;
+  };
+
+  const resolvedType = (type ?? existing.type) as 'pve' | 'wild';
+
+  if (title !== undefined && (typeof title !== 'string' || title.trim() === '')) {
+    return sendError(res, 400, 'title cannot be empty');
+  }
+  if (type !== undefined && !['pve', 'wild'].includes(type)) {
+    return sendError(res, 400, "type must be 'pve' or 'wild'");
+  }
+  if (playerPokemonLimit !== undefined && playerPokemonLimit !== null &&
+      (!Number.isInteger(playerPokemonLimit) || playerPokemonLimit < 1)) {
+    return sendError(res, 400, 'playerPokemonLimit must be a positive integer or null');
+  }
+  if (npcPokemonLimit !== undefined && npcPokemonLimit !== null &&
+      (!Number.isInteger(npcPokemonLimit) || npcPokemonLimit < 1)) {
+    return sendError(res, 400, 'npcPokemonLimit must be a positive integer or null');
+  }
+  if (expMultiplier !== undefined && (typeof expMultiplier !== 'number' || expMultiplier <= 0)) {
+    return sendError(res, 400, 'expMultiplier must be a positive number');
+  }
+
+  if (enemies !== undefined && resolvedType === 'pve') {
+    if (!Array.isArray(enemies) || enemies.length === 0) {
+      return sendError(res, 400, 'PvE encounters require at least one enemy NPC');
+    }
+    if (!enemies.every(e => mongoose.Types.ObjectId.isValid(e.npcId))) {
+      return sendError(res, 400, 'All enemy npcIds must be valid');
+    }
+    const npcIds    = enemies.map(e => new mongoose.Types.ObjectId(e.npcId));
+    const foundNpcs = await Npc.find({ _id: { $in: npcIds }, campaignId: campaign._id }, '_id').lean();
+    if (foundNpcs.length !== npcIds.length) {
+      return sendError(res, 403, 'One or more NPCs do not belong to your campaign');
+    }
+  }
+
+  if (wildPokemon !== undefined && resolvedType === 'wild') {
+    if (!Array.isArray(wildPokemon) || wildPokemon.length === 0) {
+      return sendError(res, 400, 'Wild encounters require at least one wild Pokémon entry');
+    }
+    for (const wp of wildPokemon) {
+      if (!Number.isInteger(wp.speciesId) || wp.speciesId < 1) {
+        return sendError(res, 400, 'Each wildPokemon entry must have a valid speciesId');
+      }
+      if (!Number.isInteger(wp.level) || wp.level < 1 || wp.level > 100) {
+        return sendError(res, 400, 'Each wildPokemon level must be between 1 and 100');
+      }
+    }
+  }
+
+  const update: Record<string, unknown> = {};
+  if (title             !== undefined) update.title             = title.trim();
+  if (type              !== undefined) update.type              = type;
+  if (isActive          !== undefined) update.isActive          = isActive;
+  if (notes             !== undefined) update.notes             = notes;
+  if (expMultiplier     !== undefined) update.expMultiplier     = expMultiplier;
+  if (playerPokemonLimit !== undefined) update.playerPokemonLimit = playerPokemonLimit;
+  if (npcPokemonLimit    !== undefined) update.npcPokemonLimit    = npcPokemonLimit;
+  if (enemies !== undefined && resolvedType === 'pve') {
+    update.enemies = enemies.map(e => ({ npcId: new mongoose.Types.ObjectId(e.npcId) }));
+  }
+  if (wildPokemon !== undefined && resolvedType === 'wild') {
+    update.wildPokemon = wildPokemon.map(wp => ({
+      speciesId: wp.speciesId,
+      level:     wp.level,
+      catchable: wp.catchable ?? true,
+    }));
+  }
+
+  const updated = await Encounter.findByIdAndUpdate(existing._id, { $set: update }, { new: true }).lean();
+  sendOk(res, updated);
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/dm/encounters/:id
+// Deletes an encounter. Does not cascade to any Battles launched from it.
+// ---------------------------------------------------------------------------
+export async function deleteEncounter(req: Request, res: Response): Promise<void> {
+  const result = await assertDmEncounter(req.user!.userId, String(req.params.id), res);
+  if (!result) return;
+  await Encounter.deleteOne({ _id: result.encounter._id });
+  sendOk(res, { message: 'Encounter deleted' });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/encounters/:id/launch
+// Creates a Battle document from an encounter template.
+// Body: { playerIds: string[] }
+// ---------------------------------------------------------------------------
+export async function launchEncounter(req: Request, res: Response): Promise<void> {
+  const result = await assertDmEncounter(req.user!.userId, String(req.params.id), res);
+  if (!result) return;
+  const { encounter, campaign } = result;
+
+  const { playerIds } = req.body as { playerIds?: string[] };
+
+  if (!Array.isArray(playerIds) || playerIds.length === 0) {
+    return sendError(res, 400, 'playerIds must be a non-empty array');
+  }
+  if (!playerIds.every(id => mongoose.Types.ObjectId.isValid(id))) {
+    return sendError(res, 400, 'All playerIds must be valid ObjectIds');
+  }
+
+  const campaignPlayerStrings = campaign.playerIds.map(id => id.toString());
+  const outsiders = playerIds.filter(id => !campaignPlayerStrings.includes(id));
+  if (outsiders.length > 0) {
+    return sendError(res, 400, `These player IDs are not in your campaign: ${outsiders.join(', ')}`);
+  }
+
+  type EnemySlot = {
+    npcId?: mongoose.Types.ObjectId;
+    activePokemonId: mongoose.Types.ObjectId | null;
+    fainted: mongoose.Types.ObjectId[];
+  };
+
+  let enemySide: EnemySlot[] = [];
+
+  if (encounter.type === 'pve') {
+    const enemies = encounter.enemies as Array<{ npcId: mongoose.Types.ObjectId; slotCount: number | null }>;
+    if (enemies.length === 0) {
+      return sendError(res, 400, 'This encounter has no NPCs configured');
+    }
+    const npcIds    = enemies.map(e => e.npcId);
+    const foundNpcs = await Npc.find({ _id: { $in: npcIds }, campaignId: campaign._id }, '_id').lean();
+    if (foundNpcs.length !== npcIds.length) {
+      return sendError(res, 400, 'One or more NPCs in this encounter no longer exist');
+    }
+    for (const enemy of enemies) {
+      const slots = enemy.slotCount ?? playerIds.length;
+      for (let i = 0; i < slots; i++) {
+        enemySide.push({
+          npcId:           new mongoose.Types.ObjectId(enemy.npcId.toString()),
+          activePokemonId: null,
+          fainted:         [],
+        });
+      }
+    }
+  } else if (encounter.type === 'wild') {
+    const wildEntries = encounter.wildPokemon as Array<{ speciesId: number; level: number; catchable: boolean }>;
+    if (wildEntries.length === 0) {
+      return sendError(res, 400, 'This encounter has no wild Pokémon configured');
+    }
+
+    for (const wp of wildEntries) {
+      let species = await PokedexCache.findOne({ pokeApiId: wp.speciesId }).lean();
+      if (!species) {
+        try {
+          const fetched = await fetchSpecies(wp.speciesId);
+          species = (await PokedexCache.create(fetched)).toObject();
+        } catch {
+          return sendError(res, 400, `Species #${wp.speciesId} not found`);
+        }
+      }
+
+      const nature      = NATURES[Math.floor(Math.random() * NATURES.length)];
+      const genderRatio = (species.genderRatio as number) ?? -1;
+      const gender      = resolveGender(genderRatio);
+
+      const learnable = ((species.levelUpMoves ?? []) as Array<{ moveId: string; level: number }>)
+        .filter(m => m.level <= wp.level)
+        .slice(-4);
+      const moveList = (species.moves ?? []) as Array<{ name: string; pp: number | null }>;
+      const moves = learnable.map(m => {
+        const md = moveList.find(mv => mv.name === m.moveId);
+        const pp = md?.pp ?? 5;
+        return { moveId: m.moveId, currentPP: pp, maxPP: pp };
+      });
+
+      const stats    = computeStats(species.baseStats as BaseStats, wp.level, nature);
+      const wildPoke = await Pokemon.create({
+        speciesId:          species.pokeApiId,
+        ownerId:            new mongoose.Types.ObjectId(req.user!.userId),
+        ownerType:          'wild',
+        nickname:           null,
+        level:              wp.level,
+        exp:                expForLevel(wp.level, (species.expGroup as string) || 'medium-fast'),
+        currentHp:          stats.hp,
+        nature,
+        gender,
+        heldItem:           null,
+        moves,
+        evs:                { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 },
+        statusCondition:    null,
+        statusCounter:      null,
+        volatileStatus:     [],
+        evolutionOverrides: [],
+        isInParty:          false,
+        partySlot:          null,
+        caughtAt:           null,
+        caughtByPlayerId:   null,
+      });
+
+      enemySide.push({ activePokemonId: wildPoke._id as mongoose.Types.ObjectId, fainted: [] });
+    }
+  }
+
+  const battle = await Battle.create({
+    campaignId:  campaign._id,
+    type:        encounter.type,
+    status:      'waiting',
+    phase:       'move_submission',
+    playerSide:  playerIds.map(id => ({
+      userId:          new mongoose.Types.ObjectId(id),
+      activePokemonId: null,
+      usedPokemonIds:  [],
+      fainted:         [],
+    })),
+    enemySide,
+    wildCatchable:      encounter.type === 'wild'
+      ? (encounter.wildPokemon as Array<{ catchable: boolean }>).some(wp => wp.catchable)
+      : false,
+    playerPokemonLimit: encounter.playerPokemonLimit ?? null,
+    npcPokemonLimit:    encounter.npcPokemonLimit    ?? null,
+    encounterId:        encounter._id,
+    lastUpdatedAt:      new Date(),
+  });
+
+  sendOk(res, { battleId: battle._id, type: battle.type, status: battle.status }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/pokemon/:pokemonId/award-exp
+// Awards EXP to a campaign player's Pokémon, running the full level-up chain.
+// Body: { exp: number }
+// ---------------------------------------------------------------------------
+export async function awardExp(req: Request, res: Response): Promise<void> {
+  const pokemonId = String(req.params.pokemonId);
+  const { exp: expGain } = req.body as { exp?: number };
+
+  if (typeof expGain !== 'number' || !Number.isInteger(expGain) || expGain <= 0) {
+    return sendError(res, 400, 'exp must be a positive integer');
+  }
+
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, pokemonId, res);
+  if (!pokemon) return;
+
+  const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId })
+    .select('name expGroup baseStats')
+    .lean();
+  if (!cache) {
+    return sendError(res, 400, 'Species data not found in cache.');
+  }
+
+  const displayName = pokemon.nickname ?? slugToDisplayName(cache.name as string);
+  const events: string[] = [`${displayName} gained ${expGain} EXP!`];
+
+  const newExp     = (pokemon.exp as number) + expGain;
+  let newLevel     = pokemon.level as number;
+  let newHp        = pokemon.currentHp as number;
+  let newSpeciesId = pokemon.speciesId as number;
+  const expGroup   = (cache.expGroup as string) || 'medium-fast';
+  const baseStats  = cache.baseStats as BaseStats | undefined;
+  const overrides  = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
+
+  while (newLevel < 100 && newExp >= expForLevel(newLevel + 1, expGroup)) {
+    if (baseStats && newHp > 0) {
+      const oldMaxHp = computeStats(baseStats, newLevel, pokemon.nature as string).hp;
+      newLevel += 1;
+      const newMaxHp = computeStats(baseStats, newLevel, pokemon.nature as string).hp;
+      newHp += (newMaxHp - oldMaxHp);
+    } else {
+      newLevel += 1;
+    }
+    events.push(`${displayName} grew to level ${newLevel}!`);
+
+    const evolveIntoId = await canEvolve({ speciesId: newSpeciesId, level: newLevel, evolutionOverrides: overrides });
+    if (evolveIntoId !== null) {
+      let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
+      if (!evolvedCache) {
+        try {
+          const fetched  = await fetchSpecies(evolveIntoId);
+          const created  = await PokedexCache.create(fetched);
+          evolvedCache   = created.toObject();
+        } catch { /* leave null — name falls back */ }
+      }
+      if (evolvedCache?.baseStats) {
+        newHp = computeStats(evolvedCache.baseStats as BaseStats, newLevel, pokemon.nature as string).hp;
+      }
+      const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
+      events.push(`${displayName} evolved into ${evolvedName}!`);
+      newSpeciesId = evolveIntoId;
+    }
+  }
+
+  await Pokemon.updateOne(
+    { _id: pokemon._id },
+    { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId } },
+  );
+
+  sendOk(res, { events, level: newLevel, exp: newExp, speciesId: newSpeciesId });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/pokemon/:pokemonId/level-up
+// Increments a campaign player's Pokémon by one level (Rare Candy equivalent).
+// ---------------------------------------------------------------------------
+export async function levelUp(req: Request, res: Response): Promise<void> {
+  const pokemonId = String(req.params.pokemonId);
+
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, pokemonId, res);
+  if (!pokemon) return;
+
+  if ((pokemon.level as number) >= 100) {
+    return sendError(res, 400, 'That Pokémon is already at level 100.');
+  }
+
+  const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId })
+    .select('name baseStats evolutionChain')
+    .lean();
+  if (!cache) {
+    return sendError(res, 400, 'Species data not found in cache.');
+  }
+
+  const displayName = pokemon.nickname ?? slugToDisplayName(cache.name as string);
+  const events: string[] = [];
+  const baseStats = cache.baseStats as BaseStats | undefined;
+
+  if (baseStats) {
+    const oldMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string).hp;
+    pokemon.level   = (pokemon.level as number) + 1;
+    const newMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string).hp;
+    pokemon.currentHp = (pokemon.currentHp as number) + (newMaxHp - oldMaxHp);
+  } else {
+    pokemon.level = (pokemon.level as number) + 1;
+  }
+
+  events.push(`${displayName} grew to level ${pokemon.level}!`);
+
+  const overrides    = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
+  const evolveIntoId = await canEvolve({
+    speciesId:          pokemon.speciesId as number,
+    level:              pokemon.level as number,
+    evolutionOverrides: overrides,
+  });
+
+  if (evolveIntoId !== null) {
+    pokemon.speciesId = evolveIntoId;
+    let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
+    if (!evolvedCache) {
+      try {
+        const fetched  = await fetchSpecies(evolveIntoId);
+        const created  = await PokedexCache.create(fetched);
+        evolvedCache   = created.toObject();
+      } catch { /* leave null */ }
+    }
+    if (evolvedCache?.baseStats) {
+      pokemon.currentHp = computeStats(
+        evolvedCache.baseStats as BaseStats, pokemon.level as number, pokemon.nature as string,
+      ).hp;
+    }
+    const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
+    events.push(`${displayName} evolved into ${evolvedName}!`);
+  }
+
+  await pokemon.save();
+  sendOk(res, { events, level: pokemon.level, exp: pokemon.exp, speciesId: pokemon.speciesId });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/players/:username/roster
+// Returns all Pokémon for a campaign player, split into party and PC,
+// enriched with species name, maxHp, and EXP progress fields.
+// ---------------------------------------------------------------------------
+export async function getPlayerRoster(req: Request, res: Response): Promise<void> {
+  const username = String(req.params.username);
+  const user = await assertCampaignPlayer(req.user!.userId, username, res);
+  if (!user) return;
+
+  const pokemons = await Pokemon.find({ ownerId: user._id, ownerType: 'player' })
+    .select('speciesId nickname level exp currentHp nature gender statusCondition heldItem isInParty partySlot')
+    .lean();
+
+  if (pokemons.length === 0) {
+    return sendOk(res, { party: [], pc: [] });
+  }
+
+  const uniqueSpeciesIds = [...new Set(pokemons.map(p => p.speciesId as number))];
+  const speciesDocs = await PokedexCache.find({ pokeApiId: { $in: uniqueSpeciesIds } })
+    .select('pokeApiId name baseStats expGroup')
+    .lean();
+  const speciesMap = new Map(speciesDocs.map(s => [s.pokeApiId as number, s]));
+
+  const enriched = pokemons.map(poke => {
+    const species   = speciesMap.get(poke.speciesId as number);
+    const expGroup  = (species?.expGroup as string) || 'medium-fast';
+    const baseStats = species?.baseStats as BaseStats | undefined;
+    const maxHp     = baseStats ? computeStats(baseStats, poke.level as number, poke.nature as string).hp : 0;
+
+    return {
+      _id:                poke._id,
+      speciesId:          poke.speciesId,
+      speciesName:        species?.name ?? `#${poke.speciesId}`,
+      nickname:           poke.nickname,
+      level:              poke.level,
+      exp:                poke.exp,
+      expForCurrentLevel: expForLevel(poke.level as number, expGroup),
+      expForNextLevel:    (poke.level as number) >= 100 ? null : expForLevel((poke.level as number) + 1, expGroup),
+      currentHp:          poke.currentHp,
+      maxHp,
+      nature:             poke.nature,
+      gender:             poke.gender,
+      statusCondition:    poke.statusCondition,
+      heldItem:           poke.heldItem,
+      isInParty:          poke.isInParty,
+      partySlot:          poke.partySlot,
+    };
+  });
+
+  const party = enriched
+    .filter(p => p.isInParty)
+    .sort((a, b) => ((a.partySlot as number) ?? 99) - ((b.partySlot as number) ?? 99));
+  const pc = enriched.filter(p => !p.isInParty);
+
+  sendOk(res, { party, pc });
+}

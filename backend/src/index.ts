@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import { connectDB } from './lib/db';
 import authRouter from './routes/auth';
@@ -25,13 +25,19 @@ app.get('/health', (_req, res) => {
 
 app.use('/api/auth', authRouter);
 app.use('/api/pokedex', pokedexRouter);
-app.use('/api/starter', starterRouter);
-app.use('/api/pokemon', pokemonRouter);
-app.use('/api/items', itemsRouter);
+app.use('/api/starter', verifyToken, starterRouter);
+app.use('/api/pokemon', verifyToken, pokemonRouter);
+app.use('/api/items', verifyToken, itemsRouter);
 app.use('/api/campaigns', verifyToken, campaignsRouter);
 app.use('/api/battles', verifyToken, battlesRouter);
 app.use('/api/dm', verifyToken, requireDm, dmRouter);
 app.use('/api/admin', verifyToken, requireAdmin, adminRouter);
+
+// Global error handler — catches any unhandled error passed to next(err) or thrown in an async handler
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  console.error(err);
+  res.status(500).json({ data: null, error: 'Internal server error' });
+});
 
 connectDB()
   .then(() => {
