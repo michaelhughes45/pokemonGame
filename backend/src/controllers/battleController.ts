@@ -42,6 +42,7 @@ import {
   toCalcStatus,
   resolveAbilitySlug,
   applyStatStageEffects,
+  accuracyStageMultiplier,
   cap,
   ZERO_STATS,
   appendToLog,
@@ -690,13 +691,15 @@ async function checkConfusion(pokemonId: mongoose.Types.ObjectId): Promise<{ hit
 async function applyStatusEffect(targetId: mongoose.Types.ObjectId, effect: StatusMoveEffect): Promise<string[]> {
   const target = await Pokemon.findById(targetId, 'nickname speciesId statusCondition volatileStatus currentHp hasHiddenAbility').lean();
   if (!target || target.currentHp <= 0) return [];
-  const isConfusion = effect.status === 'confusion';
-  if (!isConfusion && target.statusCondition) return [];
-  if (isConfusion && target.volatileStatus.some(v => v.condition === 'confusion')) return [];
 
   const cache = await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name types abilities').lean();
   const types = (cache?.types ?? []) as string[];
   const displayName = pokeDisplayName(target, cache);
+  const statusLabels: Record<string, string> = { burn: 'burned', paralysis: 'paralyzed', sleep: 'fell asleep', freeze: 'was frozen solid', poison: 'was poisoned', toxic: 'was badly poisoned' };
+
+  const isConfusion = effect.status === 'confusion';
+  if (!isConfusion && target.statusCondition) return [`${displayName} is already ${statusLabels[target.statusCondition]}!`];
+  if (isConfusion && target.volatileStatus.some(v => v.condition === 'confusion')) return [`${displayName} is already confused!`];
 
   const isImmune = (
     (effect.status === 'paralysis' && types.includes('electric')) ||
@@ -704,7 +707,7 @@ async function applyStatusEffect(targetId: mongoose.Types.ObjectId, effect: Stat
     ((effect.status === 'poison' || effect.status === 'toxic') && (types.includes('poison') || types.includes('steel'))) ||
     (effect.status === 'freeze'    && types.includes('ice'))
   );
-  if (isImmune) return [];
+  if (isImmune) return [`It doesn't affect ${displayName}!`];
 
   const abilitySlug = resolveAbilitySlug((cache?.abilities as CachedAbility[]) ?? [], target.hasHiddenAbility as boolean);
   if (abilitySlug) {
@@ -721,8 +724,7 @@ async function applyStatusEffect(targetId: mongoose.Types.ObjectId, effect: Stat
   if (effect.status === 'sleep') update.statusCounter = Math.floor(Math.random() * 3) + 1;
   if (effect.status === 'toxic') update.statusCounter = 1;
   await Pokemon.updateOne({ _id: targetId }, { $set: update });
-  const labels: Record<string, string> = { burn: 'burned', paralysis: 'paralyzed', sleep: 'fell asleep', freeze: 'was frozen solid', poison: 'was poisoned', toxic: 'was badly poisoned' };
-  return [`${displayName} ${labels[effect.status]}!`];
+  return [`${displayName} ${statusLabels[effect.status]}!`];
 }
 
 async function resolveMove(
@@ -741,7 +743,7 @@ async function resolveMove(
   const moveData = (attackerCache.moves as Array<{ name: string; type: string; category: string; power: number | null; implemented: boolean }>).find(m => m.name === moveId);
 
   if (!moveData || !moveData.power) {
-    const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) && !(moveId in WEATHER_MOVES) && !SELF_TARGETING_MOVES.has(moveId) ? ' (effect not yet implemented)' : '';
+    const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) && !(moveId in WEATHER_MOVES) && !SELF_TARGETING_MOVES.has(moveId) && !(moveId in STAT_STAGE_MOVES) ? ' (effect not yet implemented)' : '';
     return { damage: 0, isCrit: false, events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`] };
   }
 
@@ -1117,6 +1119,13 @@ type ActiveEntry = {
   actorType:       'player' | 'npc';
 };
 
+// Looks up a single cached move's type + accuracy for one species without loading the full moves array.
+type MoveMeta = { type: string; accuracy: number | null };
+async function fetchMoveMeta(speciesId: number, moveId: string): Promise<MoveMeta | undefined> {
+  const doc = await PokedexCache.findOne({ pokeApiId: speciesId, 'moves.name': moveId }, { 'moves.$': 1 }).lean();
+  return (doc?.moves as MoveMeta[] | undefined)?.[0];
+}
+
 async function resolveWeatherMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry,
   weatherEffect: { weather: IBattle['weather']; startMessage: string }, moveEvents: string[],
@@ -1125,6 +1134,12 @@ async function resolveWeatherMove(
   const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name').lean() : null;
   const attackerName = pokeDisplayName(attacker, atkCache);
   const moveName     = slugToDisplayName(entry.moveId);
+
+  const moveMeta = attacker ? await fetchMoveMeta(attacker.speciesId, entry.moveId) : undefined;
+  if (moveMeta?.accuracy != null && Math.random() >= moveMeta.accuracy / 100) {
+    moveEvents.push(`${attackerName} used ${moveName}, but it failed!`);
+    return;
+  }
 
   if (battle.weather === weatherEffect.weather) {
     moveEvents.push(`${attackerName} used ${moveName}! But it had no effect...`);
@@ -1143,6 +1158,12 @@ async function resolveSelfTargetMove(
   const attacker = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId currentHp nature level volatileStatus hasHiddenAbility').lean();
   const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats abilities types').lean() : null;
   const attackerName = pokeDisplayName(attacker, atkCache);
+
+  const moveMeta = attacker ? await fetchMoveMeta(attacker.speciesId, entry.moveId) : undefined;
+  if (moveMeta?.accuracy != null && Math.random() >= moveMeta.accuracy / 100) {
+    moveEvents.push(`${attackerName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+    return;
+  }
 
   let applyEffects = true;
   if (CHARGE_MOVES.has(entry.moveId) && attacker) {
@@ -1317,19 +1338,44 @@ async function resolveDamagingMove(
   const drainEffect     = DRAIN_MOVES[entry.moveId];
   const selfStatEffects = (STAT_STAGE_MOVES[entry.moveId] ?? []).filter(e => e.target === 'self');
 
-  type AtkSnapshot = { currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean };
-  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'nickname currentHp speciesId nature level hasHiddenAbility').lean() as AtkSnapshot | null;
+  type AtkSnapshot = { currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }> };
+  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'nickname currentHp speciesId nature level hasHiddenAbility volatileStatus').lean() as AtkSnapshot | null;
   const atkSnapCache = atkSnap ? await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'name baseStats abilities').lean() : null;
+
+  // Two-turn moves (Fly, Dig, Dive, Bounce, Sky Attack, Solar Beam) that hit a foe: charge on the
+  // first turn (no accuracy roll, no damage), then release on the second. Geomancy is the only
+  // self-targeting member of CHARGE_MOVES and is handled entirely in resolveSelfTargetMove.
+  if (CHARGE_MOVES.has(entry.moveId) && atkSnap) {
+    const chargeCondition = `charging-${entry.moveId}`;
+    const volStatus   = atkSnap.volatileStatus ?? [];
+    const isCharging  = volStatus.some(v => v.condition === chargeCondition);
+    const skipCharge  = entry.moveId === 'solar-beam' && battle.weather === 'sun';
+    const semiInvul   = SEMI_INVULNERABLE_MOVES.has(entry.moveId);
+
+    if (!isCharging && !skipCharge) {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const volatilesToPush = [{ condition: chargeCondition, turnsRemaining: 99 }];
+      if (semiInvul) volatilesToPush.push({ condition: 'semi-invulnerable', turnsRemaining: 99 });
+      await Pokemon.updateOne({ _id: entry.activePokemonId }, { $push: { volatileStatus: { $each: volatilesToPush } } });
+      moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}! ${atkName} ${CHARGE_MESSAGES[entry.moveId]}`);
+      return;
+    } else if (isCharging) {
+      const conditionsToPull: string[] = [chargeCondition];
+      if (semiInvul) conditionsToPull.push('semi-invulnerable');
+      await Pokemon.updateOne({ _id: entry.activePokemonId }, { $pull: { volatileStatus: { condition: { $in: conditionsToPull } } } });
+    }
+  }
 
   const attackerAbilitySlug = atkSnap && atkSnapCache ? resolveAbilitySlug((atkSnapCache.abilities as CachedAbility[]) ?? [], atkSnap.hasHiddenAbility ?? false) : null;
   const sereneGrace = attackerAbilitySlug === 'serene-grace';
 
+  const moveMeta = atkSnap ? await fetchMoveMeta(atkSnap.speciesId, entry.moveId) : undefined;
+  const moveAccuracy = moveMeta?.accuracy ?? null;
+
   let typeChangeMoveType: string | null = null;
   const isTypeChanging = attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero' || (attackerAbilitySlug != null && attackerAbilitySlug in ILATE_MAP);
-  if (isTypeChanging && atkSnap) {
-    type MoveEntry = { type: string };
-    const moveCacheDoc = await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId, 'moves.name': entry.moveId }, { 'moves.$': 1 }).lean();
-    typeChangeMoveType = (moveCacheDoc?.moves as MoveEntry[] | undefined)?.[0]?.type?.toLowerCase() ?? null;
+  if (isTypeChanging) {
+    typeChangeMoveType = moveMeta?.type?.toLowerCase() ?? null;
   }
 
   // Track consecutive use of escalating-power moves (Fury Cutter, Rollout, Ice Ball).
@@ -1350,6 +1396,19 @@ async function resolveDamagingMove(
   }
 
   for (const targetId of targets) {
+    if (moveAccuracy !== null) {
+      const attackerAccStage = stageMap[entry.activePokemonId.toString()]?.acc ?? 0;
+      const targetEvaStage   = stageMap[targetId]?.eva ?? 0;
+      const hitChance = (moveAccuracy / 100) * accuracyStageMultiplier(attackerAccStage, targetEvaStage);
+      if (Math.random() >= hitChance) {
+        const tgtDoc   = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+        const tgtCache = tgtDoc ? await PokedexCache.findOne({ pokeApiId: (tgtDoc as any).speciesId }, 'name').lean() : null;
+        const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)} on ${pokeDisplayName(tgtDoc, tgtCache)}, but it missed!`);
+        continue;
+      }
+    }
+
     if (entry.moveId === 'dream-eater') {
       const tgt      = await Pokemon.findById(targetId, 'statusCondition nickname speciesId').lean();
       if (tgt?.statusCondition !== 'sleep') {

@@ -58,6 +58,13 @@ export function resolveAbilitySlug(
   return ability?.name ?? null;
 }
 
+// Combines an attacker's accuracy stage and a target's evasion stage into a single
+// hit-chance multiplier, using the standard stage formula on their net stage (clamped -6..6).
+export function accuracyStageMultiplier(attackerAccStage: number, targetEvaStage: number): number {
+  const stage = Math.max(-6, Math.min(6, attackerAccStage - targetEvaStage));
+  return stage >= 0 ? (3 + stage) / 3 : 3 / (3 - stage);
+}
+
 // Applies stat stage effects to a Pokémon in the battle's stage map and returns
 // turn-log narration strings. Call battle.markModified('statStages') after.
 export function applyStatStageEffects(
