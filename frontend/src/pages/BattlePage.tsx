@@ -39,6 +39,9 @@ type ActivePokemonInfo = {
   _id: string;
   name: string;
   speciesName: string;
+  speciesId: number;
+  level: number;
+  types: string[];
   currentHp: number;
   maxHp: number | null;
   statusCondition: string | null;
@@ -246,6 +249,69 @@ function apiError(err: unknown, fallback: string): string {
 // "hydro-pump" → "Hydro Pump"
 function formatMove(id: string): string {
   return id.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+const TYPE_BG: Record<string, string> = {
+  normal:   'bg-stone-400',   fire:     'bg-orange-500',
+  water:    'bg-blue-500',    electric: 'bg-yellow-400',
+  grass:    'bg-green-500',   ice:      'bg-cyan-300',
+  fighting: 'bg-red-700',     poison:   'bg-purple-500',
+  ground:   'bg-yellow-600',  flying:   'bg-indigo-300',
+  psychic:  'bg-pink-500',    bug:      'bg-lime-500',
+  rock:     'bg-yellow-700',  ghost:    'bg-purple-700',
+  dragon:   'bg-indigo-600',  dark:     'bg-gray-700',
+  steel:    'bg-slate-400',   fairy:    'bg-pink-300',
+};
+
+function HpBar({ current, max }: { current: number; max: number | null }) {
+  const pct = max && max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
+  const color = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-yellow-400' : 'bg-red-500';
+  return (
+    <div className="flex items-center gap-2 mt-1">
+      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs font-mono text-muted-foreground">
+        {current}{max !== null ? `/${max}` : ''}
+      </span>
+    </div>
+  );
+}
+
+function BattlePokemonCard({ info, extra }: { info: ActivePokemonInfo; extra?: React.ReactNode }) {
+  return (
+    <Card>
+      <CardContent className="pt-3 pb-3 flex gap-3 items-center">
+        <img
+          src={`https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/${info.speciesId}.png`}
+          alt={info.speciesName}
+          width={56}
+          height={56}
+          className="pixelated shrink-0"
+        />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="font-semibold text-sm">{info.name}</span>
+            {info.name !== info.speciesName && (
+              <span className="text-xs text-muted-foreground">({info.speciesName})</span>
+            )}
+            <span className="text-xs text-muted-foreground ml-auto">Lv. {info.level}</span>
+          </div>
+          <div className="flex gap-1 flex-wrap mt-1 items-center">
+            {info.types.map(t => (
+              <span key={t} className={`text-[10px] font-semibold text-white px-1.5 py-0.5 rounded ${TYPE_BG[t] ?? 'bg-gray-400'}`}>
+                {formatMove(t)}
+              </span>
+            ))}
+            <StatusBadge info={info} />
+            <StatStageBadges stages={info.statStages} />
+          </div>
+          <HpBar current={info.currentHp} max={info.maxHp} />
+          {extra}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 // Display name for a party Pokémon
@@ -1685,42 +1751,31 @@ export default function BattlePage() {
             {battle.playerSide.length === 0 ? (
               <p className="text-sm text-muted-foreground">No players in this battle.</p>
             ) : (
-              <ul className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3">
                 {battle.playerSide.map(entry => {
                   const submitted = battle.turnQueue.some(
                     e => e.actorId === entry.userId && e.actorType === 'player'
                   );
                   return (
-                    <li key={entry.userId} className="flex items-center justify-between gap-2 text-sm">
-                      <span className="font-medium">{entry.username}</span>
-                      <span className="flex items-center gap-2 text-muted-foreground">
-                        {entry.activePokemonInfo ? (
-                          <>
-                            <span className="text-xs">
-                              {entry.activePokemonInfo.name}
-                              {' · '}HP {entry.activePokemonInfo.currentHp}
-                              {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
-                            </span>
-                            <StatusBadge info={entry.activePokemonInfo} />
-                            <StatStageBadges stages={entry.activePokemonInfo.statStages} />
-                          </>
-                        ) : (
-                          <span className="text-xs">No Pokémon out</span>
-                        )}
+                    <div key={entry.userId} className="flex flex-col gap-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{entry.username}</span>
                         {battle.status === 'active' && battle.phase === 'move_submission' && (
                           <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                            submitted
-                              ? 'bg-green-100 text-green-800'
-                              : 'bg-yellow-100 text-yellow-800'
+                            submitted ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
                           }`}>
                             {submitted ? 'Submitted' : 'Pending'}
                           </span>
                         )}
-                      </span>
-                    </li>
+                      </div>
+                      {entry.activePokemonInfo
+                        ? <BattlePokemonCard info={entry.activePokemonInfo} />
+                        : <p className="text-xs text-muted-foreground">No Pokémon out</p>
+                      }
+                    </div>
                   );
                 })}
-              </ul>
+              </div>
             )}
           </CardContent>
         </Card>
@@ -1734,9 +1789,8 @@ export default function BattlePage() {
                 No enemies yet — enemies are added via the encounter builder (coming soon).
               </p>
             ) : (
-              <ul className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3">
                 {(() => {
-                  // Group NPC entries by npcId; wild entries render 1:1.
                   const seenNpcIds = new Set<string>();
                   return battle.enemySide.map(entry => {
                     const isWild = !entry.npcId;
@@ -1745,25 +1799,12 @@ export default function BattlePage() {
 
                     if (isWild) {
                       return (
-                        <li key={entry.activePokemonId ?? 'wild'} className="flex items-center justify-between gap-2 text-sm">
-                          <span className="font-medium">
-                            {entry.activePokemonInfo?.name ?? 'Wild Pokémon'}
-                          </span>
-                          <span className="flex items-center gap-2">
-                            {entry.activePokemonInfo ? (
-                              <>
-                                <span className="text-muted-foreground text-xs">
-                                  HP {entry.activePokemonInfo.currentHp}
-                                  {entry.activePokemonInfo.maxHp != null ? `/${entry.activePokemonInfo.maxHp}` : ''}
-                                </span>
-                                <StatusBadge info={entry.activePokemonInfo} />
-                                <StatStageBadges stages={entry.activePokemonInfo.statStages} />
-                              </>
-                            ) : (
-                              <span className="text-muted-foreground text-xs">Fainted / Caught</span>
-                            )}
-                          </span>
-                        </li>
+                        <div key={entry.activePokemonId ?? 'wild'}>
+                          {entry.activePokemonInfo
+                            ? <BattlePokemonCard info={entry.activePokemonInfo} />
+                            : <p className="text-xs text-muted-foreground">Fainted / Caught</p>
+                          }
+                        </div>
                       );
                     }
 
@@ -1771,38 +1812,24 @@ export default function BattlePage() {
                     const npcId    = entry.npcId!;
                     const npcSlots = battle.enemySide.filter(e => e.npcId === npcId);
                     return (
-                      <li key={npcId} className="flex flex-col gap-1 text-sm">
-                        <span className="font-medium">{entry.npcName}</span>
+                      <div key={npcId} className="flex flex-col gap-2">
+                        <span className="text-sm font-medium">{entry.npcName}</span>
                         {npcSlots.map((slot, slotIdx) => (
-                          <span
-                            key={`${npcId}:${slotIdx}`}
-                            className="flex items-center justify-between gap-2 pl-3 border-l ml-1"
-                          >
-                            <span className="text-muted-foreground">
-                              {npcSlots.length > 1 ? `Slot ${slotIdx + 1}: ` : ''}
-                              {slot.activePokemonInfo?.name ?? '—'}
-                            </span>
-                            <span className="flex items-center gap-1">
-                              {slot.activePokemonInfo ? (
-                                <>
-                                  <span className="text-muted-foreground text-xs">
-                                    HP {slot.activePokemonInfo.currentHp}
-                                    {slot.activePokemonInfo.maxHp != null ? `/${slot.activePokemonInfo.maxHp}` : ''}
-                                  </span>
-                                  <StatusBadge info={slot.activePokemonInfo} />
-                                  <StatStageBadges stages={slot.activePokemonInfo.statStages} />
-                                </>
-                              ) : (
-                                <span className="text-muted-foreground text-xs">No Pokémon out</span>
-                              )}
-                            </span>
-                          </span>
+                          <div key={`${npcId}:${slotIdx}`} className={npcSlots.length > 1 ? 'pl-3 border-l ml-1' : ''}>
+                            {npcSlots.length > 1 && (
+                              <p className="text-xs text-muted-foreground mb-1">Slot {slotIdx + 1}</p>
+                            )}
+                            {slot.activePokemonInfo
+                              ? <BattlePokemonCard info={slot.activePokemonInfo} />
+                              : <p className="text-xs text-muted-foreground">No Pokémon out</p>
+                            }
+                          </div>
                         ))}
-                      </li>
+                      </div>
                     );
                   });
                 })()}
-              </ul>
+              </div>
             )}
           </CardContent>
         </Card>

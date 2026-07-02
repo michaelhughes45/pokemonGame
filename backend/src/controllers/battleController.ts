@@ -30,6 +30,8 @@ import {
   getHitCount,
   DRAIN_MOVES,
   PRANKSTER_MOVES,
+  ESCALATING_POWER_MOVES,
+  LOCK_MOVES,
 } from '../lib/moveData';
 import {
   GEN9,
@@ -216,6 +218,16 @@ export async function startBattle(req: Request, res: Response): Promise<void> {
   battle.status = 'active'; battle.turnNumber = 1; battle.phase = 'move_submission';
   battle.lastUpdatedAt = new Date();
   await battle.save();
+  // Stamp all enemy slots that already have an active Pokémon with turn 1.
+  // Direct update bypasses Mongoose subdocument change tracking issues.
+  const activeEnemyIds = battle.enemySide.map(s => s.activePokemonId).filter(Boolean);
+  if (activeEnemyIds.length > 0) {
+    await Battle.updateOne(
+      { _id: battle._id },
+      { $set: { 'enemySide.$[elem].activeSentOutOnTurn': 1 } },
+      { arrayFilters: [{ 'elem.activePokemonId': { $in: activeEnemyIds } }] },
+    );
+  }
   res.json({ data: { status: battle.status, phase: battle.phase }, error: null });
 }
 
@@ -458,6 +470,10 @@ async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mong
   await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
   delete (battle.statStages as Record<string, StatStages>)[outgoingId.toString()];
   battle.markModified('statStages');
+  delete (battle.consecutiveMoves as Record<string, unknown>)[outgoingId.toString()];
+  battle.markModified('consecutiveMoves');
+  delete (battle.lockedMoves as Record<string, unknown>)[outgoingId.toString()];
+  battle.markModified('lockedMoves');
   const outgoing = await Pokemon.findById(outgoingId, 'nickname speciesId hasHiddenAbility statusCondition currentHp nature level').lean();
   const outCache = outgoing ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name abilities baseStats').lean() : null;
   const outName = pokeDisplayName(outgoing, outCache);
@@ -479,12 +495,24 @@ async function resolveSwitch(battle: HydratedDocument<IBattle>, entry: TurnQueue
     const outgoingId = npcEntry.activePokemonId;
     if (outgoingId) events.push(...await recallPokemon(battle, outgoingId));
     npcEntry.activePokemonId = incomingId;
+    npcEntry.activeSentOutOnTurn = battle.turnNumber;
+    battle.markModified('enemySide');
+    await Battle.updateOne(
+      { _id: battle._id, 'enemySide.npcId': npcEntry.npcId },
+      { $set: { 'enemySide.$.activeSentOutOnTurn': battle.turnNumber } },
+    );
   } else {
     const playerEntry = battle.playerSide.find(e => e.userId.toString() === entry.actorId.toString());
     if (!playerEntry) return [];
     const outgoingId = playerEntry.activePokemonId;
     if (outgoingId) events.push(...await recallPokemon(battle, outgoingId));
     playerEntry.activePokemonId = incomingId;
+    playerEntry.activeSentOutOnTurn = battle.turnNumber;
+    battle.markModified('playerSide');
+    await Battle.updateOne(
+      { _id: battle._id, 'playerSide.userId': playerEntry.userId },
+      { $set: { 'playerSide.$.activeSentOutOnTurn': battle.turnNumber } },
+    );
     if (!playerEntry.usedPokemonIds.some(id => id.toString() === incomingId.toString())) {
       playerEntry.usedPokemonIds.push(incomingId);
     }
@@ -700,6 +728,7 @@ async function applyStatusEffect(targetId: mongoose.Types.ObjectId, effect: Stat
 async function resolveMove(
   attackerPokemonId: mongoose.Types.ObjectId, targetPokemonId: mongoose.Types.ObjectId,
   moveId: string, weather: IBattle['weather'], stages: { attacker?: StatStages; target?: StatStages } = {},
+  powerOverride?: number,
 ): Promise<{ damage: number; isCrit: boolean; events: string[] }> {
   const [attacker, target] = await Promise.all([Pokemon.findById(attackerPokemonId).lean(), Pokemon.findById(targetPokemonId).lean()]);
   if (!attacker || !target) return { damage: 0, isCrit: false, events: ['(Pokémon not found during move resolution)'] };
@@ -740,16 +769,17 @@ async function resolveMove(
     const toBoosts = (s?: StatStages) => s ? { atk: s.atk, def: s.def, spa: s.spa, spd: s.spd, spe: s.spe } : undefined;
     const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: ZERO_STATS, ivs: ZERO_STATS, curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any });
     const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: ZERO_STATS, ivs: ZERO_STATS, curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any });
-    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName), new Field({ weather: toCalcWeather(weather) as any }));
-    const rolls  = Array.isArray(result.damage) ? (result.damage as number[]) : [result.damage as number];
-    damage = rolls[Math.floor(Math.random() * rolls.length)];
+    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName, powerOverride ? { overrides: { basePower: powerOverride } } as any : undefined), new Field({ weather: toCalcWeather(weather) as any }));
+    const rolls  = Array.isArray(result.damage) ? result.damage : [result.damage];
+    const picked = rolls[Math.floor(Math.random() * rolls.length)];
+    damage = Array.isArray(picked) ? picked[Math.floor(Math.random() * picked.length)] : (picked as number);
     if (isCrit && damage > 0) damage = Math.floor(damage * 1.5);
     const desc = result.desc();
     if (damage === 0 || desc.includes('immune'))  effectNote = " It had no effect!";
     else if (desc.includes('super effective'))    effectNote = " It's super effective!";
     else if (desc.includes('not very effective')) effectNote = " It's not very effective...";
   } catch {
-    damage = Math.max(1, Math.floor((moveData.power * attacker.level) / 50));
+    damage = Math.max(1, Math.floor(((powerOverride ?? moveData.power) * attacker.level) / 50));
     const atkAbilitySlug = attackerAbility?.name;
     if (atkAbilitySlug === 'protean' || atkAbilitySlug === 'libero') damage = Math.floor(damage * 1.5);
     else if (atkAbilitySlug && atkAbilitySlug in ILATE_MAP && moveData.type?.toLowerCase() === 'normal') damage = Math.floor(damage * 1.2);
@@ -771,6 +801,10 @@ async function applyFaints(battle: HydratedDocument<IBattle>): Promise<string[]>
       await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { volatileStatus: [] } });
       delete (battle.statStages as Record<string, StatStages>)[entry.activePokemonId.toString()];
       battle.markModified('statStages');
+      delete (battle.consecutiveMoves as Record<string, unknown>)[entry.activePokemonId.toString()];
+      battle.markModified('consecutiveMoves');
+      delete (battle.lockedMoves as Record<string, unknown>)[entry.activePokemonId.toString()];
+      battle.markModified('lockedMoves');
       entry.fainted.push(entry.activePokemonId);
       entry.activePokemonId = null;
       battle.markModified(sideKey);
@@ -990,6 +1024,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 
       if (volStatus.some(v => v.condition === 'leech-seed')) {
         const curHp = runningHp.get(pokeId) ?? poke.currentHp;
+        if (curHp <= 0) continue;
         const drain = Math.max(1, Math.floor(maxHp / 8));
         const newHp = Math.max(0, curHp - drain);
         runningHp.set(pokeId, newHp); await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
@@ -1133,9 +1168,8 @@ async function resolveSelfTargetMove(
   if (applyEffects) {
     moveEvents.push(`${attackerName} used ${slugToDisplayName(entry.moveId)}!`);
 
-    const isGhostCurse = entry.moveId === 'curse' && ((atkCache?.types as string[]) ?? []).includes('ghost');
-    const statEffects  = STAT_STAGE_MOVES[entry.moveId];
-    if (statEffects && !isGhostCurse) {
+    const statEffects = STAT_STAGE_MOVES[entry.moveId];
+    if (statEffects) {
       const selfEffects = statEffects.filter(e => e.target === 'self');
       if (selfEffects.length > 0) {
         const stageMap       = battle.statStages as Record<string, StatStages>;
@@ -1221,29 +1255,6 @@ async function resolveSelfTargetMove(
       else { await Pokemon.updateOne({ _id: entry.activePokemonId }, { $push: { volatileStatus: { condition: protectVolatile, turnsRemaining: 0 } } }); moveEvents.push(`${attackerName} protected itself!`); }
     }
 
-    if (isGhostCurse && attacker && atkCache?.baseStats) {
-      const opposing = entry.actorType === 'player' ? battle.enemySide : battle.playerSide;
-      const target   = opposing.find(e => e.activePokemonId != null);
-      if (target?.activePokemonId) {
-        const maxHp    = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature).hp;
-        const costHp   = Math.floor(maxHp / 2);
-        const newHp    = Math.max(0, (attacker.currentHp as number) - costHp);
-        const tgtPoke  = await Pokemon.findById(target.activePokemonId, 'nickname speciesId volatileStatus').lean();
-        const tgtCache = tgtPoke ? await PokedexCache.findOne({ pokeApiId: (tgtPoke as any).speciesId }, 'name').lean() : null;
-        const tgtName  = pokeDisplayName(tgtPoke, tgtCache, 'the target');
-        if (((tgtPoke?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'cursed')) {
-          moveEvents.push(`${tgtName} is already cursed!`);
-        } else {
-          await Promise.all([
-            Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newHp } }),
-            Pokemon.updateOne({ _id: target.activePokemonId }, { $push: { volatileStatus: { condition: 'cursed', turnsRemaining: 99 } } }),
-          ]);
-          moveEvents.push(`${attackerName} cut its own HP to curse ${tgtName}!`);
-        }
-      } else {
-        moveEvents.push(`${attackerName} used Curse, but there's no target!`);
-      }
-    }
   }
 }
 
@@ -1252,6 +1263,54 @@ async function resolveDamagingMove(
   targetHpMap: Map<string, number>, enduringTargets: Set<string>,
   protectingTargets: Map<string, string | null>, moveEvents: string[],
 ): Promise<void> {
+  if (entry.moveId === 'fake-out') {
+    const sideEntry = entry.actorType === 'player'
+      ? battle.playerSide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString())
+      : battle.enemySide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString());
+    if (!sideEntry || sideEntry.activeSentOutOnTurn !== battle.turnNumber) {
+      const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
+      const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
+      moveEvents.push(`${pokeDisplayName(atkDoc, atkCache)} used Fake Out! But it failed!`);
+      return;
+    }
+  }
+
+  if (entry.moveId === 'curse') {
+    const atkDoc      = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId currentHp nature level hasHiddenAbility').lean();
+    const atkDocCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name baseStats types abilities').lean() : null;
+    const atkName     = pokeDisplayName(atkDoc, atkDocCache);
+    moveEvents.push(`${atkName} used Curse!`);
+    const isGhost = ((atkDocCache?.types as string[]) ?? []).includes('ghost');
+    if (isGhost && atkDoc && atkDocCache?.baseStats) {
+      const targetId = targets[0];
+      if (targetId) {
+        const tgtPoke  = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
+        const tgtCache = tgtPoke ? await PokedexCache.findOne({ pokeApiId: (tgtPoke as any).speciesId }, 'name').lean() : null;
+        const tgtName  = pokeDisplayName(tgtPoke, tgtCache);
+        if (((tgtPoke?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'cursed')) {
+          moveEvents.push(`${tgtName} is already cursed!`);
+        } else {
+          const maxHp  = computeStats(atkDocCache.baseStats as BaseStats, atkDoc.level, atkDoc.nature).hp;
+          const newHp  = Math.max(0, (atkDoc.currentHp as number) - Math.floor(maxHp / 2));
+          await Promise.all([
+            Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newHp } }),
+            Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition: 'cursed', turnsRemaining: 99 } } }),
+          ]);
+          moveEvents.push(`${atkName} cut its own HP to curse ${tgtName}!`);
+        }
+      } else {
+        moveEvents.push(`${atkName} used Curse, but there's no target!`);
+      }
+    } else {
+      const stageMap2      = battle.statStages as Record<string, StatStages>;
+      const abilitySlug    = atkDoc && atkDocCache ? resolveAbilitySlug((atkDocCache.abilities as CachedAbility[]) ?? [], atkDoc.hasHiddenAbility ?? false) : null;
+      const curseEffects   = (STAT_STAGE_MOVES['curse'] ?? []).filter(e => e.target === 'self');
+      moveEvents.push(...applyStatStageEffects(stageMap2, entry.activePokemonId.toString(), curseEffects, atkName, abilitySlug));
+      battle.markModified('statStages');
+    }
+    return;
+  }
+
   const moveEffect      = STATUS_MOVES[entry.moveId];
   const stageMap        = battle.statStages as Record<string, StatStages>;
   const recoilEffect    = RECOIL_MOVES[entry.moveId];
@@ -1271,6 +1330,23 @@ async function resolveDamagingMove(
     type MoveEntry = { type: string };
     const moveCacheDoc = await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId, 'moves.name': entry.moveId }, { 'moves.$': 1 }).lean();
     typeChangeMoveType = (moveCacheDoc?.moves as MoveEntry[] | undefined)?.[0]?.type?.toLowerCase() ?? null;
+  }
+
+  // Track consecutive use of escalating-power moves (Fury Cutter, Rollout, Ice Ball).
+  const consMoves = (battle.consecutiveMoves ?? {}) as Record<string, { moveId: string; count: number }>;
+  const escalatingEffect = ESCALATING_POWER_MOVES[entry.moveId];
+  let escalatedPower: number | undefined;
+  if (escalatingEffect) {
+    const prev = consMoves[entry.activePokemonId.toString()];
+    const count = (prev?.moveId === entry.moveId ? prev.count : 0) + 1;
+    consMoves[entry.activePokemonId.toString()] = { moveId: entry.moveId, count };
+    battle.consecutiveMoves = consMoves;
+    battle.markModified('consecutiveMoves');
+    escalatedPower = escalatingEffect.basePower * Math.pow(2, Math.min(count, escalatingEffect.maxCount) - 1);
+  } else if (consMoves[entry.activePokemonId.toString()]) {
+    delete consMoves[entry.activePokemonId.toString()];
+    battle.consecutiveMoves = consMoves;
+    battle.markModified('consecutiveMoves');
   }
 
   for (const targetId of targets) {
@@ -1361,6 +1437,7 @@ async function resolveDamagingMove(
       const { damage, isCrit, events } = await resolveMove(
         entry.activePokemonId, new mongoose.Types.ObjectId(targetId), entry.moveId, battle.weather,
         { attacker: stageMap[entry.activePokemonId.toString()], target: stageMap[targetId] },
+        escalatedPower,
       );
       if (isCrit) anyCrit = true;
       if (hitCount > 1) { moveEvents.push(`(Hit ${hit}) ${events[0]}`); } else { moveEvents.push(...events); }
@@ -1518,6 +1595,29 @@ async function resolveDamagingMove(
       }
     }
   }
+
+  // Manage move-lock state (Rollout, Thrash, Outrage, etc.).
+  const lockEffect = LOCK_MOVES[entry.moveId];
+  if (lockEffect) {
+    const lockedMovesMap = (battle.lockedMoves ?? {}) as Record<string, { moveId: string; turnsRemaining: number }>;
+    const pokemonKey = entry.activePokemonId.toString();
+    const existingLock = lockedMovesMap[pokemonKey];
+    if (!existingLock || existingLock.moveId !== entry.moveId) {
+      const rawTurns = lockEffect.totalTurns === 'random' ? (Math.random() < 0.5 ? 2 : 3) : lockEffect.totalTurns;
+      lockedMovesMap[pokemonKey] = { moveId: entry.moveId, turnsRemaining: rawTurns - 1 };
+    } else {
+      existingLock.turnsRemaining--;
+      if (existingLock.turnsRemaining <= 0) {
+        delete lockedMovesMap[pokemonKey];
+        if (lockEffect.confuseAfter) {
+          const confuseEvents = await applyStatusEffect(entry.activePokemonId, { status: 'confusion', chance: 1 });
+          moveEvents.push(...confuseEvents.map(e => e.replace('became confused!', 'became confused from fatigue!')));
+        }
+      }
+    }
+    battle.lockedMoves = lockedMovesMap;
+    battle.markModified('lockedMoves');
+  }
 }
 
 export async function sendOut(req: Request, res: Response): Promise<void> {
@@ -1554,12 +1654,18 @@ export async function sendOut(req: Request, res: Response): Promise<void> {
   }
 
   playerEntry.activePokemonId = pokeId;
+  battle.markModified('playerSide');
   if (!alreadyUsed) playerEntry.usedPokemonIds.push(pokeId);
 
   const entryEvents = await applyEntryAbilities(battle, pokeId, 'player');
   appendToLog(battle, ...entryEvents);
   battle.lastUpdatedAt = new Date();
   await battle.save();
+  // Direct update for activeSentOutOnTurn — bypasses Mongoose subdocument tracking.
+  await Battle.updateOne(
+    { _id: battle._id, 'playerSide.userId': userId },
+    { $set: { 'playerSide.$.activeSentOutOnTurn': battle.turnNumber } },
+  );
 
   res.json({ data: { activePokemonId: pokemonId }, error: null });
 }
@@ -1588,6 +1694,21 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
     e => e.actorId.toString() === userId.toString() && e.actorType === 'player'
   );
   if (alreadySubmitted) { res.status(400).json({ data: null, error: 'You have already submitted a move this turn' }); return; }
+
+  // If this Pokémon is locked into a move, block all other actions and force that move.
+  const playerLockMap = (battle.lockedMoves ?? {}) as Record<string, { moveId: string; turnsRemaining: number }>;
+  const playerLock    = playerEntry.activePokemonId ? playerLockMap[playerEntry.activePokemonId.toString()] : null;
+  if (playerLock) {
+    if (actionType !== 'move') {
+      res.status(400).json({ data: null, error: `Your Pokémon is locked into ${slugToDisplayName(playerLock.moveId)} and cannot do anything else!` }); return;
+    }
+    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId!, actionType: 'move', moveId: playerLock.moveId, targets: [], resolved: false });
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+    res.json({ data: { submitted: true, phase: battle.phase, lockedMove: playerLock.moveId }, error: null });
+    return;
+  }
 
   if (actionType === 'item') {
     if (!itemId || !targetPokemonId) { res.status(400).json({ data: null, error: 'itemId and targetPokemonId are required for item actions' }); return; }
@@ -1810,7 +1931,7 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
 
   const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
   const caches     = speciesIds.length > 0
-    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats').lean()
+    ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats types').lean()
     : [];
 
   const pokemonMap = new Map(activePokemons.map(p => [p._id.toString(), p]));
@@ -1828,6 +1949,9 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
       _id:             poke._id.toString(),
       name:            poke.nickname ?? speciesName,
       speciesName,
+      speciesId:       poke.speciesId,
+      level:           poke.level,
+      types:           (cache?.types as string[] | undefined) ?? [],
       currentHp:       poke.currentHp,
       maxHp,
       statusCondition: poke.statusCondition ?? null,
@@ -1928,6 +2052,10 @@ export async function dmSendOut(req: Request, res: Response): Promise<void> {
   appendToLog(battle, ...npcEntryEvents);
   battle.lastUpdatedAt = new Date();
   await battle.save();
+  await Battle.updateOne(
+    { _id: battle._id, 'enemySide.npcId': new mongoose.Types.ObjectId(npcId) },
+    { $set: { 'enemySide.$.activeSentOutOnTurn': battle.turnNumber } },
+  );
 
   res.json({ data: { activePokemonId: pokemonId }, error: null });
 }
@@ -1961,6 +2089,22 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
     ? battle.turnQueue.some(e => e.actorId.toString() === npcId && e.activePokemonId?.toString() === slotPokemonId && e.actorType === 'npc')
     : battle.turnQueue.some(e => e.actorId.toString() === npcId && e.actorType === 'npc');
   if (alreadySubmitted) { res.status(400).json({ data: null, error: 'This NPC slot has already submitted a move this turn' }); return; }
+
+  // If this Pokémon is locked into a move, block all other actions and force that move.
+  const npcLockMap = (battle.lockedMoves ?? {}) as Record<string, { moveId: string; turnsRemaining: number }>;
+  const npcLock    = npcEntry.activePokemonId ? npcLockMap[npcEntry.activePokemonId.toString()] : null;
+  if (npcLock) {
+    if (actionType !== 'move') {
+      res.status(400).json({ data: null, error: `This Pokémon is locked into ${slugToDisplayName(npcLock.moveId)} and cannot do anything else!` }); return;
+    }
+    if (!npcEntry.activePokemonId) { res.status(400).json({ data: null, error: 'NPC has not sent out a Pokémon' }); return; }
+    battle.turnQueue.push({ actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId: npcLock.moveId, targets: [], resolved: false });
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+    res.json({ data: { submitted: true, phase: battle.phase, lockedMove: npcLock.moveId }, error: null });
+    return;
+  }
 
   if (battle.type === 'wild' && actionType === 'switch') { res.status(400).json({ data: null, error: 'Wild Pokémon cannot switch' }); return; }
 

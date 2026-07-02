@@ -12,6 +12,7 @@ export type StatStages = {
 export type PlayerSideEntry = {
   userId: mongoose.Types.ObjectId;
   activePokemonId: mongoose.Types.ObjectId | null;
+  activeSentOutOnTurn: number | null;
   usedPokemonIds: mongoose.Types.ObjectId[];
   fainted: mongoose.Types.ObjectId[];
 };
@@ -19,6 +20,7 @@ export type PlayerSideEntry = {
 export type EnemySideEntry = {
   npcId?: mongoose.Types.ObjectId;  // absent for wild battles
   activePokemonId: mongoose.Types.ObjectId | null;
+  activeSentOutOnTurn: number | null;
   fainted: mongoose.Types.ObjectId[];
 };
 
@@ -89,6 +91,12 @@ export type IBattle = {
   // deleted when a Pokémon switches out or faints. Schema.Types.Mixed so the
   // map is flexible; call battle.markModified('statStages') after mutations.
   statStages: Record<string, StatStages>;
+  // Keyed by pokemonId.toString(). Tracks consecutive use of escalating-power moves
+  // (Fury Cutter, Rollout, Ice Ball). Cleared on switch-out or faint.
+  consecutiveMoves: Record<string, { moveId: string; count: number }>;
+  // Keyed by pokemonId.toString(). Tracks Pokémon locked into a move for multiple turns
+  // (Rollout, Thrash, Outrage, Petal Dance, etc.). Cleared on switch-out or faint.
+  lockedMoves: Record<string, { moveId: string; turnsRemaining: number }>;
   expAwarded: boolean;
   encounterId: mongoose.Types.ObjectId | null;
   lastUpdatedAt: Date;
@@ -112,20 +120,22 @@ const BattleSchema = new Schema<IBattle>(
 
     playerSide: [
       {
-        userId:          { type: Schema.Types.ObjectId, ref: 'User', required: true },
-        activePokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
-        usedPokemonIds:  [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
-        fainted:         [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
-        _id:             false,
+        userId:               { type: Schema.Types.ObjectId, ref: 'User', required: true },
+        activePokemonId:      { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
+        activeSentOutOnTurn:  { type: Number, default: null },
+        usedPokemonIds:       [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
+        fainted:              [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
+        _id:                  false,
       },
     ],
 
     enemySide: [
       {
-        npcId:           { type: Schema.Types.ObjectId, ref: 'Npc', default: null },
-        activePokemonId: { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
-        fainted:         [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
-        _id:             false,
+        npcId:               { type: Schema.Types.ObjectId, ref: 'Npc', default: null },
+        activePokemonId:     { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
+        activeSentOutOnTurn: { type: Number, default: null },
+        fainted:             [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
+        _id:                 false,
       },
     ],
 
@@ -183,6 +193,8 @@ const BattleSchema = new Schema<IBattle>(
     ],
 
     statStages:         { type: Schema.Types.Mixed, default: {} },
+    consecutiveMoves:   { type: Schema.Types.Mixed, default: {} },
+    lockedMoves:        { type: Schema.Types.Mixed, default: {} },
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },

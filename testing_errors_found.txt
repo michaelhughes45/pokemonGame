@@ -1,1 +1,10 @@
 Session:
+-on dm panel, it is incorrectly saying a npc has more pokemon than it has (probably not updating when a pokemon is released)
+-Party 
+    -> should only allow 6 pokemon in a players party but it allows for more.
+    ->need to allow as little as 1 pokemon in a party
+-PC storage -> need to add ability to move pokemon from party to storage (already allows storage to party but need the other way around).
+Battle: 
+    -> remove the effect not yet implemented from moves that are implemented (like tail whip)
+    -> might not be taking into account the stat reductions/stat reductions arent actually happening
+    -> look at Toxic, doesnt seem to be working (just says used toxic and then nothing else)

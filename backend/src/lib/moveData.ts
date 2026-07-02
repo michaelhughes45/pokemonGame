@@ -78,7 +78,7 @@ export const STATUS_MOVES: Record<string, StatusMoveEffect> = {
 // Non-zero move priority values. Only moves deviating from 0 are listed.
 export const MOVE_PRIORITY: Record<string, number> = {
   // +3
-  'detect': 3, 'endure': 3, 'protect': 3, 'kings-shield': 3, 'spiky-shield': 3,
+  'detect': 3, 'endure': 3, 'fake-out': 3, 'protect': 3, 'kings-shield': 3, 'spiky-shield': 3,
   'baneful-bunker': 3, 'obstruct': 3, 'quick-guard': 3, 'wide-guard': 3,
   // +2
   'extreme-speed': 2, 'feint': 2, 'first-impression': 2,
@@ -137,7 +137,7 @@ export const SELF_TARGETING_MOVES = new Set([
   'recover', 'soft-boiled', 'roost', 'moonlight', 'morning-sun',
   'synthesis', 'rest', 'slack-off', 'milk-drink', 'heal-order', 'shore-up',
   // Other self-targeting
-  'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile', 'curse',
+  'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
   // Protect family
   'protect', 'detect', 'kings-shield', 'spiky-shield', 'baneful-bunker', 'obstruct',
 ]);
@@ -406,6 +406,29 @@ export const DRAIN_MOVES: Record<string, DrainEffect> = {
   'dream-eater':      { fraction: 0.5 },
   'draining-kiss':    { fraction: 0.75 },
   'oblivion-wing':    { fraction: 0.75 },
+};
+
+// Moves that lock the user in for multiple consecutive turns.
+// totalTurns: how many turns total (including the first); 'random' = 2 or 3.
+// confuseAfter: apply confusion to the user when the lock expires.
+export type LockMoveEffect = { totalTurns: number | 'random'; confuseAfter: boolean };
+
+export const LOCK_MOVES: Record<string, LockMoveEffect> = {
+  'rollout':     { totalTurns: 5,        confuseAfter: false },
+  'ice-ball':    { totalTurns: 5,        confuseAfter: false },
+  'thrash':      { totalTurns: 'random', confuseAfter: true  },
+  'outrage':     { totalTurns: 'random', confuseAfter: true  },
+  'petal-dance': { totalTurns: 'random', confuseAfter: true  },
+};
+
+// Moves whose base power doubles with each consecutive use by the same Pokémon.
+// basePower: starting power on the first use; maxCount: number of doublings before capping.
+export type EscalatingPowerMove = { basePower: number; maxCount: number };
+
+export const ESCALATING_POWER_MOVES: Record<string, EscalatingPowerMove> = {
+  'fury-cutter': { basePower: 40, maxCount: 3 }, // 40 → 80 → 160 (stays at 160)
+  'rollout':     { basePower: 30, maxCount: 5 }, // 30 → 60 → 120 → 240 → 480
+  'ice-ball':    { basePower: 30, maxCount: 5 }, // 30 → 60 → 120 → 240 → 480
 };
 
 // All move IDs that require no enemy target selection.

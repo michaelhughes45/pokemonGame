@@ -23,16 +23,18 @@ export async function canEvolve(pokemon: {
   const chain = (species.evolutionChain ?? []) as EvolutionStep[];
 
   // The stored chain covers the whole line (e.g. Bulba→Ivy→Venu all on Bulbasaur's entry).
-  // Filter to steps that: target a different species, require level-up, and the threshold
-  // has already been reached. Sort descending so the highest threshold wins if multiple match.
-  const eligible = chain
-    .filter(
-      step =>
-        step.condition === 'level-up' &&
-        step.speciesId !== pokemon.speciesId &&
-        parseInt(step.value, 10) <= pokemon.level
-    )
-    .sort((a, b) => parseInt(b.value, 10) - parseInt(a.value, 10));
+  // Sort ascending so the chain is in evolution order, then find where the current species
+  // sits. The next step after it is the only valid forward evolution — checking all steps
+  // that meet the level threshold would incorrectly flag prior evolutions as eligible
+  // (e.g. Venusaur seeing Ivysaur@16 and "devolving").
+  const levelUpChain = chain
+    .filter(step => step.condition === 'level-up')
+    .sort((a, b) => parseInt(a.value, 10) - parseInt(b.value, 10));
 
-  return eligible[0]?.speciesId ?? null;
+  const currentIdx = levelUpChain.findIndex(step => step.speciesId === pokemon.speciesId);
+  // Base species is not listed as a target in the chain, so currentIdx === -1 → next is [0].
+  const nextStep = levelUpChain[currentIdx + 1];
+
+  if (!nextStep) return null;
+  return parseInt(nextStep.value, 10) <= pokemon.level ? nextStep.speciesId : null;
 }

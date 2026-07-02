@@ -102,15 +102,24 @@ export default function DashboardPage() {
       .finally(() => setPartyLoading(false));
   }, [token]);
 
-  // Fetch active battle for players (surfaces "Battle in progress" card)
+  // Fetch active battle for players (surfaces "Battle in progress" card); polls so the card
+  // disappears automatically when the battle completes without requiring a page reload.
   useEffect(() => {
     if (!user || user.role !== 'player') return;
-    axios
-      .get(`${API}/api/battles/active`, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      .then(res => setActiveBattle(res.data.data ?? null))
-      .catch(() => {});
+    let cancelled = false;
+
+    function fetchActiveBattle() {
+      axios
+        .get(`${API}/api/battles/active`, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        .then(res => { if (!cancelled) setActiveBattle(res.data.data ?? null); })
+        .catch(() => {});
+    }
+
+    fetchActiveBattle();
+    const interval = setInterval(fetchActiveBattle, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [token, user]);
 
   // Fetch pending campaign invites for players
