@@ -11,6 +11,7 @@ import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smogon/calc';
 import { canEvolve } from '../lib/evolution';
 import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier } from '../lib/itemData';
+import { applyEvGain } from '../lib/evData';
 import {
   NO_TARGET_MOVE_IDS,
   getMoveTargetCategory,
@@ -827,15 +828,21 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
   const events: string[] = [];
   const allFaintedEnemyIds = battle.enemySide.flatMap(e => e.fainted);
   if (allFaintedEnemyIds.length === 0) return events;
-  const faintedEnemies = await Pokemon.find({ _id: { $in: allFaintedEnemyIds } }, 'level').lean();
+  const faintedEnemies = await Pokemon.find({ _id: { $in: allFaintedEnemyIds } }, 'level speciesId').lean();
   const totalBaseExp = faintedEnemies.reduce((sum, p) => sum + p.level * 5, 0);
   if (totalBaseExp === 0) return events;
 
   const playerUserIds  = battle.playerSide.map(e => e.userId);
-  const allPartyPokemon = await Pokemon.find({ ownerId: { $in: playerUserIds }, ownerType: 'player', isInParty: true }, '_id ownerId nickname speciesId level exp nature currentHp evolutionOverrides').lean();
-  const speciesIds = [...new Set(allPartyPokemon.map(p => p.speciesId))];
-  const caches     = speciesIds.length > 0 ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name expGroup baseStats').lean() : [];
+  const allPartyPokemon = await Pokemon.find({ ownerId: { $in: playerUserIds }, ownerType: 'player', isInParty: true }, '_id ownerId nickname speciesId level exp nature currentHp evs evolutionOverrides').lean();
+  const speciesIds = [...new Set([...allPartyPokemon.map(p => p.speciesId), ...faintedEnemies.map(p => p.speciesId)])];
+  const caches     = speciesIds.length > 0 ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name expGroup baseStats evYield').lean() : [];
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
+
+  const totalEvYield = faintedEnemies.reduce((acc, p) => {
+    const yieldStats = cacheMap.get(p.speciesId)?.evYield as BaseStats | undefined;
+    if (yieldStats) (Object.keys(acc) as (keyof BaseStats)[]).forEach(k => { acc[k] += yieldStats[k]; });
+    return acc;
+  }, { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 } as BaseStats);
 
   for (const playerEntry of battle.playerSide) {
     const usedIds = new Set(playerEntry.usedPokemonIds.map(id => id.toString()));
@@ -847,6 +854,8 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
       const cache       = cacheMap.get(poke.speciesId);
       const displayName = pokeDisplayName(poke, cache);
       events.push(`${displayName} gained ${expGain} EXP${isActive ? '' : ' (Exp. Share)'}!`);
+      const { evs: newEvs, gainedStats } = applyEvGain(poke.evs as BaseStats, totalEvYield);
+      if (gainedStats.length > 0) events.push(`${displayName} gained EVs in ${gainedStats.join(', ')}!`);
       const newExp = (poke.exp as number) + expGain;
       let newLevel = poke.level as number; let newHp = poke.currentHp as number; let newSpeciesId = poke.speciesId as number;
       const expGroup  = (cache?.expGroup as string | undefined) ?? 'medium-fast';
@@ -871,7 +880,7 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
           newSpeciesId = evolveIntoId;
         }
       }
-      await Pokemon.updateOne({ _id: poke._id }, { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId } });
+      await Pokemon.updateOne({ _id: poke._id }, { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId, evs: newEvs } });
     }
   }
   return events;

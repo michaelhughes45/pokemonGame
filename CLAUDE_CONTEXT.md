@@ -360,6 +360,7 @@ pokemonGame/
         abilityData.ts       ← STATUS_IMMUNITY_ABILITIES, ILATE_MAP, PINCH_ABILITIES, WEATHER_SPEED_DOUBLERS
         weatherData.ts       ← WEATHER_MOVES, ENTRY_ABILITY_WEATHER, ENTRY_WEATHER_MESSAGES
         battleCalc.ts        ← GEN9, CachedAbility, slugToDisplayName, pokeDisplayName, toCalcWeather, toCalcStatus, resolveAbilitySlug, applyStatStageEffects, cap, ZERO_STATS, appendToLog
+        evData.ts            ← EV_STAT_CAP, EV_TOTAL_CAP, EV_STAT_DISPLAY_NAMES, applyEvGain — Phase 5 stat-progression home (EV award engine now, EV-reducing berries + Trainer IV bonus land here too)
       middleware/            ← auth middleware (JWT verify, requireDm)
       models/                ← Mongoose models (User, Pokemon, Item, PokedexCache, Battle, etc.)
       controllers/
@@ -477,6 +478,8 @@ pokemonGame/
 - `getMoveTargetCategory(target: string)` in `lib/moveData.ts` returns `'auto'` for spread/field target values or `'single'` for everything else; falls back to `'single'` when target is empty or unrecognised
 - State endpoint computes `currentMoveTargetCategory: 'single' | 'auto' | null` for the current targeting actor's move (single `$elemMatch` PokedexCache query); `null` when not in targeting phase or actor has no moveId
 - Auto-target moves in BattlePage use `handleAutoTargetMove(targetIds)` (separate from `handleSubmitTarget`) to avoid the React state race condition of calling `setSelectedTargets` + `handleSubmitTarget` in sequence
+- `applyEvGain(current, gain)` in `lib/evData.ts` is the single source of truth for EV math — clamps per-stat to 252 and total to 510, returns both the new spread and the display names of stats that actually increased; `distributeExp` computes `totalEvYield` once (summed across all fainted enemies) and applies it identically to active and benched party Pokémon in the same loop that awards EXP, persisting `evs` in the same `updateOne` as `exp`/`level`/`currentHp`
+- EV turn-log line (`"<Name> gained EVs in <Stat, Stat>!"`) is pushed only when `gainedStats.length > 0` — a Pokémon already at the cap gets its EXP line with no EV line following
 
 ---
 
@@ -522,7 +525,7 @@ pokemonGame/
 - [x] **4.15** Move targeting enforcement — `target` field added to `PokedexCache.moves[]` schema and fetched from PokeAPI in `fetchSpecies`; `getMoveTargetCategory(target)` helper in `lib/moveData.ts` categorises moves as `'auto'` (spread/field: all-opponents, all-adjacent-foes, all-adjacent, all-pokemon, all-other-pokemon, entire-field) or `'single'` (everything else); state endpoint looks up the current actor's move target from cache and returns `currentMoveTargetCategory: 'single' | 'auto' | null`; frontend: auto moves show "Use [Move] — hits all (N)" button that submits all active opposing Pokémon IDs via `handleAutoTargetMove`; single moves enforce one selection (click replaces, not toggles); adjacency remains self-reported from physical table — no position tracking added
 - [x] **4.16** `battles.ts` cleanup — `submit-target` `if (!hitSelf)` block split into three named async helpers (`resolveWeatherMove`, `resolveSelfTargetMove`, `resolveDamagingMove`) with `ActiveEntry` type alias; 5 duplicate 1/16-heal blocks in `applyEndOfRound` consolidated into `applyFractionHeal` helper (Rain Dish, Ice Body, Dry Skin rain, Ingrain, Aqua Ring); `cap` / `ZERO_STATS` exported from `lib/battleCalc.ts` replacing two inline re-declarations
 - [x] **4.17** Controllers/routes split — all route handlers and every battle helper extracted from `routes/battles.ts` into `controllers/battleController.ts`; `routes/battles.ts` reduced from ~3,800 lines to a 68-line annotated route manifest (`router.verb(path, middleware?, handler)` per line); exported handlers: `createBattle`, `startBattle`, `sendOut`, `dmSendOut`, `submitMove`, `dmSubmitMove`, `submitTarget`, `advanceRound`, `setWeather`, `deleteBattle`, `getBattleState`, `getDmBattles`, `getActiveBattle`, `dmAutoSubmit`; private helpers stay in the same file (not exported); `checkAndAdvance` and `applyEntryAbilities` exported because DM routes call them directly
-- [ ] **5.1** EV award engine — post-battle evYield distribution, 252/510 caps
+- [x] **5.1** EV award engine — `applyEvGain(current, gain)` in new `lib/evData.ts` clamps a stat spread to the 252-per-stat / 510-total EV caps; `distributeExp` in `battleController.ts` sums `evYield` across all fainted enemies once per battle-end call and applies it to every party Pokémon that gained EXP (active and benched alike get the FULL yield — EVs are not halved for benched Pokémon like EXP is); logs a single combined turn-log line per Pokémon (`"<Name> gained EVs in <Stat, Stat>!"`) immediately after that Pokémon's EXP line, omitted entirely when no stat actually increased (already capped); verified end-to-end against a real battle on the live Atlas DB
 - [ ] **5.2** EV tools — DM EV panel, EV-reducing berries from bag
 - [ ] **5.3** Trainer IV activation — +20 stat bonus passed to @smogon/calc
 - [ ] **5.4** PvP battles — player vs player format
@@ -535,8 +538,8 @@ pokemonGame/
 
 ## Current Milestone
 
-- **Starting:** 5.1 — EV award engine (post-battle evYield distribution, 252/510 caps)
-- **Just finished:** 4.17 — Controllers/routes split (all handlers + helpers moved to `controllers/battleController.ts`; `routes/battles.ts` is now a 68-line annotated manifest). Committed and tagged v4.17.
+- **Starting:** 5.2 — EV tools (DM EV panel, EV-reducing berries from bag)
+- **Just finished:** 5.1 — EV award engine (`lib/evData.ts` + `distributeExp` wiring + turn log messages, verified end-to-end). Committed and tagged v5.1.
 - **Known issues / blockers:** none
 
 ---
