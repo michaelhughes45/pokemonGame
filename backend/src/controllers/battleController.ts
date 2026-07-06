@@ -571,12 +571,18 @@ async function resolveCatchAction(battle: HydratedDocument<IBattle>, entry: Turn
 
   if (caught) {
     const partyPokemon = await Pokemon.find({ ownerId: actorId, ownerType: 'player', isInParty: true }, 'partySlot').lean();
-    const usedSlots = new Set(partyPokemon.map(p => p.partySlot));
-    let nextSlot = 1; while (usedSlots.has(nextSlot)) nextSlot++;
-    await Pokemon.updateOne({ _id: targets[0] }, { $set: { ownerType: 'player', ownerId: actorId, isInParty: true, partySlot: nextSlot, caughtAt: new Date(), caughtByPlayerId: actorId } });
+    const hasRoom = partyPokemon.length < 6;
+    let nextSlot: number | null = null;
+    if (hasRoom) {
+      const usedSlots = new Set(partyPokemon.map(p => p.partySlot));
+      nextSlot = 1; while (usedSlots.has(nextSlot)) nextSlot++;
+    }
+    await Pokemon.updateOne({ _id: targets[0] }, { $set: { ownerType: 'player', ownerId: actorId, isInParty: hasRoom, partySlot: nextSlot, caughtAt: new Date(), caughtByPlayerId: actorId } });
     const enemyEntry = battle.enemySide.find(e => e.activePokemonId?.toString() === targets[0].toString());
     if (enemyEntry) { enemyEntry.fainted.push(new mongoose.Types.ObjectId(targets[0].toString())); enemyEntry.activePokemonId = null; battle.markModified('enemySide'); }
-    events.push(`Gotcha! ${displayName} was caught! It was added to your party (slot ${nextSlot}).`);
+    events.push(hasRoom
+      ? `Gotcha! ${displayName} was caught! It was added to your party (slot ${nextSlot}).`
+      : `Gotcha! ${displayName} was caught! Your party is full, so it was sent to your PC.`);
   }
   return events;
 }

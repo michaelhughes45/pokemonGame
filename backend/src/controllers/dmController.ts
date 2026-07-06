@@ -239,7 +239,8 @@ export async function deletePlayerStarter(req: Request, res: Response): Promise<
 
 // ---------------------------------------------------------------------------
 // POST /api/dm/players/:username/pokemon
-// DM gives a Pokémon directly to a player. Always slots into party.
+// DM gives a Pokémon directly to a player. Slots into party if there's room
+// (max 6), otherwise goes to the player's PC.
 // Body: { species, level?, nature?, gender? }
 // ---------------------------------------------------------------------------
 export async function givePlayerPokemon(req: Request, res: Response): Promise<void> {
@@ -272,7 +273,8 @@ export async function givePlayerPokemon(req: Request, res: Response): Promise<vo
   const maxHp         = Math.floor((2 * speciesDoc.baseStats.hp * level) / 100) + level + 10;
   const resolvedGender = resolveGender(speciesDoc.genderRatio as number, gender);
   const moves          = deriveStartingMoves(speciesDoc, level);
-  const partyCount     = await Pokemon.countDocuments({ ownerId: user._id, isInParty: true });
+  const partyCount = await Pokemon.countDocuments({ ownerId: user._id, isInParty: true });
+  const hasRoom     = partyCount < 6;
 
   const pokemon = await Pokemon.create({
     speciesId: speciesDoc.pokeApiId,
@@ -286,8 +288,8 @@ export async function givePlayerPokemon(req: Request, res: Response): Promise<vo
     gender:    resolvedGender,
     heldItem:  null,
     moves,
-    isInParty: true,
-    partySlot: partyCount + 1,
+    isInParty: hasRoom,
+    partySlot: hasRoom ? partyCount + 1 : null,
   });
 
   sendOk(res, {

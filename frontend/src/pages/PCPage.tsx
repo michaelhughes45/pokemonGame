@@ -185,6 +185,19 @@ export default function PCPage() {
     }
   }
 
+  async function handleWithdraw(partyPokemonId: string) {
+    try {
+      await axios.post(
+        `${API}/api/pokemon/party/withdraw`,
+        { partyPokemonId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      refetch();
+    } catch {
+      setError('Failed to move Pokémon to PC. Please try again.');
+    }
+  }
+
   const selectedPc = pc.find(p => p._id === selectedPcId);
 
   return (
@@ -228,7 +241,8 @@ export default function PCPage() {
                     <Card
                       key={String(p._id)}
                       // In swap mode the whole card becomes a button.
-                      // Outside swap mode it links to the detail page.
+                      // Outside swap mode it links to the detail page, with a
+                      // separate "→ PC" button to withdraw without swapping.
                       className={selectedPcId
                         ? 'cursor-pointer ring-2 ring-primary/30 hover:ring-primary transition-all'
                         : ''}
@@ -237,9 +251,21 @@ export default function PCPage() {
                       {selectedPcId
                         ? <PokemonCard pokemon={p} />
                         : (
-                          <Link to={`/pokemon/${p._id}`}>
-                            <PokemonCard pokemon={p} />
-                          </Link>
+                          <div className="flex items-center gap-2">
+                            <Link to={`/pokemon/${p._id}`} className="flex-1 min-w-0">
+                              <PokemonCard pokemon={p} />
+                            </Link>
+                            {party.length > 1 && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="shrink-0 mr-3 min-h-11"
+                                onClick={() => handleWithdraw(p._id)}
+                              >
+                                → PC
+                              </Button>
+                            )}
+                          </div>
                         )
                       }
                     </Card>

@@ -4,6 +4,7 @@ import {
   reorderParty,
   getPc,
   swapParty,
+  withdrawFromParty,
   healParty,
   replaceMoveSlot,
   getPokemon,
@@ -25,6 +26,9 @@ router.get('/pc',              getPc);
 
 // POST /api/pokemon/party/swap      — move PC pokemon into party (optional swap)
 router.post('/party/swap',     swapParty);
+
+// POST /api/pokemon/party/withdraw  — move a party pokemon to the PC (no swap partner needed)
+router.post('/party/withdraw', withdrawFromParty);
 
 // POST /api/pokemon/heal-party      — heal all party pokemon to full HP+PP+status
 router.post('/heal-party',     healParty);

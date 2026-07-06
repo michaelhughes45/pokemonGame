@@ -176,8 +176,49 @@ export async function swapParty(req: Request, res: Response): Promise<void> {
     await Pokemon.updateOne({ _id: pcPokemonId },    { isInParty: true,  partySlot: slot });
   } else {
     const partyCount = await Pokemon.countDocuments({ ownerId: userId, isInParty: true });
+    if (partyCount >= 6) {
+      return sendError(res, 400, 'Your party is full (max 6 Pokémon)');
+    }
     await Pokemon.updateOne({ _id: pcPokemonId }, { isInParty: true, partySlot: partyCount + 1 });
   }
+
+  sendOk(res, { ok: true });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/pokemon/party/withdraw
+// Moves a party pokemon to the PC with no swap partner required.
+// A trainer must always keep at least 1 pokemon in their party.
+// ---------------------------------------------------------------------------
+export async function withdrawFromParty(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { partyPokemonId } = req.body as { partyPokemonId: string };
+
+  if (!partyPokemonId || !mongoose.Types.ObjectId.isValid(partyPokemonId)) {
+    return sendError(res, 400, 'Invalid partyPokemonId');
+  }
+
+  const partyPokemon = await Pokemon.findOne({ _id: partyPokemonId, ownerId: userId, isInParty: true });
+  if (!partyPokemon) {
+    return sendError(res, 404, 'Party Pokémon not found');
+  }
+
+  const partyCount = await Pokemon.countDocuments({ ownerId: userId, isInParty: true });
+  if (partyCount <= 1) {
+    return sendError(res, 400, 'You must keep at least 1 Pokémon in your party');
+  }
+
+  await Pokemon.updateOne({ _id: partyPokemonId }, { isInParty: false, partySlot: null });
+
+  // Compact remaining party slots so they run 1, 2, 3 … with no gaps
+  const remaining = await Pokemon.find({ ownerId: userId, isInParty: true })
+    .select('_id')
+    .lean()
+    .sort({ partySlot: 1 });
+
+  await Promise.all(remaining.map((p, index) =>
+    Pokemon.updateOne({ _id: p._id }, { partySlot: index + 1 }),
+  ));
 
   sendOk(res, { ok: true });
 }
