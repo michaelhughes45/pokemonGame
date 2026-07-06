@@ -20,6 +20,7 @@ type CampaignData = {
   name: string;
   players: CampaignPlayer[];
   pendingInvites: PendingInvite[];
+  levelCapEnabled: boolean;
 };
 
 function CampaignCard({ token }: { token: string | null }) {
@@ -31,6 +32,7 @@ function CampaignCard({ token }: { token: string | null }) {
   const [inviteLoading,  setInviteLoading]  = useState(false);
   const [feedback,       setFeedback]       = useState('');
   const [error,          setError]          = useState('');
+  const [levelCapLoading, setLevelCapLoading] = useState(false);
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -94,6 +96,28 @@ function CampaignCard({ token }: { token: string | null }) {
     }
   }
 
+  async function handleToggleLevelCap() {
+    if (!campaign) return;
+    clearMessages(); setLevelCapLoading(true);
+    try {
+      const res = await axios.patch(
+        `${API}/api/campaigns/level-cap`,
+        { enabled: !campaign.levelCapEnabled },
+        { headers },
+      );
+      setCampaign({ ...campaign, levelCapEnabled: res.data.data.levelCapEnabled });
+      const unlocked = res.data.data.unlockedCount as number;
+      setFeedback(
+        `Level cap ${res.data.data.levelCapEnabled ? 'enabled' : 'disabled'}.`
+        + (unlocked > 0 ? ` ${unlocked} Pokémon leveled up from banked EXP.` : ''),
+      );
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to update level cap') : 'Failed to update level cap');
+    } finally {
+      setLevelCapLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <Card>
@@ -141,6 +165,25 @@ function CampaignCard({ token }: { token: string | null }) {
         <CardTitle>{campaign.name}</CardTitle>
       </CardHeader>
       <CardContent className="flex flex-col gap-5">
+
+        {/* Level cap toggle */}
+        <div className="flex items-center justify-between rounded-md border p-3">
+          <div>
+            <p className="text-sm font-medium">Level cap</p>
+            <p className="text-xs text-muted-foreground">
+              {campaign.levelCapEnabled ? 'On — 6 + 3 per badge' : 'Off — players can level freely'}
+            </p>
+          </div>
+          <Button
+            variant={campaign.levelCapEnabled ? 'default' : 'outline'}
+            size="sm"
+            className="min-h-9 shrink-0"
+            disabled={levelCapLoading}
+            onClick={handleToggleLevelCap}
+          >
+            {levelCapLoading ? 'Updating…' : campaign.levelCapEnabled ? 'On' : 'Off'}
+          </Button>
+        </div>
 
         {/* Player list */}
         <div>

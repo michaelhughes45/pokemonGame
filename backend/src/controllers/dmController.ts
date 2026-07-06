@@ -13,6 +13,7 @@ import { fetchSpecies } from '../lib/pokeapi';
 import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
 import { slugToDisplayName } from '../lib/battleCalc';
+import { applyLevelUpLoop, getPlayerEffectiveLevelCap } from '../lib/levelCap';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -1023,43 +1024,26 @@ export async function awardExp(req: Request, res: Response): Promise<void> {
   const displayName = pokemon.nickname ?? slugToDisplayName(cache.name as string);
   const events: string[] = [`${displayName} gained ${expGain} EXP!`];
 
-  const newExp     = (pokemon.exp as number) + expGain;
-  let newLevel     = pokemon.level as number;
-  let newHp        = pokemon.currentHp as number;
-  let newSpeciesId = pokemon.speciesId as number;
-  const expGroup   = (cache.expGroup as string) || 'medium-fast';
-  const baseStats  = cache.baseStats as BaseStats | undefined;
-  const overrides  = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
+  const newExp    = (pokemon.exp as number) + expGain;
+  const expGroup  = (cache.expGroup as string) || 'medium-fast';
+  const baseStats = cache.baseStats as BaseStats | undefined;
+  const overrides = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
+  const cap       = await getPlayerEffectiveLevelCap(pokemon.ownerId);
 
-  while (newLevel < 100 && newExp >= expForLevel(newLevel + 1, expGroup)) {
-    if (baseStats && newHp > 0) {
-      const oldMaxHp = computeStats(baseStats, newLevel, pokemon.nature as string).hp;
-      newLevel += 1;
-      const newMaxHp = computeStats(baseStats, newLevel, pokemon.nature as string).hp;
-      newHp += (newMaxHp - oldMaxHp);
-    } else {
-      newLevel += 1;
-    }
-    events.push(`${displayName} grew to level ${newLevel}!`);
-
-    const evolveIntoId = await canEvolve({ speciesId: newSpeciesId, level: newLevel, evolutionOverrides: overrides });
-    if (evolveIntoId !== null) {
-      let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
-      if (!evolvedCache) {
-        try {
-          const fetched  = await fetchSpecies(evolveIntoId);
-          const created  = await PokedexCache.create(fetched);
-          evolvedCache   = created.toObject();
-        } catch { /* leave null — name falls back */ }
-      }
-      if (evolvedCache?.baseStats) {
-        newHp = computeStats(evolvedCache.baseStats as BaseStats, newLevel, pokemon.nature as string).hp;
-      }
-      const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
-      events.push(`${displayName} evolved into ${evolvedName}!`);
-      newSpeciesId = evolveIntoId;
-    }
-  }
+  const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, events: levelEvents, cappedOut } = await applyLevelUpLoop({
+    displayName,
+    level: pokemon.level as number,
+    exp: newExp,
+    currentHp: pokemon.currentHp as number,
+    speciesId: pokemon.speciesId as number,
+    nature: pokemon.nature as string,
+    evolutionOverrides: overrides,
+    expGroup,
+    baseStats,
+    cap,
+  });
+  events.push(...levelEvents);
+  if (cappedOut) events.push(`${displayName} has reached the level cap and cannot grow further!`);
 
   await Pokemon.updateOne(
     { _id: pokemon._id },
@@ -1079,8 +1063,11 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
   const pokemon = await assertDmOwnsPokemon(req.user!.userId, pokemonId, res);
   if (!pokemon) return;
 
-  if ((pokemon.level as number) >= 100) {
-    return sendError(res, 400, 'That Pokémon is already at level 100.');
+  const cap = await getPlayerEffectiveLevelCap(pokemon.ownerId);
+  if ((pokemon.level as number) >= cap) {
+    return sendError(res, 400, cap >= 100
+      ? 'That Pokémon is already at level 100.'
+      : `That Pokémon is already at its level cap (Lv. ${cap}).`);
   }
 
   const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId })

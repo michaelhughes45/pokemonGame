@@ -45,6 +45,7 @@ type PokemonDetail = {
   speciesId: number;
   nickname: string | null;
   level: number;
+  levelCap: number | null;
   exp: number;
   expForCurrentLevel: number;
   expForNextLevel: number | null;
@@ -170,21 +171,31 @@ function StatRow({ label, base, actual }: { label: string; base: number; actual:
   );
 }
 
-function ExpBar({ exp, expForCurrentLevel, expForNextLevel }: { exp: number; expForCurrentLevel: number; expForNextLevel: number | null }) {
+function ExpBar({ exp, expForCurrentLevel, expForNextLevel, level, levelCap }: {
+  exp: number; expForCurrentLevel: number; expForNextLevel: number | null; level: number; levelCap: number | null;
+}) {
   if (expForNextLevel === null) {
     return <p className="text-sm text-muted-foreground">Max Level</p>;
   }
+  const atCap = levelCap !== null && level >= levelCap;
   const earned = Math.max(0, exp - expForCurrentLevel);
   const needed = expForNextLevel - expForCurrentLevel;
   const pct = needed > 0 ? Math.min(100, Math.round((earned / needed) * 100)) : 100;
   return (
-    <div className="flex items-center gap-3">
-      <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden">
-        <div className="h-full rounded-full bg-blue-500" style={{ width: `${pct}%` }} />
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-3">
+        <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden">
+          <div className={`h-full rounded-full ${atCap ? 'bg-muted-foreground/50' : 'bg-blue-500'}`} style={{ width: `${pct}%` }} />
+        </div>
+        <span className="text-sm font-mono font-semibold">
+          {earned.toLocaleString()}/{needed.toLocaleString()}
+        </span>
       </div>
-      <span className="text-sm font-mono font-semibold">
-        {earned.toLocaleString()}/{needed.toLocaleString()}
-      </span>
+      {atCap && (
+        <Badge variant="secondary" className="w-fit">
+          At level cap (Lv. {levelCap}) — EXP still banks and unlocks once the cap rises
+        </Badge>
+      )}
     </div>
   );
 }
@@ -501,7 +512,13 @@ export default function PokemonDetailPage() {
             <CardTitle className="text-base">Experience</CardTitle>
           </CardHeader>
           <CardContent>
-            <ExpBar exp={pokemon.exp} expForCurrentLevel={pokemon.expForCurrentLevel} expForNextLevel={pokemon.expForNextLevel} />
+            <ExpBar
+              exp={pokemon.exp}
+              expForCurrentLevel={pokemon.expForCurrentLevel}
+              expForNextLevel={pokemon.expForNextLevel}
+              level={pokemon.level}
+              levelCap={pokemon.levelCap}
+            />
           </CardContent>
         </Card>
 

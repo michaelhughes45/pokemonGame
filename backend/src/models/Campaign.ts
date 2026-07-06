@@ -6,6 +6,7 @@ type ICampaign = {
   playerIds: mongoose.Types.ObjectId[];
   pendingInvites: Array<{ userId: mongoose.Types.ObjectId; sentAt: Date }>;
   isActive: boolean;
+  levelCapEnabled: boolean;
 };
 
 const CampaignSchema = new Schema<ICampaign>(
@@ -19,7 +20,8 @@ const CampaignSchema = new Schema<ICampaign>(
         sentAt: { type: Date, default: Date.now },
       },
     ],
-    isActive: { type: Boolean, default: true },
+    isActive:        { type: Boolean, default: true },
+    levelCapEnabled: { type: Boolean, default: true },
   },
   { timestamps: true }
 );

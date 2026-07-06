@@ -8,6 +8,7 @@ import {
   respondToInvite,
   leaveCampaign,
   removePlayer,
+  setLevelCapEnabled,
 } from '../controllers/campaignController';
 
 const router = Router();
@@ -32,5 +33,8 @@ router.post('/leave',           leaveCampaign);
 
 // DELETE /api/campaigns/players/:username — DM removes a player from the campaign
 router.delete('/players/:username', requireDm, removePlayer);
+
+// PATCH /api/campaigns/level-cap        — DM toggles the campaign-wide level cap
+router.patch('/level-cap', requireDm, setLevelCapEnabled);
 
 export default router;

@@ -6,6 +6,7 @@ import { PokedexCache } from '../models/PokedexCache';
 import { computeStats } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
 import { fetchSpecies } from '../lib/pokeapi';
+import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 
 // ---------------------------------------------------------------------------
 // Item effect table
@@ -303,8 +304,11 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     pokemon.markModified('moves');
 
   } else if (effect.kind === 'level_up') {
-    if (pokemon.level >= 100) {
-      return sendError(res, 400, 'That Pokémon is already at level 100.');
+    const cap = await getPlayerEffectiveLevelCap(userId);
+    if (pokemon.level >= cap) {
+      return sendError(res, 400, cap >= 100
+        ? 'That Pokémon is already at level 100.'
+        : `That Pokémon is already at its level cap (Lv. ${cap}).`);
     }
 
     const species = await fetchSpeciesBaseStats(pokemon.speciesId, res);

@@ -289,6 +289,17 @@ Admin panel has a manual refresh button per entry.
 
 ---
 
+## Badge Image Source
+
+PokeAPI has no gym badge data or imagery (confirmed — its resource categories are berries,
+contests, encounters, evolution, games, items, locations, machines, moves, pokémon, and
+utility only). For the Badge System milestone (5.3), badge names and artwork come from
+**Bulbapedia**: https://bulbapedia.bulbagarden.net/wiki/Badge — image URLs must be verified
+individually per badge (Bulbapedia archive URLs use unpredictable hash-prefixed paths), never
+guessed or bulk-assumed.
+
+---
+
 ## Damage Calculation
 
 **@smogon/calc** — installed via `npm install @smogon/calc`.
@@ -361,6 +372,7 @@ pokemonGame/
         weatherData.ts       ← WEATHER_MOVES, ENTRY_ABILITY_WEATHER, ENTRY_WEATHER_MESSAGES
         battleCalc.ts        ← GEN9, CachedAbility, slugToDisplayName, pokeDisplayName, toCalcWeather, toCalcStatus, resolveAbilitySlug, applyStatStageEffects, cap, ZERO_STATS, appendToLog
         evData.ts            ← EV_STAT_CAP, EV_TOTAL_CAP, EV_STAT_DISPLAY_NAMES, applyEvGain — Phase 5 stat-progression home (EV award engine now, EV-reducing berries + Trainer IV bonus land here too)
+        levelCap.ts          ← getEffectiveLevelCap, getPlayerEffectiveLevelCap, applyLevelUpLoop, unlockPendingLevelUpsForPlayer — level-cap math + the shared capped level-up/evolution loop used by every EXP-granting path
       middleware/            ← auth middleware (JWT verify, requireDm)
       models/                ← Mongoose models (User, Pokemon, Item, PokedexCache, Battle, etc.)
       controllers/
@@ -480,6 +492,10 @@ pokemonGame/
 - Auto-target moves in BattlePage use `handleAutoTargetMove(targetIds)` (separate from `handleSubmitTarget`) to avoid the React state race condition of calling `setSelectedTargets` + `handleSubmitTarget` in sequence
 - `applyEvGain(current, gain)` in `lib/evData.ts` is the single source of truth for EV math — clamps per-stat to 252 and total to 510, returns both the new spread and the display names of stats that actually increased; `distributeExp` computes `totalEvYield` once (summed across all fainted enemies) and applies it identically to active and benched party Pokémon in the same loop that awards EXP, persisting `evs` in the same `updateOne` as `exp`/`level`/`currentHp`
 - EV turn-log line (`"<Name> gained EVs in <Stat, Stat>!"`) is pushed only when `gainedStats.length > 0` — a Pokémon already at the cap gets its EXP line with no EV line following
+- Every level-raising path shares one loop: `applyLevelUpLoop` in `lib/levelCap.ts` is the extracted level-up/evolution while-loop bounded by a `cap` param; `distributeExp`, DM `awardExp`, and `unlockPendingLevelUpsForPlayer` all call it instead of duplicating the loop inline — a Pokémon's `exp` field always banks the full amount regardless of cap, only `level`/`currentHp`/`speciesId` stop advancing
+- Single-level-increment paths (DM `levelUp`, Rare Candy in `itemController.ts`) don't go through `applyLevelUpLoop` (no exp math involved) — they just guard with `getPlayerEffectiveLevelCap` before incrementing and return a level-cap-specific error message distinct from the old "already at level 100" one
+- `getPlayerEffectiveLevelCap(userId)` is for single-player call sites with no campaign already in hand; batched call sites (`distributeExp` across a whole battle's players, the campaign-wide unlock pass) compute `getEffectiveLevelCap(badgeCount, levelCapEnabled)` directly per player to avoid N redundant Campaign lookups
+- Toggling `Campaign.levelCapEnabled` (`PATCH /api/campaigns/level-cap`) immediately calls `unlockPendingLevelUpsForPlayer` for every player in the campaign against their new cap — this is what converts already-banked exp into levels the instant the cap rises, without waiting for the next battle or DM action to touch that Pokémon; the same recalculation will be reused by 5.3's badge-award endpoint
 
 ---
 
@@ -526,20 +542,22 @@ pokemonGame/
 - [x] **4.16** `battles.ts` cleanup — `submit-target` `if (!hitSelf)` block split into three named async helpers (`resolveWeatherMove`, `resolveSelfTargetMove`, `resolveDamagingMove`) with `ActiveEntry` type alias; 5 duplicate 1/16-heal blocks in `applyEndOfRound` consolidated into `applyFractionHeal` helper (Rain Dish, Ice Body, Dry Skin rain, Ingrain, Aqua Ring); `cap` / `ZERO_STATS` exported from `lib/battleCalc.ts` replacing two inline re-declarations
 - [x] **4.17** Controllers/routes split — all route handlers and every battle helper extracted from `routes/battles.ts` into `controllers/battleController.ts`; `routes/battles.ts` reduced from ~3,800 lines to a 68-line annotated route manifest (`router.verb(path, middleware?, handler)` per line); exported handlers: `createBattle`, `startBattle`, `sendOut`, `dmSendOut`, `submitMove`, `dmSubmitMove`, `submitTarget`, `advanceRound`, `setWeather`, `deleteBattle`, `getBattleState`, `getDmBattles`, `getActiveBattle`, `dmAutoSubmit`; private helpers stay in the same file (not exported); `checkAndAdvance` and `applyEntryAbilities` exported because DM routes call them directly
 - [x] **5.1** EV award engine — `applyEvGain(current, gain)` in new `lib/evData.ts` clamps a stat spread to the 252-per-stat / 510-total EV caps; `distributeExp` in `battleController.ts` sums `evYield` across all fainted enemies once per battle-end call and applies it to every party Pokémon that gained EXP (active and benched alike get the FULL yield — EVs are not halved for benched Pokémon like EXP is); logs a single combined turn-log line per Pokémon (`"<Name> gained EVs in <Stat, Stat>!"`) immediately after that Pokémon's EXP line, omitted entirely when no stat actually increased (already capped); verified end-to-end against a real battle on the live Atlas DB
-- [ ] **5.2** EV tools — DM EV panel, EV-reducing berries from bag
-- [ ] **5.3** Trainer IV activation — +20 stat bonus passed to @smogon/calc
-- [ ] **5.4** PvP battles — player vs player format
-- [ ] **5.5** TM/HM system — DM teaches TMs/HMs to a player's Pokémon; both work identically (unlimited uses, Gen 8+ style); TM/HM items live in the bag as a new `tm_hm` pocket; teaching a move replaces one of the Pokémon's current 4 moves (player chooses which); only moves the species is compatible with can be taught; compatibility derived from PokeAPI move-learn-method `machine`
-- [ ] **5.6** Admin panel — user management, cache refresh, data reset
-- [ ] **5.7** Mobile polish — iOS Safari + Android Chrome tested, all touch targets ≥ 44px
-- [ ] **5.8** Battle replay — turn log replayable from beginning
+- [x] **5.2** Level Cap System — `Campaign.levelCapEnabled` (default **true** for new campaigns), DM-only `PATCH /api/campaigns/level-cap` toggle; `lib/levelCap.ts` is the single home for cap math and the shared capped level-up loop: `getEffectiveLevelCap(badgeCount, levelCapEnabled)` = 6 + 3×badges (or 100/uncapped when disabled), `getPlayerEffectiveLevelCap(userId)` for single-player call sites with no campaign in hand (returns 100 if the player has no current campaign), `applyLevelUpLoop(...)` is the old inline level-up/evolution while-loop extracted and bounded by a `cap` param instead of the hard 100 ceiling (pure — callers persist the result), `unlockPendingLevelUpsForPlayer(ownerId, cap)` replays a player's whole roster against a new cap and persists any newly-unlocked levels/evolutions; wired into every level-raising path for player Pokémon only — battle EXP (`distributeExp`), DM award-exp, DM level-up, Rare Candy (`itemController.ts`) — each now reports a `"<Name> has reached the level cap and cannot grow further!"` log line when banked EXP is blocked, and DM level-up/Rare Candy return a distinct "already at its level cap (Lv. X)" error instead of the old level-100 message; toggling the cap off (or re-enabling at a lower value) runs `unlockPendingLevelUpsForPlayer` across every campaign player and returns `unlockedCount`, converting banked EXP into levels immediately — existing levels are never retroactively lowered when the cap tightens (confirmed live: level 38 stayed at 38 after re-enabling a cap of 6); NPCs/wild are never bound by any of this since the helpers only ever touch `ownerType: 'player'` Pokémon; DM panel has an on/off toggle button on the Campaign card, Pokémon detail page shows an "At level cap" badge under the EXP bar when `level >= levelCap`; verified end-to-end via live HTTP requests against the real Atlas DB with disposable test accounts (registered, exercised, then deleted)
+- [ ] **5.3** Badge System — DM assigns/revokes gym badges to players after they beat a gym; `User.badges` becomes structured (`badgeId`, `name`, `imageUrl`, `awardedAt`) replacing today's unused `string[]`; hardcoded catalog spans all main-series gym-badge regions with real per-badge images individually sourced/verified from Bulbapedia (never guessed), plus DM-added campaign-scoped custom badges; awarding a badge immediately triggers the 5.2 level-cap recalculation for that player; each badge is worth 5 IVs, recorded now but spent once the IV system (5.5) exists
+- [ ] **5.4** EV tools — DM EV panel, EV-reducing berries from bag
+- [ ] **5.5** Trainer IV activation — +20 stat bonus passed to @smogon/calc
+- [ ] **5.6** PvP battles — player vs player format
+- [ ] **5.7** TM/HM system — DM teaches TMs/HMs to a player's Pokémon; both work identically (unlimited uses, Gen 8+ style); TM/HM items live in the bag as a new `tm_hm` pocket; teaching a move replaces one of the Pokémon's current 4 moves (player chooses which); only moves the species is compatible with can be taught; compatibility derived from PokeAPI move-learn-method `machine`
+- [ ] **5.8** Admin panel — user management, cache refresh, data reset
+- [ ] **5.9** Mobile polish — iOS Safari + Android Chrome tested, all touch targets ≥ 44px
+- [ ] **5.10** Battle replay — turn log replayable from beginning
 
 ---
 
 ## Current Milestone
 
-- **Starting:** 5.2 — EV tools (DM EV panel, EV-reducing berries from bag)
-- **Just finished:** 5.1 — EV award engine (`lib/evData.ts` + `distributeExp` wiring + turn log messages, verified end-to-end). Committed and tagged v5.1.
+- **Starting:** 5.3 — Badge System (structured `User.badges`, DM assign/revoke, Bulbapedia-sourced catalog, triggers 5.2's level-cap recalculation)
+- **Just finished:** 5.2 — Level Cap System (`lib/levelCap.ts`, DM toggle, capped level-up loop wired into every EXP path, cap-rise unlock, DM/player UI, verified end-to-end against the live Atlas DB). Committed and tagged v5.2.
 - **Known issues / blockers:** none
 
 ---

@@ -12,6 +12,7 @@ import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smo
 import { canEvolve } from '../lib/evolution';
 import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier } from '../lib/itemData';
 import { applyEvGain } from '../lib/evData';
+import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
 import {
   NO_TARGET_MOVE_IDS,
   getMoveTargetCategory,
@@ -838,6 +839,13 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
   const caches     = speciesIds.length > 0 ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name expGroup baseStats evYield').lean() : [];
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
 
+  const campaign  = await Campaign.findById(battle.campaignId, 'levelCapEnabled').lean();
+  const owners    = await User.find({ _id: { $in: playerUserIds } }, 'badges').lean();
+  const capMap    = new Map(owners.map(u => [
+    u._id.toString(),
+    getEffectiveLevelCap(u.badges?.length ?? 0, campaign?.levelCapEnabled ?? true),
+  ]));
+
   const totalEvYield = faintedEnemies.reduce((acc, p) => {
     const yieldStats = cacheMap.get(p.speciesId)?.evYield as BaseStats | undefined;
     if (yieldStats) (Object.keys(acc) as (keyof BaseStats)[]).forEach(k => { acc[k] += yieldStats[k]; });
@@ -857,29 +865,25 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
       const { evs: newEvs, gainedStats } = applyEvGain(poke.evs as BaseStats, totalEvYield);
       if (gainedStats.length > 0) events.push(`${displayName} gained EVs in ${gainedStats.join(', ')}!`);
       const newExp = (poke.exp as number) + expGain;
-      let newLevel = poke.level as number; let newHp = poke.currentHp as number; let newSpeciesId = poke.speciesId as number;
       const expGroup  = (cache?.expGroup as string | undefined) ?? 'medium-fast';
       const baseStats = cache?.baseStats as BaseStats | undefined;
       const overrides = (poke.evolutionOverrides ?? []) as { condition: string; value: string }[];
+      const cap       = capMap.get(playerEntry.userId.toString()) ?? 100;
 
-      while (newLevel < 100 && newExp >= expForLevel(newLevel + 1, expGroup)) {
-        if (baseStats && newHp > 0) {
-          const oldMaxHp = computeStats(baseStats, newLevel, poke.nature as string).hp;
-          newLevel += 1;
-          newHp += computeStats(baseStats, newLevel, poke.nature as string).hp - oldMaxHp;
-        } else { newLevel += 1; }
-        events.push(`${displayName} grew to level ${newLevel}!`);
-        const evolveIntoId = await canEvolve({ speciesId: newSpeciesId, level: newLevel, evolutionOverrides: overrides });
-        if (evolveIntoId !== null) {
-          let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
-          if (!evolvedCache) {
-            try { const fetched = await fetchSpecies(evolveIntoId); evolvedCache = (await PokedexCache.create(fetched)).toObject(); } catch { /* skip */ }
-          }
-          if (evolvedCache?.baseStats) newHp = computeStats(evolvedCache.baseStats as BaseStats, newLevel, poke.nature).hp;
-          events.push(`${displayName} evolved into ${evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form'}!`);
-          newSpeciesId = evolveIntoId;
-        }
-      }
+      const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, events: levelEvents, cappedOut } = await applyLevelUpLoop({
+        displayName,
+        level: poke.level as number,
+        exp: newExp,
+        currentHp: poke.currentHp as number,
+        speciesId: poke.speciesId as number,
+        nature: poke.nature as string,
+        evolutionOverrides: overrides,
+        expGroup,
+        baseStats,
+        cap,
+      });
+      events.push(...levelEvents);
+      if (cappedOut) events.push(`${displayName} has reached the level cap and cannot grow further!`);
       await Pokemon.updateOne({ _id: poke._id }, { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId, evs: newEvs } });
     }
   }

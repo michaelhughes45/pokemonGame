@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
+import { getEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -71,12 +72,13 @@ export async function getMine(req: Request, res: Response): Promise<void> {
   }));
 
   sendOk(res, {
-    _id:            campaign._id,
-    name:           campaign.name,
-    dmId:           campaign.dmId,
+    _id:             campaign._id,
+    name:            campaign.name,
+    dmId:            campaign.dmId,
     players,
     pendingInvites,
-    isActive:       campaign.isActive,
+    isActive:        campaign.isActive,
+    levelCapEnabled: campaign.levelCapEnabled,
   });
 }
 
@@ -273,4 +275,38 @@ export async function removePlayer(req: Request, res: Response): Promise<void> {
 
   await removePlayerFromCampaign(campaign, targetId);
   sendOk(res, { removed: username });
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/campaigns/level-cap
+// DM toggles the campaign-wide level cap system on/off.
+// Body: { enabled: boolean }
+// ---------------------------------------------------------------------------
+export async function setLevelCapEnabled(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { enabled } = req.body as { enabled?: boolean };
+
+  if (typeof enabled !== 'boolean') {
+    return sendError(res, 400, 'enabled must be a boolean');
+  }
+
+  const campaign = await findActiveCampaignByDm(userId);
+  if (!campaign) {
+    return sendError(res, 400, 'You do not have an active campaign');
+  }
+
+  campaign.levelCapEnabled = enabled;
+  await campaign.save();
+
+  // The cap may have just risen (disabled entirely, or re-enabled at a lower value
+  // than a player's banked exp already supports) — replay each player's banked exp
+  // against their new cap so any pending level-ups/evolutions unlock immediately.
+  const owners = await User.find({ _id: { $in: campaign.playerIds } }, 'badges').lean();
+  let unlockedCount = 0;
+  for (const owner of owners) {
+    const cap = getEffectiveLevelCap(owner.badges?.length ?? 0, campaign.levelCapEnabled);
+    unlockedCount += await unlockPendingLevelUpsForPlayer(owner._id, cap);
+  }
+
+  sendOk(res, { levelCapEnabled: campaign.levelCapEnabled, unlockedCount });
 }

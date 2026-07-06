@@ -4,6 +4,7 @@ import { Pokemon } from '../models/Pokemon';
 import { Npc } from '../models/Npc';
 import { PokedexCache } from '../models/PokedexCache';
 import { computeStats, expForLevel } from '../lib/statCalc';
+import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -363,6 +364,7 @@ export async function getPokemon(req: Request, res: Response): Promise<void> {
     .sort((a, b) => a.level - b.level || a.moveId.localeCompare(b.moveId));
 
   const expGroup = (species.expGroup as string) || 'medium-fast';
+  const levelCap = pokemon.ownerType === 'player' ? await getPlayerEffectiveLevelCap(pokemon.ownerId) : null;
 
   sendOk(res, {
     _id:                pokemon._id,
@@ -370,6 +372,7 @@ export async function getPokemon(req: Request, res: Response): Promise<void> {
     speciesId:          pokemon.speciesId,
     nickname:           pokemon.nickname,
     level:              pokemon.level,
+    levelCap,
     exp:                pokemon.exp,
     expForCurrentLevel: expForLevel(pokemon.level, expGroup),
     expForNextLevel:    pokemon.level >= 100 ? null : expForLevel(pokemon.level + 1, expGroup),
