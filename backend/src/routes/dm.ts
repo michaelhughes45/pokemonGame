@@ -23,6 +23,12 @@ import {
   awardExp,
   levelUp,
   getPlayerRoster,
+  getBadgeCatalog,
+  awardBadge,
+  revokeBadge,
+  getCustomBadges,
+  createCustomBadge,
+  deleteCustomBadge,
 } from '../controllers/dmController';
 
 const router = Router();
@@ -33,6 +39,14 @@ const router = Router();
 router.delete('/players/:username/starter',   deletePlayerStarter);
 router.post('/players/:username/pokemon',     givePlayerPokemon);
 router.get('/players/:username/roster',       getPlayerRoster);
+router.post('/players/:username/badges',      awardBadge);
+router.delete('/players/:username/badges/:badgeId', revokeBadge);
+
+// --- Badge catalog ---
+router.get('/badges',                         getBadgeCatalog);
+router.get('/badges/custom',                  getCustomBadges);
+router.post('/badges/custom',                 createCustomBadge);
+router.delete('/badges/custom/:badgeId',      deleteCustomBadge);
 
 // --- Player items ---
 router.post('/items/give',                    givePlayerItem);

@@ -259,9 +259,24 @@ export default function DashboardPage() {
               <span className="text-muted-foreground">Trainer specialty</span>
               <span>{user.trainerStatChoice ?? 'Not chosen yet'}</span>
             </div>
-            <div className="flex justify-between text-sm">
-              <span className="text-muted-foreground">Badges</span>
-              <span>{user.badges.length === 0 ? 'None yet' : user.badges.join(', ')}</span>
+            <div className="flex flex-col gap-1.5 text-sm">
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Badges</span>
+                <span>{user.badges.length}</span>
+              </div>
+              {user.badges.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {user.badges.map(b => (
+                    <img
+                      key={b.badgeId}
+                      src={b.imageUrl}
+                      alt={b.name}
+                      title={b.name}
+                      className="w-9 h-9 object-contain"
+                    />
+                  ))}
+                </div>
+              )}
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-muted-foreground">Money</span>

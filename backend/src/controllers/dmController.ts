@@ -13,7 +13,8 @@ import { fetchSpecies } from '../lib/pokeapi';
 import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
 import { slugToDisplayName } from '../lib/battleCalc';
-import { applyLevelUpLoop, getPlayerEffectiveLevelCap } from '../lib/levelCap';
+import { applyLevelUpLoop, getPlayerEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
+import { BADGE_CATALOG } from '../lib/badgeData';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -340,6 +341,150 @@ export async function givePlayerItem(req: Request, res: Response): Promise<void>
   );
 
   sendOk(res, { itemId: item.itemId, quantity: item.quantity, pocket: item.pocket, username }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/badges
+// Returns the full hardcoded badge catalog (all regions) so the DM can pick
+// which badge to award. Static reference data — no campaign scoping needed.
+// ---------------------------------------------------------------------------
+export async function getBadgeCatalog(_req: Request, res: Response): Promise<void> {
+  sendOk(res, BADGE_CATALOG);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/players/:username/badges
+// Awards a badge to a player in the DM's campaign — badgeId may come from
+// the hardcoded catalog or from the campaign's own customBadges.
+// Body: { badgeId }
+// ---------------------------------------------------------------------------
+export async function awardBadge(req: Request, res: Response): Promise<void> {
+  const username = String(req.params.username);
+  const { badgeId } = req.body as { badgeId?: string };
+
+  if (!badgeId?.trim()) {
+    return sendError(res, 400, 'badgeId is required');
+  }
+
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const customBadges = (campaign.customBadges ?? []) as { badgeId: string; name: string; imageUrl: string }[];
+  const entry = BADGE_CATALOG.find(b => b.badgeId === badgeId.trim())
+    ?? customBadges.find(b => b.badgeId === badgeId.trim());
+  if (!entry) {
+    return sendError(res, 400, `"${badgeId}" is not a recognised badge`);
+  }
+
+  const user = await assertCampaignPlayer(req.user!.userId, username, res);
+  if (!user) return;
+
+  const existingBadges = (user.badges ?? []) as { badgeId: string }[];
+  if (existingBadges.some(b => b.badgeId === entry.badgeId)) {
+    return sendOk(res, { message: `${username} already has the ${entry.name}` });
+  }
+
+  await User.updateOne(
+    { _id: user._id },
+    { $push: { badges: {
+      badgeId:   entry.badgeId,
+      name:      entry.name,
+      imageUrl:  entry.imageUrl,
+      awardedAt: new Date(),
+    } } },
+  );
+
+  // A new badge can only raise this player's effective level cap (never lower
+  // it), so replay their roster's banked exp against the new cap — any
+  // Pokémon that already had enough exp banked levels/evolves immediately
+  // instead of waiting for the next battle or DM action to touch it.
+  const newCap = await getPlayerEffectiveLevelCap(user._id);
+  const unlockedCount = await unlockPendingLevelUpsForPlayer(user._id, newCap);
+
+  sendOk(res, { message: `Awarded ${entry.name} to ${username}`, unlockedCount }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/dm/players/:username/badges/:badgeId
+// Revokes a previously-awarded badge from a player in the DM's campaign.
+// ---------------------------------------------------------------------------
+export async function revokeBadge(req: Request, res: Response): Promise<void> {
+  const username = String(req.params.username);
+  const badgeId  = String(req.params.badgeId);
+
+  const user = await assertCampaignPlayer(req.user!.userId, username, res);
+  if (!user) return;
+
+  const result = await User.updateOne({ _id: user._id }, { $pull: { badges: { badgeId } } });
+  if (result.modifiedCount === 0) {
+    return sendOk(res, { message: `${username} does not have that badge` });
+  }
+
+  sendOk(res, { message: `Revoked ${badgeId} from ${username}` });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/badges/custom
+// Returns the DM's campaign-scoped custom badges (homebrew gyms).
+// ---------------------------------------------------------------------------
+export async function getCustomBadges(req: Request, res: Response): Promise<void> {
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  sendOk(res, campaign.customBadges ?? []);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/badges/custom
+// Defines a new homebrew badge scoped to the DM's active campaign.
+// Body: { name, imageUrl }
+// ---------------------------------------------------------------------------
+export async function createCustomBadge(req: Request, res: Response): Promise<void> {
+  const { name, imageUrl } = req.body as { name?: string; imageUrl?: string };
+
+  if (!name?.trim()) {
+    return sendError(res, 400, 'name is required');
+  }
+  if (!imageUrl?.trim()) {
+    return sendError(res, 400, 'imageUrl is required');
+  }
+
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const entry = {
+    badgeId:   `custom-${new mongoose.Types.ObjectId().toString()}`,
+    name:      name.trim(),
+    imageUrl:  imageUrl.trim(),
+    createdAt: new Date(),
+  };
+
+  await Campaign.updateOne({ _id: campaign._id }, { $push: { customBadges: entry } });
+
+  sendOk(res, entry, 201);
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/dm/badges/custom/:badgeId
+// Removes a homebrew badge definition from the DM's campaign. Does not
+// retroactively remove it from players who were already awarded it — a
+// player's badges are a denormalized copy, same as catalog badges.
+// ---------------------------------------------------------------------------
+export async function deleteCustomBadge(req: Request, res: Response): Promise<void> {
+  const badgeId = String(req.params.badgeId);
+
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const result = await Campaign.updateOne(
+    { _id: campaign._id },
+    { $pull: { customBadges: { badgeId } } },
+  );
+  if (result.modifiedCount === 0) {
+    return sendOk(res, { message: 'No custom badge with that ID was found' });
+  }
+
+  sendOk(res, { message: `Removed custom badge ${badgeId}` });
 }
 
 // ---------------------------------------------------------------------------
@@ -1137,7 +1282,7 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
     .lean();
 
   if (pokemons.length === 0) {
-    return sendOk(res, { party: [], pc: [] });
+    return sendOk(res, { party: [], pc: [], badges: user.badges ?? [] });
   }
 
   const uniqueSpeciesIds = [...new Set(pokemons.map(p => p.speciesId as number))];
@@ -1177,5 +1322,5 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
     .sort((a, b) => ((a.partySlot as number) ?? 99) - ((b.partySlot as number) ?? 99));
   const pc = enriched.filter(p => !p.isInParty);
 
-  sendOk(res, { party, pc });
+  sendOk(res, { party, pc, badges: user.badges ?? [] });
 }

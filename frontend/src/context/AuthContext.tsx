@@ -1,5 +1,12 @@
 import { createContext } from 'react';
 
+export type BadgeEntry = {
+  badgeId: string;
+  name: string;
+  imageUrl: string;
+  awardedAt: string;
+};
+
 export type User = {
   id: string;
   username: string;
@@ -7,7 +14,7 @@ export type User = {
   role: 'player' | 'dm' | 'admin';
   trainerStats: Record<string, number>;
   trainerStatChoice: string | null;
-  badges: string[];
+  badges: BadgeEntry[];
   money: number;
 };
 

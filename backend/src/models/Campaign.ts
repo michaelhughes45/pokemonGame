@@ -1,5 +1,12 @@
 import mongoose, { Schema } from 'mongoose';
 
+type CustomBadge = {
+  badgeId: string;
+  name: string;
+  imageUrl: string;
+  createdAt: Date;
+};
+
 type ICampaign = {
   name: string;
   dmId: mongoose.Types.ObjectId;
@@ -7,6 +14,7 @@ type ICampaign = {
   pendingInvites: Array<{ userId: mongoose.Types.ObjectId; sentAt: Date }>;
   isActive: boolean;
   levelCapEnabled: boolean;
+  customBadges: CustomBadge[];
 };
 
 const CampaignSchema = new Schema<ICampaign>(
@@ -22,6 +30,18 @@ const CampaignSchema = new Schema<ICampaign>(
     ],
     isActive:        { type: Boolean, default: true },
     levelCapEnabled: { type: Boolean, default: true },
+    // DM-defined badges for homebrew gyms, beyond the hardcoded catalog in
+    // lib/badgeData.ts. badgeId is generated on creation (not user-chosen) so
+    // it can never collide with a catalog badgeId or another custom one.
+    customBadges: [
+      {
+        badgeId:   { type: String, required: true },
+        name:      { type: String, required: true },
+        imageUrl:  { type: String, required: true },
+        createdAt: { type: Date, default: Date.now },
+        _id:       false,
+      },
+    ],
   },
   { timestamps: true }
 );

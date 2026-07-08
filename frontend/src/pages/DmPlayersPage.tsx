@@ -33,7 +33,25 @@ type RosterPokemon = {
   partySlot: number | null;
 };
 
-type Roster = { party: RosterPokemon[]; pc: RosterPokemon[] };
+type PlayerBadge = { badgeId: string; name: string; imageUrl: string; awardedAt: string };
+
+type BadgeCatalogEntry = {
+  badgeId: string;
+  name: string;
+  region: string;
+  imageUrl: string;
+  gymLeader?: string;
+  versionExclusive?: string;
+};
+
+type CustomBadgeEntry = { badgeId: string; name: string; imageUrl: string; createdAt: string };
+
+type Roster = { party: RosterPokemon[]; pc: RosterPokemon[]; badges: PlayerBadge[] };
+
+// Matches the native <select> style used throughout DmPage
+const selectClass =
+  'w-full border border-input bg-background rounded-md px-3 py-2 text-sm min-h-11 ' +
+  'focus:outline-none focus:ring-2 focus:ring-ring';
 
 function apiError(err: unknown, fallback: string) {
   return axios.isAxiosError(err)
@@ -232,6 +250,257 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
 }
 
 // ---------------------------------------------------------------------------
+// BadgeTile
+// One awarded badge — image + name, with an optional revoke button.
+// ---------------------------------------------------------------------------
+
+function BadgeTile({ badge, onRevoke }: { badge: PlayerBadge; onRevoke?: () => void }) {
+  return (
+    <div className="flex flex-col items-center gap-1 w-20 text-center">
+      <div className="relative">
+        <img src={badge.imageUrl} alt={badge.name} className="w-12 h-12 object-contain" />
+        {onRevoke && (
+          <button
+            type="button"
+            onClick={onRevoke}
+            title={`Revoke ${badge.name}`}
+            className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs leading-none flex items-center justify-center"
+          >
+            ×
+          </button>
+        )}
+      </div>
+      <span className="text-xs leading-tight">{badge.name}</span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// BadgesCard
+// Shows a selected player's held badges and lets the DM award one from the
+// catalog + campaign custom badges, or revoke a held one.
+// ---------------------------------------------------------------------------
+
+type BadgesCardProps = {
+  username:      string;
+  badges:        PlayerBadge[];
+  catalog:       BadgeCatalogEntry[];
+  customBadges:  CustomBadgeEntry[];
+  headers:       { Authorization: string };
+  onRefresh:     () => void;
+};
+
+function BadgesCard({ username, badges, catalog, customBadges, headers, onRefresh }: BadgesCardProps) {
+  const [selectedBadgeId, setSelectedBadgeId] = useState('');
+  const [busy,            setBusy]            = useState(false);
+  const [message,         setMessage]         = useState('');
+  const [isError,         setIsError]         = useState(false);
+
+  function showMsg(text: string, error = false) {
+    setMessage(text);
+    setIsError(error);
+    setTimeout(() => setMessage(''), 4000);
+  }
+
+  const heldIds = new Set(badges.map(b => b.badgeId));
+  const regions = [...new Set(catalog.map(b => b.region))];
+  const availableCustom = customBadges.filter(b => !heldIds.has(b.badgeId));
+
+  async function handleAward() {
+    if (!selectedBadgeId) return;
+    setBusy(true);
+    try {
+      const res = await axios.post(
+        `${API}/api/dm/players/${username}/badges`,
+        { badgeId: selectedBadgeId },
+        { headers },
+      );
+      const unlockedCount = res.data.data?.unlockedCount ?? 0;
+      const suffix = unlockedCount > 0 ? ` (${unlockedCount} Pokémon leveled up!)` : '';
+      showMsg((res.data.data?.message ?? 'Badge awarded') + suffix);
+      setSelectedBadgeId('');
+      onRefresh();
+    } catch (err) {
+      showMsg(apiError(err, 'Failed to award badge'), true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRevoke(badgeId: string) {
+    setBusy(true);
+    try {
+      const res = await axios.delete(`${API}/api/dm/players/${username}/badges/${badgeId}`, { headers });
+      showMsg(res.data.data?.message ?? 'Badge revoked');
+      onRefresh();
+    } catch (err) {
+      showMsg(apiError(err, 'Failed to revoke badge'), true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">
+          Badges
+          <Badge variant="secondary" className="ml-2 text-xs">{badges.length}</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {badges.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No badges yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-3">
+            {badges.map(b => (
+              <BadgeTile key={b.badgeId} badge={b} onRevoke={() => handleRevoke(b.badgeId)} />
+            ))}
+          </div>
+        )}
+
+        <div className="flex gap-2">
+          <select
+            value={selectedBadgeId}
+            onChange={e => setSelectedBadgeId(e.target.value)}
+            className={selectClass}
+            disabled={busy}
+          >
+            <option value="">— Select a badge to award —</option>
+            {regions.map(region => (
+              <optgroup key={region} label={region}>
+                {catalog
+                  .filter(b => b.region === region && !heldIds.has(b.badgeId))
+                  .map(b => (
+                    <option key={b.badgeId} value={b.badgeId}>
+                      {b.name}{b.versionExclusive ? ` (${b.versionExclusive})` : ''}
+                    </option>
+                  ))}
+              </optgroup>
+            ))}
+            {availableCustom.length > 0 && (
+              <optgroup label="Custom">
+                {availableCustom.map(b => (
+                  <option key={b.badgeId} value={b.badgeId}>{b.name}</option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+          <Button size="sm" onClick={handleAward} disabled={busy || !selectedBadgeId} className="shrink-0">
+            Award
+          </Button>
+        </div>
+        {message && (
+          <p className={`text-xs ${isError ? 'text-red-500' : 'text-green-600'}`}>{message}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CustomBadgesCard
+// Campaign-wide (not player-scoped): lets the DM define homebrew badges
+// beyond the hardcoded catalog, and remove ones no longer needed.
+// ---------------------------------------------------------------------------
+
+type CustomBadgesCardProps = {
+  customBadges: CustomBadgeEntry[];
+  headers:      { Authorization: string };
+  onRefresh:    () => void;
+};
+
+function CustomBadgesCard({ customBadges, headers, onRefresh }: CustomBadgesCardProps) {
+  const [name,     setName]     = useState('');
+  const [imageUrl, setImageUrl] = useState('');
+  const [busy,     setBusy]     = useState(false);
+  const [message,  setMessage]  = useState('');
+  const [isError,  setIsError]  = useState(false);
+
+  function showMsg(text: string, error = false) {
+    setMessage(text);
+    setIsError(error);
+    setTimeout(() => setMessage(''), 4000);
+  }
+
+  async function handleCreate() {
+    if (!name.trim() || !imageUrl.trim()) {
+      showMsg('Name and image URL are both required.', true);
+      return;
+    }
+    setBusy(true);
+    try {
+      await axios.post(`${API}/api/dm/badges/custom`, { name: name.trim(), imageUrl: imageUrl.trim() }, { headers });
+      setName('');
+      setImageUrl('');
+      onRefresh();
+    } catch (err) {
+      showMsg(apiError(err, 'Failed to create custom badge'), true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(badgeId: string) {
+    setBusy(true);
+    try {
+      await axios.delete(`${API}/api/dm/badges/custom/${badgeId}`, { headers });
+      onRefresh();
+    } catch (err) {
+      showMsg(apiError(err, 'Failed to delete custom badge'), true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Custom Badges (homebrew)</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {customBadges.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No custom badges defined yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-3">
+            {customBadges.map(b => (
+              <BadgeTile
+                key={b.badgeId}
+                badge={{ ...b, awardedAt: b.createdAt }}
+                onRevoke={() => handleDelete(b.badgeId)}
+              />
+            ))}
+          </div>
+        )}
+
+        <div className="flex flex-col sm:flex-row gap-2">
+          <input
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="Badge name"
+            className="flex-1 h-11 rounded-md border border-input bg-background px-3 py-1 text-sm min-w-0"
+            disabled={busy}
+          />
+          <input
+            value={imageUrl}
+            onChange={e => setImageUrl(e.target.value)}
+            placeholder="Image URL"
+            className="flex-1 h-11 rounded-md border border-input bg-background px-3 py-1 text-sm min-w-0"
+            disabled={busy}
+          />
+          <Button size="sm" onClick={handleCreate} disabled={busy} className="shrink-0">
+            Add
+          </Button>
+        </div>
+        {message && (
+          <p className={`text-xs ${isError ? 'text-red-500' : 'text-green-600'}`}>{message}</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // DmPlayersPage
 // ---------------------------------------------------------------------------
 
@@ -248,16 +517,32 @@ export default function DmPlayersPage() {
   const [playersError,     setPlayersError]     = useState('');
   const [rosterError,      setRosterError]      = useState('');
 
-  const refreshRoster = () => setRosterKey(k => k + 1);
+  const [catalog,          setCatalog]          = useState<BadgeCatalogEntry[]>([]);
+  const [customBadges,     setCustomBadges]     = useState<CustomBadgeEntry[]>([]);
+  const [customBadgesKey,  setCustomBadgesKey]  = useState(0);
 
-  // Load campaign player list on mount
+  const refreshRoster = () => setRosterKey(k => k + 1);
+  const refreshCustomBadges = () => setCustomBadgesKey(k => k + 1);
+
+  // Load campaign player list + badge catalog on mount
   useEffect(() => {
     axios.get(`${API}/api/campaigns/mine`, { headers })
       .then(res => setPlayers(res.data.data?.players ?? []))
       .catch(err => setPlayersError(apiError(err, 'Failed to load campaign players')))
       .finally(() => setPlayersLoading(false));
+    axios.get(`${API}/api/dm/badges`, { headers })
+      .then(res => setCatalog(res.data.data ?? []))
+      .catch(() => { /* catalog is optional for the rest of the page to function */ });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Load custom badges on mount and whenever one is created/deleted
+  useEffect(() => {
+    axios.get(`${API}/api/dm/badges/custom`, { headers })
+      .then(res => setCustomBadges(res.data.data ?? []))
+      .catch(() => { /* non-fatal — award picker just won't show custom badges */ });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customBadgesKey]);
 
   // Load roster whenever selectedUsername changes or refreshRoster() is called
   useEffect(() => {
@@ -306,6 +591,9 @@ export default function DmPlayersPage() {
         </CardContent>
       </Card>
 
+      {/* Custom badges — campaign-wide, not tied to the selected player */}
+      <CustomBadgesCard customBadges={customBadges} headers={headers} onRefresh={refreshCustomBadges} />
+
       {/* Roster */}
       {selectedUsername && (
         <div className="space-y-4">
@@ -317,6 +605,14 @@ export default function DmPlayersPage() {
           )}
           {roster && !rosterLoading && (
             <>
+              <BadgesCard
+                username={selectedUsername}
+                badges={roster.badges}
+                catalog={catalog}
+                customBadges={customBadges}
+                headers={headers}
+                onRefresh={refreshRoster}
+              />
               {roster.party.length === 0 && roster.pc.length === 0 ? (
                 <p className="text-center text-muted-foreground">
                   {selectedUsername} has no Pokémon yet.
