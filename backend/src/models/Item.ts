@@ -7,7 +7,8 @@ export type ItemPocket =
   | 'stat_booster'
   | 'held_type'
   | 'pokeballs'
-  | 'escape';
+  | 'escape'
+  | 'berry';
 
 type IItem = {
   ownerId:   mongoose.Types.ObjectId;
@@ -25,7 +26,7 @@ const ItemSchema = new Schema<IItem>(
     quantity:  { type: Number, required: true, min: 1 },
     pocket:    {
       type: String,
-      enum: ['healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape'],
+      enum: ['healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry'],
       required: true,
     },
   },

@@ -22,6 +22,7 @@ import {
   launchEncounter,
   awardExp,
   levelUp,
+  setPokemonEvs,
   getPlayerRoster,
   getBadgeCatalog,
   awardBadge,
@@ -66,6 +67,7 @@ router.delete('/pokemon/:pokemonId/evolution-override', unblockEvolution);
 router.patch('/pokemon/:pokemonId/hidden-ability',      toggleHiddenAbility);
 router.post('/pokemon/:pokemonId/award-exp',            awardExp);
 router.post('/pokemon/:pokemonId/level-up',             levelUp);
+router.patch('/pokemon/:pokemonId/evs',                 setPokemonEvs);
 
 // --- Encounters ---
 router.get('/encounters',          getEncounters);

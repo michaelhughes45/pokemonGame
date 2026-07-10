@@ -31,6 +31,15 @@ type RosterPokemon = {
   heldItem: string | null;
   isInParty: boolean;
   partySlot: number | null;
+  evs: { hp: number; atk: number; def: number; spatk: number; spdef: number; speed: number };
+};
+
+type EvStatKey = 'hp' | 'atk' | 'def' | 'spatk' | 'spdef' | 'speed';
+const EV_STAT_CAP = 252;
+const EV_TOTAL_CAP = 510;
+const EV_STAT_KEYS: EvStatKey[] = ['hp', 'atk', 'def', 'spatk', 'spdef', 'speed'];
+const EV_STAT_LABELS: Record<EvStatKey, string> = {
+  hp: 'HP', atk: 'Atk', def: 'Def', spatk: 'SpA', spdef: 'SpD', speed: 'Spe',
 };
 
 type PlayerBadge = { badgeId: string; name: string; imageUrl: string; awardedAt: string };
@@ -105,6 +114,26 @@ function HpBar({ current, max }: { current: number; max: number }) {
 }
 
 // ---------------------------------------------------------------------------
+// EvSummary
+// Compact single-line EV readout: total/cap plus a chip per non-zero stat.
+// ---------------------------------------------------------------------------
+
+function EvSummary({ evs }: { evs: RosterPokemon['evs'] }) {
+  const total = evs.hp + evs.atk + evs.def + evs.spatk + evs.spdef + evs.speed;
+  const nonZero = (Object.keys(evs) as (keyof typeof evs)[]).filter(k => evs[k] > 0);
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap text-xs text-muted-foreground">
+      <span>EVs: {total}/{EV_TOTAL_CAP}</span>
+      {nonZero.map(k => (
+        <span key={k} className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">
+          {EV_STAT_LABELS[k]} {evs[k]}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // PokemonCard
 // Renders one Pokémon in the roster. Action controls are added in 4.14.4.
 // ---------------------------------------------------------------------------
@@ -146,6 +175,7 @@ export function PokemonCard({ poke, actions }: PokemonCardProps) {
         </div>
         <HpBar current={poke.currentHp} max={poke.maxHp} />
         <ExpBar poke={poke} />
+        <EvSummary evs={poke.evs} />
         {actions && <div className="pt-1">{actions}</div>}
       </div>
     </div>
@@ -170,10 +200,56 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
   const [message,  setMessage]  = useState('');
   const [isError,  setIsError]  = useState(false);
 
+  const [evOpen,   setEvOpen]   = useState(false);
+  const [evInputs, setEvInputs] = useState<Record<EvStatKey, string>>(() =>
+    Object.fromEntries(EV_STAT_KEYS.map(k => [k, String(poke.evs[k])])) as Record<EvStatKey, string>,
+  );
+  const [evBusy,   setEvBusy]   = useState(false);
+  const [evError,  setEvError]  = useState('');
+
   function showMsg(text: string, error = false) {
     setMessage(text);
     setIsError(error);
     setTimeout(() => setMessage(''), 4000);
+  }
+
+  function openEvEditor() {
+    setEvInputs(Object.fromEntries(EV_STAT_KEYS.map(k => [k, String(poke.evs[k])])) as Record<EvStatKey, string>);
+    setEvError('');
+    setEvOpen(true);
+  }
+
+  const evTotal = EV_STAT_KEYS.reduce((sum, k) => sum + (parseInt(evInputs[k], 10) || 0), 0);
+
+  async function handleSaveEvs() {
+    const parsed = {} as Record<EvStatKey, number>;
+    for (const k of EV_STAT_KEYS) {
+      const n = parseInt(evInputs[k], 10);
+      if (!Number.isInteger(n) || n < 0 || n > EV_STAT_CAP) {
+        setEvError(`${EV_STAT_LABELS[k]} must be an integer between 0 and ${EV_STAT_CAP}.`);
+        return;
+      }
+      parsed[k] = n;
+    }
+    if (evTotal > EV_TOTAL_CAP) {
+      setEvError(`Total EVs cannot exceed ${EV_TOTAL_CAP} (currently ${evTotal}).`);
+      return;
+    }
+    setEvBusy(true);
+    setEvError('');
+    try {
+      await axios.patch(
+        `${API}/api/dm/pokemon/${poke._id}/evs`,
+        { evs: parsed },
+        { headers },
+      );
+      setEvOpen(false);
+      onRefresh();
+    } catch (err) {
+      setEvError(apiError(err, 'Failed to update EVs'));
+    } finally {
+      setEvBusy(false);
+    }
   }
 
   async function handleAwardExp() {
@@ -244,6 +320,43 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
       </div>
       {message && (
         <p className={`text-xs ${isError ? 'text-red-500' : 'text-green-600'}`}>{message}</p>
+      )}
+
+      {!evOpen ? (
+        <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={openEvEditor}>
+          Edit EVs
+        </Button>
+      ) : (
+        <div className="border rounded-md p-2 space-y-2">
+          <div className="grid grid-cols-3 gap-2">
+            {EV_STAT_KEYS.map(k => (
+              <div key={k} className="flex flex-col gap-0.5">
+                <label className="text-[10px] text-muted-foreground">{EV_STAT_LABELS[k]}</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={EV_STAT_CAP}
+                  value={evInputs[k]}
+                  onChange={e => setEvInputs(prev => ({ ...prev, [k]: e.target.value }))}
+                  disabled={evBusy}
+                  className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                />
+              </div>
+            ))}
+          </div>
+          <p className={`text-xs ${evTotal > EV_TOTAL_CAP ? 'text-red-500' : 'text-muted-foreground'}`}>
+            Total: {evTotal}/{EV_TOTAL_CAP}
+          </p>
+          {evError && <p className="text-xs text-red-500">{evError}</p>}
+          <div className="flex gap-2">
+            <Button size="sm" disabled={evBusy} onClick={handleSaveEvs} className="shrink-0">
+              Save EVs
+            </Button>
+            <Button size="sm" variant="outline" disabled={evBusy} onClick={() => setEvOpen(false)} className="shrink-0">
+              Cancel
+            </Button>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -4,6 +4,7 @@ type PokemonMove = {
   moveId: string;
   currentPP: number;
   maxPP: number;
+  ppUps: number; // 0-3, how many PP Up/PP Max applications this move slot has received
 };
 
 type StatSpread = {
@@ -67,6 +68,7 @@ const PokemonSchema = new Schema<IPokemon>(
         moveId:    { type: String, required: true },
         currentPP: { type: Number, required: true },
         maxPP:     { type: Number, required: true },
+        ppUps:     { type: Number, default: 0 },
         _id:       false,
       },
     ],

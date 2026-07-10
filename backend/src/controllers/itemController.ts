@@ -3,10 +3,11 @@ import mongoose from 'mongoose';
 import { Item } from '../models/Item';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
-import { computeStats } from '../lib/statCalc';
+import { computeStats, BaseStats } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
 import { fetchSpecies } from '../lib/pokeapi';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
+import { EV_STAT_DISPLAY_NAMES, applyEvGain } from '../lib/evData';
 
 // ---------------------------------------------------------------------------
 // Item effect table
@@ -25,7 +26,9 @@ type ItemEffect =
   | { kind: 'pp_flat';       amount: number; target: 'one' | 'all' }
   | { kind: 'pp_full';       target: 'one' | 'all' }
   | { kind: 'level_up' }     // Rare Candy — increment level by 1, cap at 100
-  | { kind: 'stat_boost' }   // EVs deferred to Phase 5 — item not consumed
+  | { kind: 'ev_boost';  stat: keyof BaseStats; amount: number } // Vitamins (HP Up, Protein, etc.)
+  | { kind: 'ev_reduce'; stat: keyof BaseStats; amount: number } // EV-reducing berries
+  | { kind: 'pp_up';     amount: 1 | 3 } // PP Up (+1 use, cap 3) / PP Max (straight to 3)
   | { kind: 'held_item' }    // Equip as held item on a Pokémon
   | { kind: 'escape_rope' }  // Consumed immediately, no Pokémon target needed
   | { kind: 'battle_only' }; // Pokéballs only
@@ -73,15 +76,17 @@ const ITEM_EFFECTS: Record<string, ItemEffect> = {
   // ── Level up ───────────────────────────────────────────────────────────────
   'rare-candy':     { kind: 'level_up' },
 
-  // ── Stat boosters (EVs — deferred to Phase 5) ──────────────────────────────
-  'hp-up':          { kind: 'stat_boost' },
-  'protein':        { kind: 'stat_boost' },
-  'iron':           { kind: 'stat_boost' },
-  'calcium':        { kind: 'stat_boost' },
-  'zinc':           { kind: 'stat_boost' },
-  'carbos':         { kind: 'stat_boost' },
-  'pp-up':          { kind: 'stat_boost' },
-  'pp-max':         { kind: 'stat_boost' },
+  // ── Vitamins (EVs) ──────────────────────────────────────────────────────────
+  'hp-up':          { kind: 'ev_boost', stat: 'hp',    amount: 10 },
+  'protein':        { kind: 'ev_boost', stat: 'atk',   amount: 10 },
+  'iron':           { kind: 'ev_boost', stat: 'def',   amount: 10 },
+  'calcium':        { kind: 'ev_boost', stat: 'spatk', amount: 10 },
+  'zinc':           { kind: 'ev_boost', stat: 'spdef', amount: 10 },
+  'carbos':         { kind: 'ev_boost', stat: 'speed', amount: 10 },
+
+  // ── PP boosters ───────────────────────────────────────────────────────────
+  'pp-up':          { kind: 'pp_up', amount: 1 },
+  'pp-max':         { kind: 'pp_up', amount: 3 },
 
   // ── Held-type items ────────────────────────────────────────────────────────
   'charcoal':       { kind: 'held_item' },
@@ -104,6 +109,14 @@ const ITEM_EFFECTS: Record<string, ItemEffect> = {
 
   // ── Escape ─────────────────────────────────────────────────────────────────
   'escape-rope':    { kind: 'escape_rope' },
+
+  // ── EV-reducing berries ─────────────────────────────────────────────────────
+  'pomeg-berry':    { kind: 'ev_reduce', stat: 'hp',    amount: 10 },
+  'kelpsy-berry':   { kind: 'ev_reduce', stat: 'atk',   amount: 10 },
+  'qualot-berry':   { kind: 'ev_reduce', stat: 'def',   amount: 10 },
+  'hondew-berry':   { kind: 'ev_reduce', stat: 'spatk', amount: 10 },
+  'grepa-berry':    { kind: 'ev_reduce', stat: 'spdef', amount: 10 },
+  'tamato-berry':   { kind: 'ev_reduce', stat: 'speed', amount: 10 },
 };
 
 // ---------------------------------------------------------------------------
@@ -164,7 +177,7 @@ export async function getBag(req: Request, res: Response): Promise<void> {
 // For Elixir/Max Elixir the server applies PP to all moves automatically.
 //
 // On success: quantity decremented; document deleted if it reaches 0.
-// battle_only and stat_boost return 400 without consuming anything.
+// battle_only returns 400 without consuming anything.
 // ---------------------------------------------------------------------------
 export async function useItem(req: Request, res: Response): Promise<void> {
   const { userId } = req.user!;
@@ -196,9 +209,6 @@ export async function useItem(req: Request, res: Response): Promise<void> {
   if (effect.kind === 'battle_only') {
     return sendError(res, 400, 'This item can only be used in battle.');
   }
-  if (effect.kind === 'stat_boost') {
-    return sendError(res, 400, 'EV system not yet active. Vitamins will work in Phase 5.');
-  }
 
   // Escape rope: consumed immediately, no Pokémon target needed
   if (effect.kind === 'escape_rope') {
@@ -225,7 +235,7 @@ export async function useItem(req: Request, res: Response): Promise<void> {
 
     const species = await fetchSpeciesBaseStats(pokemon.speciesId, res);
     if (!species) return;
-    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature).hp;
+    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
 
     if (pokemon.currentHp >= maxHp && effect.kind !== 'hp_full_cure') {
       return sendError(res, 400, 'That Pokémon is already at full HP.');
@@ -250,7 +260,7 @@ export async function useItem(req: Request, res: Response): Promise<void> {
 
     const species = await fetchSpeciesBaseStats(pokemon.speciesId, res);
     if (!species) return;
-    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature).hp;
+    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
 
     pokemon.currentHp = effect.amount === 'half'
       ? Math.max(1, Math.floor(maxHp / 2))
@@ -314,9 +324,9 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     const species = await fetchSpeciesBaseStats(pokemon.speciesId, res);
     if (!species) return;
 
-    const oldMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature).hp;
+    const oldMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
     pokemon.level += 1;
-    const newMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature).hp;
+    const newMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
     // Current HP rises by the same delta as max HP — same as the main games
     pokemon.currentHp += (newMaxHp - oldMaxHp);
 
@@ -338,7 +348,7 @@ export async function useItem(req: Request, res: Response): Promise<void> {
         } catch { /* leave evolved null — name falls back below */ }
       }
       if (evolved?.baseStats) {
-        pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature).hp;
+        pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
       }
       const evolvedName = evolved ? (evolved.name as string) : 'a new form';
       message += ` ${pokemon.nickname ?? 'It'} evolved into ${evolvedName}!`;
@@ -352,6 +362,56 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     }
     pokemon.markModified('volatileStatus');
     message = `${effect.condition.charAt(0).toUpperCase() + effect.condition.slice(1)} cured.`;
+
+  } else if (effect.kind === 'ev_reduce') {
+    const current = pokemon.evs[effect.stat];
+    if (current <= 0) {
+      return sendError(res, 400, `That Pokémon has no ${EV_STAT_DISPLAY_NAMES[effect.stat]} EVs to reduce.`);
+    }
+    pokemon.evs[effect.stat] = Math.max(0, current - effect.amount);
+    pokemon.markModified('evs');
+    message = `Reduced ${EV_STAT_DISPLAY_NAMES[effect.stat]} EVs by ${current - pokemon.evs[effect.stat]}.`;
+
+  } else if (effect.kind === 'ev_boost') {
+    const before = pokemon.evs[effect.stat];
+    const gain: BaseStats = { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 };
+    gain[effect.stat] = effect.amount;
+    const { evs } = applyEvGain(pokemon.evs, gain);
+    if (evs[effect.stat] === before) {
+      return sendError(res, 400,
+        `That Pokémon cannot gain any more ${EV_STAT_DISPLAY_NAMES[effect.stat]} EVs (stat cap or 510 total cap reached).`);
+    }
+    pokemon.evs[effect.stat] = evs[effect.stat];
+    pokemon.markModified('evs');
+    message = `${EV_STAT_DISPLAY_NAMES[effect.stat]} EVs increased by ${evs[effect.stat] - before}.`;
+
+  } else if (effect.kind === 'pp_up') {
+    if (pokemon.moves.length === 0) {
+      return sendError(res, 400, 'That Pokémon has no moves.');
+    }
+    if (typeof moveIndex !== 'number' || moveIndex < 0 || moveIndex >= pokemon.moves.length) {
+      return sendError(res, 400, 'Valid moveIndex (0–3) is required for this item.');
+    }
+
+    const move = pokemon.moves[moveIndex];
+    const currentPpUps = move.ppUps ?? 0;
+    const newPpUps = effect.amount === 3 ? 3 : Math.min(3, currentPpUps + 1);
+    if (newPpUps === currentPpUps) {
+      return sendError(res, 400, `${move.moveId} already has the maximum PP Ups.`);
+    }
+
+    const species = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId }).select('moves').lean();
+    const moveDetail = (species?.moves as { name: string; pp: number | null }[] | undefined)
+      ?.find(m => m.name === move.moveId);
+    const basePP = moveDetail?.pp ?? move.maxPP;
+    const perBoost = Math.floor(basePP * 0.2);
+    const newMaxPP = basePP + newPpUps * perBoost;
+
+    move.currentPP += newMaxPP - move.maxPP;
+    move.maxPP = newMaxPP;
+    move.ppUps = newPpUps;
+    pokemon.markModified('moves');
+    message = `Raised the max PP of ${move.moveId}.`;
 
   } else if (effect.kind === 'held_item') {
     if (pokemon.heldItem === itemId) {

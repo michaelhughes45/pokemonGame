@@ -57,9 +57,10 @@ export async function applyLevelUpLoop(params: {
   evolutionOverrides: EvolutionOverride[];
   expGroup: string;
   baseStats: BaseStats | undefined;
+  evs: BaseStats;
   cap: number;
 }): Promise<LevelUpLoopResult> {
-  const { displayName, exp, nature, expGroup, baseStats, cap } = params;
+  const { displayName, exp, nature, expGroup, baseStats, evs, cap } = params;
   let level = params.level;
   let currentHp = params.currentHp;
   let speciesId = params.speciesId;
@@ -67,9 +68,9 @@ export async function applyLevelUpLoop(params: {
 
   while (level < cap && exp >= expForLevel(level + 1, expGroup)) {
     if (baseStats && currentHp > 0) {
-      const oldMaxHp = computeStats(baseStats, level, nature).hp;
+      const oldMaxHp = computeStats(baseStats, level, nature, evs).hp;
       level += 1;
-      currentHp += computeStats(baseStats, level, nature).hp - oldMaxHp;
+      currentHp += computeStats(baseStats, level, nature, evs).hp - oldMaxHp;
     } else {
       level += 1;
     }
@@ -84,7 +85,7 @@ export async function applyLevelUpLoop(params: {
           evolvedCache = (await PokedexCache.create(fetched)).toObject();
         } catch { /* skip */ }
       }
-      if (evolvedCache?.baseStats) currentHp = computeStats(evolvedCache.baseStats as BaseStats, level, nature).hp;
+      if (evolvedCache?.baseStats) currentHp = computeStats(evolvedCache.baseStats as BaseStats, level, nature, evs).hp;
       events.push(`${displayName} evolved into ${evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form'}!`);
       speciesId = evolveIntoId;
     }
@@ -108,7 +109,7 @@ export async function unlockPendingLevelUpsForPlayer(
 ): Promise<number> {
   const pokemonList = await Pokemon.find(
     { ownerId, ownerType: 'player' },
-    '_id nickname speciesId level exp nature currentHp evolutionOverrides',
+    '_id nickname speciesId level exp nature currentHp evolutionOverrides evs',
   ).lean();
   const growable = pokemonList.filter(p => (p.level as number) < cap);
   if (growable.length === 0) return 0;
@@ -132,6 +133,7 @@ export async function unlockPendingLevelUpsForPlayer(
       evolutionOverrides: overrides,
       expGroup: (cache?.expGroup as string | undefined) ?? 'medium-fast',
       baseStats: cache?.baseStats as BaseStats | undefined,
+      evs: poke.evs as BaseStats,
       cap,
     });
 

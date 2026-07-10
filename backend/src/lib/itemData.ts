@@ -16,8 +16,6 @@ const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
   'full-restore':   'healing',
   'revive':         'healing',
   'max-revive':     'healing',
-  'oran-berry':     'healing',
-  'sitrus-berry':   'healing',
   'rare-candy':     'healing',
 
   // ── Status cures ─────────────────────────────────────────────────────────
@@ -27,12 +25,6 @@ const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
   'ice-heal':       'status_cure',
   'awakening':      'status_cure',
   'full-heal':      'status_cure',
-  'cheri-berry':    'status_cure',
-  'chesto-berry':   'status_cure',
-  'pecha-berry':    'status_cure',
-  'rawst-berry':    'status_cure',
-  'aspear-berry':   'status_cure',
-  'lum-berry':      'status_cure',
   'poke-flute':     'status_cure',
   'blue-flute':     'status_cure',
   'green-flute':    'status_cure',
@@ -103,6 +95,27 @@ const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
 
   // ── Escape ────────────────────────────────────────────────────────────────
   'escape-rope':    'escape',
+
+  // ── Berries ───────────────────────────────────────────────────────────────
+  // All berries share one bag tab regardless of what they do (healing,
+  // status cure, or EV reduction) — this is the single source of truth,
+  // so their in-battle effects (BATTLE_ITEM_EFFECTS below) are unaffected.
+  'oran-berry':     'berry',
+  'sitrus-berry':   'berry',
+  'cheri-berry':    'berry',
+  'chesto-berry':   'berry',
+  'pecha-berry':    'berry',
+  'rawst-berry':    'berry',
+  'aspear-berry':   'berry',
+  'lum-berry':      'berry',
+
+  // EV-reducing berries — one per stat, -10 EV per use (main-game amount)
+  'pomeg-berry':    'berry', // HP
+  'kelpsy-berry':   'berry', // Attack
+  'qualot-berry':   'berry', // Defense
+  'hondew-berry':   'berry', // Sp. Attack
+  'grepa-berry':    'berry', // Sp. Defense
+  'tamato-berry':   'berry', // Speed
 };
 
 /**

@@ -2,6 +2,7 @@ import type { HydratedDocument } from 'mongoose';
 import { Generations } from '@smogon/calc';
 import { IBattle, StatStages } from '../models/Battle';
 import { StatEffect, STAT_DISPLAY_NAMES } from './moveData';
+import { BaseStats } from './statCalc';
 
 export const GEN9 = Generations.get(9);
 
@@ -13,6 +14,12 @@ export const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
 // Zero-valued stat block in @smogon/calc's stat key format. Used as a fallback
 // when a Pokémon's base stats are unavailable.
 export const ZERO_STATS = { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 } as const;
+
+// Convert our stored EV spread (spatk/spdef/speed) to @smogon/calc's stat key
+// format (spa/spd/spe) so a Pokémon's real EVs feed into the damage formula.
+export function toCalcEvs(evs: BaseStats) {
+  return { hp: evs.hp, atk: evs.atk, def: evs.def, spa: evs.spatk, spd: evs.spdef, spe: evs.speed };
+}
 
 // Convert a PokeAPI slug to a display name. "ice-beam" → "Ice Beam"
 export function slugToDisplayName(slug: string): string {

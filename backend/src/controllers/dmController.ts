@@ -10,11 +10,12 @@ import { Encounter } from '../models/Encounter';
 import { Battle } from '../models/Battle';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
-import { computeStats, expForLevel, BaseStats, NATURES } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
 import { slugToDisplayName } from '../lib/battleCalc';
 import { applyLevelUpLoop, getPlayerEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
 import { BADGE_CATALOG } from '../lib/badgeData';
+import { EV_STAT_CAP, EV_TOTAL_CAP, EV_STAT_DISPLAY_NAMES } from '../lib/evData';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -210,7 +211,7 @@ function deriveStartingMoves(
     .slice(-4)
     .map(entry => {
       const detail = moveDetailMap.get(entry.moveId);
-      return { moveId: entry.moveId, currentPP: detail?.pp ?? 10, maxPP: detail?.pp ?? 10 };
+      return { moveId: entry.moveId, currentPP: detail?.pp ?? 10, maxPP: detail?.pp ?? 10, ppUps: 0 };
     });
 }
 
@@ -700,7 +701,7 @@ export async function healNpc(req: Request, res: Response): Promise<void> {
 
   await Promise.all(party.map(poke => {
     const cache      = cacheMap.get(poke.speciesId);
-    const maxHp      = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature).hp : poke.currentHp;
+    const maxHp      = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp : poke.currentHp;
     const fullMoves  = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
       .map(m => ({ ...m, currentPP: m.maxPP }));
     return Pokemon.updateOne(
@@ -1088,10 +1089,10 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
       const moves = learnable.map(m => {
         const md = moveList.find(mv => mv.name === m.moveId);
         const pp = md?.pp ?? 5;
-        return { moveId: m.moveId, currentPP: pp, maxPP: pp };
+        return { moveId: m.moveId, currentPP: pp, maxPP: pp, ppUps: 0 };
       });
 
-      const stats    = computeStats(species.baseStats as BaseStats, wp.level, nature);
+      const stats    = computeStats(species.baseStats as BaseStats, wp.level, nature, ZERO_EVS);
       const wildPoke = await Pokemon.create({
         speciesId:          species.pokeApiId,
         ownerId:            new mongoose.Types.ObjectId(req.user!.userId),
@@ -1185,6 +1186,7 @@ export async function awardExp(req: Request, res: Response): Promise<void> {
     evolutionOverrides: overrides,
     expGroup,
     baseStats,
+    evs: pokemon.evs as BaseStats,
     cap,
   });
   events.push(...levelEvents);
@@ -1227,9 +1229,9 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
   const baseStats = cache.baseStats as BaseStats | undefined;
 
   if (baseStats) {
-    const oldMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string).hp;
+    const oldMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats).hp;
     pokemon.level   = (pokemon.level as number) + 1;
-    const newMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string).hp;
+    const newMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats).hp;
     pokemon.currentHp = (pokemon.currentHp as number) + (newMaxHp - oldMaxHp);
   } else {
     pokemon.level = (pokemon.level as number) + 1;
@@ -1256,7 +1258,7 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
     }
     if (evolvedCache?.baseStats) {
       pokemon.currentHp = computeStats(
-        evolvedCache.baseStats as BaseStats, pokemon.level as number, pokemon.nature as string,
+        evolvedCache.baseStats as BaseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats,
       ).hp;
     }
     const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
@@ -1265,6 +1267,45 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
 
   await pokemon.save();
   sendOk(res, { events, level: pokemon.level, exp: pokemon.exp, speciesId: pokemon.speciesId });
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/dm/pokemon/:pokemonId/evs
+// Directly sets a campaign player's Pokémon's full EV spread (DM override tool —
+// bypasses the vitamin/berry +10/-10 increments players use from their bag).
+// Body: { evs: { hp, atk, def, spatk, spdef, speed } } — all six required.
+// ---------------------------------------------------------------------------
+const EV_STAT_KEYS: (keyof BaseStats)[] = ['hp', 'atk', 'def', 'spatk', 'spdef', 'speed'];
+
+export async function setPokemonEvs(req: Request, res: Response): Promise<void> {
+  const pokemonId = String(req.params.pokemonId);
+  const { evs } = req.body as { evs?: Partial<Record<keyof BaseStats, unknown>> };
+
+  const pokemon = await assertDmOwnsPokemon(req.user!.userId, pokemonId, res);
+  if (!pokemon) return;
+
+  if (!evs || typeof evs !== 'object') {
+    return sendError(res, 400, 'evs object is required');
+  }
+
+  for (const key of EV_STAT_KEYS) {
+    const value = evs[key];
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > EV_STAT_CAP) {
+      return sendError(res, 400, `${EV_STAT_DISPLAY_NAMES[key]} EVs must be an integer between 0 and ${EV_STAT_CAP}`);
+    }
+  }
+
+  const total = EV_STAT_KEYS.reduce((sum, key) => sum + (evs[key] as number), 0);
+  if (total > EV_TOTAL_CAP) {
+    return sendError(res, 400, `Total EVs cannot exceed ${EV_TOTAL_CAP} (submitted ${total})`);
+  }
+
+  const newEvs = Object.fromEntries(EV_STAT_KEYS.map(key => [key, evs[key] as number])) as BaseStats;
+  pokemon.evs = newEvs;
+  pokemon.markModified('evs');
+  await pokemon.save();
+
+  sendOk(res, { evs: pokemon.evs });
 }
 
 // ---------------------------------------------------------------------------
@@ -1278,7 +1319,7 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
   if (!user) return;
 
   const pokemons = await Pokemon.find({ ownerId: user._id, ownerType: 'player' })
-    .select('speciesId nickname level exp currentHp nature gender statusCondition heldItem isInParty partySlot')
+    .select('speciesId nickname level exp currentHp nature gender statusCondition heldItem isInParty partySlot evs')
     .lean();
 
   if (pokemons.length === 0) {
@@ -1295,7 +1336,7 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
     const species   = speciesMap.get(poke.speciesId as number);
     const expGroup  = (species?.expGroup as string) || 'medium-fast';
     const baseStats = species?.baseStats as BaseStats | undefined;
-    const maxHp     = baseStats ? computeStats(baseStats, poke.level as number, poke.nature as string).hp : 0;
+    const maxHp     = baseStats ? computeStats(baseStats, poke.level as number, poke.nature as string, poke.evs as BaseStats).hp : 0;
 
     return {
       _id:                poke._id,
@@ -1314,6 +1355,7 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
       heldItem:           poke.heldItem,
       isInParty:          poke.isInParty,
       partySlot:          poke.partySlot,
+      evs:                poke.evs,
     };
   });
 

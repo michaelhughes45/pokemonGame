@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { Pokemon } from '../models/Pokemon';
 import { Npc } from '../models/Npc';
 import { PokedexCache } from '../models/PokedexCache';
-import { computeStats, expForLevel } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,7 @@ type LeanPokemonDoc = {
   gender: string;
   statusCondition: string | null;
   partySlot: number | null;
+  evs: BaseStats;
 };
 
 // Batch-loads species data for a list of pokemon documents and returns an
@@ -68,7 +69,7 @@ async function enrichPokemonList(docs: LeanPokemonDoc[]) {
 
   return docs.map(p => {
     const species = speciesMap.get(p.speciesId);
-    const stats   = species ? computeStats(species.baseStats, p.level, p.nature) : null;
+    const stats   = species ? computeStats(species.baseStats, p.level, p.nature, p.evs) : null;
     return {
       _id:             p._id,
       speciesId:       p.speciesId,
@@ -242,7 +243,7 @@ export async function healParty(req: Request, res: Response): Promise<void> {
 
   await Promise.all(party.map(poke => {
     const cache      = cacheMap.get(poke.speciesId);
-    const maxHp      = cache ? computeStats(cache.baseStats as any, poke.level, poke.nature).hp : poke.currentHp;
+    const maxHp      = cache ? computeStats(cache.baseStats as any, poke.level, poke.nature, poke.evs).hp : poke.currentHp;
     const fullMoves  = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
       .map(m => ({ ...m, currentPP: m.maxPP }));
     return Pokemon.updateOne(
@@ -290,15 +291,17 @@ export async function replaceMoveSlot(req: Request, res: Response): Promise<void
   const moveDetail = ((species.moves ?? []) as MoveRecord[]).find(m => m.name === moveId);
   const pp = moveDetail?.pp ?? 5;
 
-  type MoveSlot = { moveId: string; currentPP: number; maxPP: number };
+  type MoveSlot = { moveId: string; currentPP: number; maxPP: number; ppUps: number };
   const currentMoves = (pokemon.moves ?? []) as MoveSlot[];
 
   if ((slot as number) >= currentMoves.length) {
     return sendError(res, 400, `No move in slot ${slot}`);
   }
 
+  // A newly learned move starts with no PP Up bonus, even if it's replacing
+  // a move that had one — the boost is tied to the move, not the slot.
   const newMoves: MoveSlot[] = currentMoves.map((m, i) =>
-    i === (slot as number) ? { moveId: moveId as string, currentPP: pp, maxPP: pp } : m,
+    i === (slot as number) ? { moveId: moveId as string, currentPP: pp, maxPP: pp, ppUps: 0 } : m,
   );
 
   await Pokemon.updateOne({ _id: pokemon._id }, { moves: newMoves });
@@ -335,7 +338,7 @@ export async function getPokemon(req: Request, res: Response): Promise<void> {
     name:      chainNameMap.get(step.speciesId) ?? null,
   }));
 
-  const stats = computeStats(species.baseStats, pokemon.level, pokemon.nature);
+  const stats = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs);
 
   // Build reminderMoves: level-up moves learnable at or below the Pokémon's current
   // level, enriched with display data for the Move Reminder UI.
@@ -388,6 +391,7 @@ export async function getPokemon(req: Request, res: Response): Promise<void> {
     evolutionOverrides: pokemon.evolutionOverrides,
     hasHiddenAbility:   pokemon.hasHiddenAbility ?? false,
     stats,
+    evs:                pokemon.evs,
     species: {
       name:           species.name,
       types:          species.types,

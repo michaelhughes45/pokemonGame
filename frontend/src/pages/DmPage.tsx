@@ -573,11 +573,20 @@ function NpcCard({ token }: { token: string | null }) {
 
   const headers = { Authorization: `Bearer ${token}` };
 
+  async function loadNpcs() {
+    setLoading(true);
+    try {
+      const res = await axios.get(`${API}/api/dm/npcs`, { headers });
+      setNpcs(res.data.data ?? []);
+    } catch {
+      // keep previous list on failure
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    axios.get(`${API}/api/dm/npcs`, { headers })
-      .then(res => setNpcs(res.data.data ?? []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    loadNpcs();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -622,7 +631,12 @@ function NpcCard({ token }: { token: string | null }) {
 
   return (
     <Card>
-      <CardHeader><CardTitle>NPCs</CardTitle></CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle>NPCs</CardTitle>
+        <Button variant="ghost" size="sm" onClick={loadNpcs} disabled={loading} className="h-8 text-xs">
+          {loading ? 'Refreshing…' : 'Refresh'}
+        </Button>
+      </CardHeader>
       <CardContent className="flex flex-col gap-5">
 
         {/* NPC list */}
@@ -786,7 +800,13 @@ function NpcPartyManagerCard({ token }: { token: string | null }) {
     setPartyLoading(true);
     try {
       const res = await axios.get(`${API}/api/dm/npcs/${npcId}/party`, { headers });
-      setParty(res.data.data ?? []);
+      const fetchedParty: NpcPartyPokemon[] = res.data.data ?? [];
+      setParty(fetchedParty);
+      // Reconcile the cached header count against this just-fetched ground truth —
+      // the two lists on this page are fetched independently, so a release done
+      // via the Pokémon detail page (a separate route) won't otherwise be reflected
+      // here until this NPC's party is viewed again.
+      setNpcs(prev => prev.map(n => n._id === npcId ? { ...n, partyCount: fetchedParty.length } : n));
     } catch {
       setParty([]);
     } finally {
@@ -808,11 +828,11 @@ function NpcPartyManagerCard({ token }: { token: string | null }) {
           <p className="text-sm text-muted-foreground">No NPCs in your campaign yet.</p>
         ) : (
           <>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
               <select
                 value={selectedNpc}
                 onChange={e => loadParty(e.target.value)}
-                className={selectClass}
+                className={`${selectClass} flex-1`}
               >
                 <option value="">— Select an NPC —</option>
                 {npcs.map(n => (
@@ -821,6 +841,18 @@ function NpcPartyManagerCard({ token }: { token: string | null }) {
                   </option>
                 ))}
               </select>
+              {selectedNpc && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-11 shrink-0"
+                  disabled={partyLoading}
+                  onClick={() => loadParty(selectedNpc)}
+                  title="Re-fetch this NPC's party — useful after releasing a Pokémon from its detail page"
+                >
+                  {partyLoading ? '…' : 'Refresh'}
+                </Button>
+              )}
             </div>
 
             {selectedNpc && (

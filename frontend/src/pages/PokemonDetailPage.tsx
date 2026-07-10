@@ -54,13 +54,14 @@ type PokemonDetail = {
   nature: string;
   gender: 'male' | 'female' | 'none';
   heldItem: string | null;
-  moves: { moveId: string; currentPP: number; maxPP: number }[];
+  moves: { moveId: string; currentPP: number; maxPP: number; ppUps: number }[];
   statusCondition: string | null;
   isInParty: boolean;
   partySlot: number | null;
   evolutionOverrides: { condition: string; value: string }[];
   hasHiddenAbility: boolean;
   stats: StatSpread;
+  evs: StatSpread;
   species: {
     name: string;
     types: string[];
@@ -153,6 +154,22 @@ function formatCondition(condition: string, value: string): string {
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
+
+const EV_STAT_CAP = 252;
+const EV_TOTAL_CAP = 510;
+
+function EvRow({ label, value }: { label: string; value: number }) {
+  const pct = Math.min(100, Math.round((value / EV_STAT_CAP) * 100));
+  return (
+    <div className="flex items-center gap-3 text-sm">
+      <span className="w-14 text-muted-foreground shrink-0">{label}</span>
+      <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+        <div className="h-full rounded-full bg-purple-500" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="w-10 text-right font-mono font-semibold">{value}</span>
+    </div>
+  );
+}
 
 function StatRow({ label, base, actual }: { label: string; base: number; actual: number }) {
   const pct = Math.min(100, Math.round((base / 255) * 100));
@@ -413,6 +430,9 @@ export default function PokemonDetailPage() {
 
   const { species } = pokemon;
 
+  const evTotal = pokemon.evs.hp + pokemon.evs.atk + pokemon.evs.def
+    + pokemon.evs.spatk + pokemon.evs.spdef + pokemon.evs.speed;
+
   // Can the logged-in user use the Move Reminder on this Pokémon?
   const canRemind =
     user?.id === pokemon.ownerId || user?.role === 'dm' || user?.role === 'admin';
@@ -543,6 +563,24 @@ export default function PokemonDetailPage() {
           </CardContent>
         </Card>
 
+        {/* ── EVs ── */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Effort Values (EVs)</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              Total: {evTotal}/{EV_TOTAL_CAP} · each stat caps at {EV_STAT_CAP}
+            </p>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <EvRow label="HP"      value={pokemon.evs.hp} />
+            <EvRow label="Attack"  value={pokemon.evs.atk} />
+            <EvRow label="Defense" value={pokemon.evs.def} />
+            <EvRow label="Sp.Atk"  value={pokemon.evs.spatk} />
+            <EvRow label="Sp.Def"  value={pokemon.evs.spdef} />
+            <EvRow label="Speed"   value={pokemon.evs.speed} />
+          </CardContent>
+        </Card>
+
         {/* ── Moves ── */}
         <Card>
           <CardHeader className="pb-2">
@@ -593,6 +631,9 @@ export default function PokemonDetailPage() {
                       )}
                     </div>
                     <PpBar current={m.currentPP} max={m.maxPP} />
+                    {m.ppUps > 0 && (
+                      <p className="text-xs text-muted-foreground mt-0.5">PP Ups: {m.ppUps}/3</p>
+                    )}
                     {detail?.flavorText && (
                       <p className="text-xs text-muted-foreground mt-1 italic">{detail.flavorText}</p>
                     )}

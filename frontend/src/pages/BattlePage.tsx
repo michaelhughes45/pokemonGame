@@ -29,6 +29,13 @@ type BagItem = {
   pocket: string;
 };
 
+// EV-reducing berries live in the 'berry' pocket alongside battle-usable ones
+// (Oran, Sitrus, Cheri, etc.) but have no in-battle effect — exclude them
+// from battle item lists so they aren't offered where they'd silently no-op.
+const EV_BERRIES = new Set([
+  'pomeg-berry', 'kelpsy-berry', 'qualot-berry', 'hondew-berry', 'grepa-berry', 'tamato-berry',
+]);
+
 type StatStages = {
   atk: number; def: number; spa: number; spd: number;
   spe: number; acc: number; eva: number;
@@ -392,13 +399,16 @@ export default function BattlePage() {
       .catch(() => {});
   }, [token, user?.role, battle?.turnNumber]);
 
-  // Fetch healing + status_cure items for players; re-runs each new round so quantities stay fresh
+  // Fetch healing + status_cure + berry items for players; re-runs each new round so quantities stay fresh
   useEffect(() => {
     if (!token || user?.role === 'dm' || user?.role === 'admin') return;
     axios.get(`${API}/api/items`, { headers: { Authorization: `Bearer ${token}` } })
       .then(res => {
         const all: BagItem[] = res.data.data ?? [];
-        setBagItems(all.filter(i => i.pocket === 'healing' || i.pocket === 'status_cure' || i.pocket === 'pokeballs'));
+        setBagItems(all.filter(i =>
+          i.pocket === 'healing' || i.pocket === 'status_cure' || i.pocket === 'pokeballs'
+          || (i.pocket === 'berry' && !EV_BERRIES.has(i.itemId))
+        ));
       })
       .catch(() => {});
   }, [token, user?.role, battle?.turnNumber]);
@@ -1476,7 +1486,8 @@ export default function BattlePage() {
                                     <p className="text-sm text-muted-foreground">Loading bag…</p>
                                   ) : (() => {
                                     const battleItems = (npcBags[npcId] ?? []).filter(
-                                      i => i.pocket === 'healing' || i.pocket === 'status_cure',
+                                      i => i.pocket === 'healing' || i.pocket === 'status_cure'
+                                        || (i.pocket === 'berry' && !EV_BERRIES.has(i.itemId)),
                                     );
                                     const selectedItemId = npcSelectedItem[slotKey] ?? null;
                                     if (battleItems.length === 0) {

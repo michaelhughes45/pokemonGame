@@ -15,7 +15,7 @@ const API = import.meta.env.VITE_API_URL;
 
 type ItemPocket =
   | 'healing' | 'status_cure' | 'pp_recovery'
-  | 'stat_booster' | 'held_type' | 'pokeballs' | 'escape';
+  | 'stat_booster' | 'held_type' | 'pokeballs' | 'escape' | 'berry';
 
 type BagItem = {
   _id: string;
@@ -33,7 +33,7 @@ type PartyMember = {
   currentHp: number;
   maxHp: number | null;
   statusCondition: string | null;
-  moves: { moveId: string; currentPP: number; maxPP: number }[];
+  moves: { moveId: string; currentPP: number; maxPP: number; ppUps: number }[];
 };
 
 // ---------------------------------------------------------------------------
@@ -48,6 +48,7 @@ const POCKET_LABEL: Record<ItemPocket, string> = {
   held_type:    'Held Items',
   pokeballs:    'Poké Balls',
   escape:       'Escape',
+  berry:        'Berries',
 };
 
 // Pockets that cannot be used outside of battle (show a notice, skip targeting flow)
@@ -56,11 +57,11 @@ const BATTLE_ONLY_POCKETS: ItemPocket[] = ['pokeballs'];
 // Pockets whose items are consumed directly with no Pokémon target needed
 const DIRECT_USE_POCKETS: ItemPocket[] = ['escape'];
 
-// Pockets whose items are deferred to Phase 5 (EVs)
-const DEFERRED_POCKETS: ItemPocket[] = ['stat_booster'];
-
-// Items that target a single move (need moveIndex) vs all moves
-const PP_ONE_ITEMS = new Set(['ether', 'max-ether']);
+// Items that target a single move (need moveIndex) vs all moves.
+// Ether/Max Ether restore PP; PP Up/PP Max raise a move's max PP instead —
+// both need the same move-picker flow, just with different picker semantics.
+const PP_ONE_ITEMS = new Set(['ether', 'max-ether', 'pp-up', 'pp-max']);
+const PP_UP_ITEMS = new Set(['pp-up', 'pp-max']);
 
 // Format a PokeAPI slug like "super-potion" → "Super Potion"
 function formatItemName(slug: string): string {
@@ -165,7 +166,7 @@ export default function BagPage() {
     // Default active pocket to first occupied one
     if (fetchedItems.length > 0) {
       const pocketOrder: ItemPocket[] = [
-        'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape',
+        'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry',
       ];
       const firstOccupied = pocketOrder.find(p =>
         fetchedItems.some(i => i.pocket === p)
@@ -191,7 +192,7 @@ export default function BagPage() {
 
   const occupiedPockets = (Object.keys(byPocket) as ItemPocket[]).sort((a, b) => {
     const order: ItemPocket[] = [
-      'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape',
+      'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry',
     ];
     return order.indexOf(a) - order.indexOf(b);
   });
@@ -270,14 +271,16 @@ export default function BagPage() {
   function pocketNotice(pocket: ItemPocket): string | null {
     if (BATTLE_ONLY_POCKETS.includes(pocket))
       return 'These items can only be used in battle.';
-    if (DEFERRED_POCKETS.includes(pocket))
-      return 'Vitamins will activate the EV system in Phase 5.';
     return null;
   }
 
-  // Whether the selected item requires picking a single move (Ether / Max Ether)
+  // Whether the selected item requires picking a single move (Ether / Max Ether / PP Up / PP Max)
   const needsMoveTarget =
     selectedItem !== null && PP_ONE_ITEMS.has(selectedItem.itemId);
+
+  // PP Up / PP Max target a move's PP-Up count, not its current PP
+  const isPpUpItem =
+    selectedItem !== null && PP_UP_ITEMS.has(selectedItem.itemId);
 
   // ---------------------------------------------------------------------------
   // Render
@@ -401,7 +404,7 @@ export default function BagPage() {
                           : 'Choose a Pokémon:'}
                       </p>
 
-                      {/* Move picker — only shown for Ether/Max Ether after a pokemon is selected */}
+                      {/* Move picker — shown for Ether/Max Ether/PP Up/PP Max after a pokemon is selected */}
                       {needsMoveTarget && targetPokemon ? (
                         <div className="flex flex-col gap-2">
                           {targetPokemon.moves.length === 0 ? (
@@ -412,12 +415,12 @@ export default function BagPage() {
                                 key={idx}
                                 variant="outline"
                                 className="justify-between min-h-11"
-                                disabled={move.currentPP >= move.maxPP || using}
+                                disabled={(isPpUpItem ? (move.ppUps ?? 0) >= 3 : move.currentPP >= move.maxPP) || using}
                                 onClick={() => applyItem(idx)}
                               >
                                 <span>{formatItemName(move.moveId)}</span>
                                 <span className="text-xs text-muted-foreground font-mono">
-                                  {move.currentPP}/{move.maxPP} PP
+                                  {isPpUpItem ? `PP Ups: ${move.ppUps ?? 0}/3` : `${move.currentPP}/${move.maxPP} PP`}
                                 </span>
                               </Button>
                             ))

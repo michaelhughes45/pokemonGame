@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { fetchSpecies } from '../lib/pokeapi';
-import { computeStats, expForLevel, NATURES } from '../lib/statCalc';
+import { computeStats, expForLevel, NATURES, ZERO_EVS } from '../lib/statCalc';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -65,7 +65,7 @@ export async function pickStarter(req: Request, res: Response): Promise<void> {
 
   // Derive starting moves from the cache. If the cache entry pre-dates the
   // levelUpMoves field, fall back to a direct PokeAPI fetch.
-  let moves: { moveId: string; currentPP: number; maxPP: number }[] = [];
+  let moves: { moveId: string; currentPP: number; maxPP: number; ppUps: number }[] = [];
 
   if (cached.levelUpMoves?.length) {
     const moveDetailMap = new Map(cached.moves.map(m => [m.name, m]));
@@ -74,7 +74,7 @@ export async function pickStarter(req: Request, res: Response): Promise<void> {
       .slice(0, 4)
       .map(entry => {
         const detail = moveDetailMap.get(entry.moveId);
-        return { moveId: entry.moveId, currentPP: detail?.pp ?? 35, maxPP: detail?.pp ?? 35 };
+        return { moveId: entry.moveId, currentPP: detail?.pp ?? 35, maxPP: detail?.pp ?? 35, ppUps: 0 };
       });
   } else {
     const pokeRes = await fetch(`https://pokeapi.co/api/v2/pokemon/${speciesId}`);
@@ -90,7 +90,7 @@ export async function pickStarter(req: Request, res: Response): Promise<void> {
       moves = cached.moves
         .filter(m => level1MoveNames.has(m.name))
         .slice(0, 4)
-        .map(m => ({ moveId: m.name, currentPP: m.pp ?? 35, maxPP: m.pp ?? 35 }));
+        .map(m => ({ moveId: m.name, currentPP: m.pp ?? 35, maxPP: m.pp ?? 35, ppUps: 0 }));
     }
   }
 
@@ -101,7 +101,7 @@ export async function pickStarter(req: Request, res: Response): Promise<void> {
   const gender: 'male' | 'female' | 'none' =
     gr === -1 ? 'none' : Math.random() < gr / 8 ? 'female' : 'male';
 
-  const currentHp = computeStats(cached.baseStats, level, nature).hp;
+  const currentHp = computeStats(cached.baseStats, level, nature, ZERO_EVS).hp;
 
   const pokemon = await Pokemon.create({
     speciesId,
