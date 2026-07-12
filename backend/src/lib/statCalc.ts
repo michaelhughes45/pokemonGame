@@ -69,26 +69,32 @@ export function expForLevel(level: number, expGroup: string): number {
   }
 }
 
-// Gen 3+ stat formula. No IVs/EVs until Phase 5 (both treated as 0).
+// Gen 3+ stat formula. No per-Pokémon IVs exist in this project — the only
+// IV source is the Trainer IV bonus (milestone 5.5), a flat per-stat value
+// applied uniformly to every Pokémon a player owns (see lib/trainerIv.ts).
 // Zero EV spread — pass this explicitly at any call site where a Pokémon's
 // real EVs aren't available/relevant (e.g. a hypothetical species preview).
 export const ZERO_EVS: BaseStats = { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 };
 
-export function computeStats(base: BaseStats, level: number, nature: string, evs: BaseStats): BaseStats {
+// Zero IV spread — pass this explicitly for NPC/wild Pokémon (which never
+// carry a Trainer IV bonus) or any hypothetical/preview call site.
+export const ZERO_IVS: BaseStats = { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 };
+
+export function computeStats(base: BaseStats, level: number, nature: string, evs: BaseStats, ivs: BaseStats): BaseStats {
   const mod = NATURE_MODIFIERS[nature] ?? {};
 
-  function calcOther(b: number, ev: number, key: StatKey): number {
-    const raw  = Math.floor((2 * b + Math.floor(ev / 4)) * level / 100) + 5;
+  function calcOther(b: number, ev: number, iv: number, key: StatKey): number {
+    const raw  = Math.floor((2 * b + iv + Math.floor(ev / 4)) * level / 100) + 5;
     const mult = mod.boost === key ? 1.1 : mod.drop === key ? 0.9 : 1.0;
     return Math.floor(raw * mult);
   }
 
   return {
-    hp:    Math.floor((2 * base.hp + Math.floor(evs.hp / 4)) * level / 100) + level + 10,
-    atk:   calcOther(base.atk,   evs.atk,   'atk'),
-    def:   calcOther(base.def,   evs.def,   'def'),
-    spatk: calcOther(base.spatk, evs.spatk, 'spatk'),
-    spdef: calcOther(base.spdef, evs.spdef, 'spdef'),
-    speed: calcOther(base.speed, evs.speed, 'speed'),
+    hp:    Math.floor((2 * base.hp + ivs.hp + Math.floor(evs.hp / 4)) * level / 100) + level + 10,
+    atk:   calcOther(base.atk,   evs.atk,   ivs.atk,   'atk'),
+    def:   calcOther(base.def,   evs.def,   ivs.def,   'def'),
+    spatk: calcOther(base.spatk, evs.spatk, ivs.spatk, 'spatk'),
+    spdef: calcOther(base.spdef, evs.spdef, ivs.spdef, 'spdef'),
+    speed: calcOther(base.speed, evs.speed, ivs.speed, 'speed'),
   };
 }

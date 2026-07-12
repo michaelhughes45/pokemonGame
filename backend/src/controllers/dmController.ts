@@ -10,12 +10,13 @@ import { Encounter } from '../models/Encounter';
 import { Battle } from '../models/Battle';
 import { getPocket } from '../lib/itemData';
 import { fetchSpecies } from '../lib/pokeapi';
-import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
 import { slugToDisplayName } from '../lib/battleCalc';
 import { applyLevelUpLoop, getPlayerEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
 import { BADGE_CATALOG } from '../lib/badgeData';
 import { EV_STAT_CAP, EV_TOTAL_CAP, EV_STAT_DISPLAY_NAMES } from '../lib/evData';
+import { ivsFromSpread, getUnspentTrainerIv, getIvsForOwner } from '../lib/trainerIv';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -238,6 +239,19 @@ export async function deletePlayerStarter(req: Request, res: Response): Promise<
 
   const result = await Pokemon.deleteMany({ ownerId: user._id });
   sendOk(res, { deleted: result.deletedCount, username });
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/dm/players/:username/trainer-stat
+// Clears a player's one-time Trainer IV stat choice so they can pick again.
+// ---------------------------------------------------------------------------
+export async function resetPlayerTrainerStat(req: Request, res: Response): Promise<void> {
+  const username = String(req.params.username);
+  const user = await assertCampaignPlayer(req.user!.userId, username, res);
+  if (!user) return;
+
+  await User.updateOne({ _id: user._id }, { trainerStats: {} });
+  sendOk(res, { message: `Reset all of ${username}'s Trainer IV points`, username });
 }
 
 // ---------------------------------------------------------------------------
@@ -701,7 +715,7 @@ export async function healNpc(req: Request, res: Response): Promise<void> {
 
   await Promise.all(party.map(poke => {
     const cache      = cacheMap.get(poke.speciesId);
-    const maxHp      = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp : poke.currentHp;
+    const maxHp      = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ZERO_IVS).hp : poke.currentHp;
     const fullMoves  = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
       .map(m => ({ ...m, currentPP: m.maxPP }));
     return Pokemon.updateOne(
@@ -1092,7 +1106,7 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
         return { moveId: m.moveId, currentPP: pp, maxPP: pp, ppUps: 0 };
       });
 
-      const stats    = computeStats(species.baseStats as BaseStats, wp.level, nature, ZERO_EVS);
+      const stats    = computeStats(species.baseStats as BaseStats, wp.level, nature, ZERO_EVS, ZERO_IVS);
       const wildPoke = await Pokemon.create({
         speciesId:          species.pokeApiId,
         ownerId:            new mongoose.Types.ObjectId(req.user!.userId),
@@ -1175,6 +1189,7 @@ export async function awardExp(req: Request, res: Response): Promise<void> {
   const baseStats = cache.baseStats as BaseStats | undefined;
   const overrides = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
   const cap       = await getPlayerEffectiveLevelCap(pokemon.ownerId);
+  const ivs       = await getIvsForOwner(pokemon.ownerId, 'player');
 
   const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, events: levelEvents, cappedOut } = await applyLevelUpLoop({
     displayName,
@@ -1187,6 +1202,7 @@ export async function awardExp(req: Request, res: Response): Promise<void> {
     expGroup,
     baseStats,
     evs: pokemon.evs as BaseStats,
+    ivs,
     cap,
   });
   events.push(...levelEvents);
@@ -1227,11 +1243,12 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
   const displayName = pokemon.nickname ?? slugToDisplayName(cache.name as string);
   const events: string[] = [];
   const baseStats = cache.baseStats as BaseStats | undefined;
+  const ivs = await getIvsForOwner(pokemon.ownerId, 'player');
 
   if (baseStats) {
-    const oldMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats).hp;
+    const oldMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats, ivs).hp;
     pokemon.level   = (pokemon.level as number) + 1;
-    const newMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats).hp;
+    const newMaxHp  = computeStats(baseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats, ivs).hp;
     pokemon.currentHp = (pokemon.currentHp as number) + (newMaxHp - oldMaxHp);
   } else {
     pokemon.level = (pokemon.level as number) + 1;
@@ -1258,7 +1275,7 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
     }
     if (evolvedCache?.baseStats) {
       pokemon.currentHp = computeStats(
-        evolvedCache.baseStats as BaseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats,
+        evolvedCache.baseStats as BaseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats, ivs,
       ).hp;
     }
     const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
@@ -1318,12 +1335,16 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
   const user = await assertCampaignPlayer(req.user!.userId, username, res);
   if (!user) return;
 
+  const badges = (user.badges ?? []) as { badgeId: string }[];
+  const trainerStats = ivsFromSpread(user.trainerStats);
+  const trainerIvUnspent = getUnspentTrainerIv(badges.length, user.trainerStats);
+
   const pokemons = await Pokemon.find({ ownerId: user._id, ownerType: 'player' })
     .select('speciesId nickname level exp currentHp nature gender statusCondition heldItem isInParty partySlot evs')
     .lean();
 
   if (pokemons.length === 0) {
-    return sendOk(res, { party: [], pc: [], badges: user.badges ?? [] });
+    return sendOk(res, { party: [], pc: [], badges, trainerStats, trainerIvUnspent });
   }
 
   const uniqueSpeciesIds = [...new Set(pokemons.map(p => p.speciesId as number))];
@@ -1336,7 +1357,7 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
     const species   = speciesMap.get(poke.speciesId as number);
     const expGroup  = (species?.expGroup as string) || 'medium-fast';
     const baseStats = species?.baseStats as BaseStats | undefined;
-    const maxHp     = baseStats ? computeStats(baseStats, poke.level as number, poke.nature as string, poke.evs as BaseStats).hp : 0;
+    const maxHp     = baseStats ? computeStats(baseStats, poke.level as number, poke.nature as string, poke.evs as BaseStats, trainerStats).hp : 0;
 
     return {
       _id:                poke._id,
@@ -1364,5 +1385,5 @@ export async function getPlayerRoster(req: Request, res: Response): Promise<void
     .sort((a, b) => ((a.partySlot as number) ?? 99) - ((b.partySlot as number) ?? 99));
   const pc = enriched.filter(p => !p.isInParty);
 
-  sendOk(res, { party, pc, badges: user.badges ?? [] });
+  sendOk(res, { party, pc, badges, trainerStats, trainerIvUnspent });
 }

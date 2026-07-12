@@ -8,6 +8,7 @@ import { canEvolve } from '../lib/evolution';
 import { fetchSpecies } from '../lib/pokeapi';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 import { EV_STAT_DISPLAY_NAMES, applyEvGain } from '../lib/evData';
+import { getIvsForOwner } from '../lib/trainerIv';
 
 // ---------------------------------------------------------------------------
 // Item effect table
@@ -225,6 +226,7 @@ export async function useItem(req: Request, res: Response): Promise<void> {
   if (!pokemon) {
     return sendError(res, 404, 'Pokémon not found.');
   }
+  const ivs = await getIvsForOwner(userId, 'player');
 
   let message = '';
 
@@ -235,7 +237,7 @@ export async function useItem(req: Request, res: Response): Promise<void> {
 
     const species = await fetchSpeciesBaseStats(pokemon.speciesId, res);
     if (!species) return;
-    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
+    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
 
     if (pokemon.currentHp >= maxHp && effect.kind !== 'hp_full_cure') {
       return sendError(res, 400, 'That Pokémon is already at full HP.');
@@ -260,7 +262,7 @@ export async function useItem(req: Request, res: Response): Promise<void> {
 
     const species = await fetchSpeciesBaseStats(pokemon.speciesId, res);
     if (!species) return;
-    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
+    const maxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
 
     pokemon.currentHp = effect.amount === 'half'
       ? Math.max(1, Math.floor(maxHp / 2))
@@ -324,9 +326,9 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     const species = await fetchSpeciesBaseStats(pokemon.speciesId, res);
     if (!species) return;
 
-    const oldMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
+    const oldMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
     pokemon.level += 1;
-    const newMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
+    const newMaxHp = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
     // Current HP rises by the same delta as max HP — same as the main games
     pokemon.currentHp += (newMaxHp - oldMaxHp);
 
@@ -348,7 +350,7 @@ export async function useItem(req: Request, res: Response): Promise<void> {
         } catch { /* leave evolved null — name falls back below */ }
       }
       if (evolved?.baseStats) {
-        pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature, pokemon.evs).hp;
+        pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
       }
       const evolvedName = evolved ? (evolved.name as string) : 'a new form';
       message += ` ${pokemon.nickname ?? 'It'} evolved into ${evolvedName}!`;

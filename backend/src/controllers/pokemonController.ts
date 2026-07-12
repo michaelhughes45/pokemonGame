@@ -5,6 +5,7 @@ import { Npc } from '../models/Npc';
 import { PokedexCache } from '../models/PokedexCache';
 import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
+import { getIvsForOwner } from '../lib/trainerIv';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -60,7 +61,7 @@ type LeanPokemonDoc = {
 // enriched array that includes maxHp, speciesName, types, and partySlot.
 // partySlot is null for PC pokemon — callers can omit it from their response
 // shape if unneeded, but including it is harmless.
-async function enrichPokemonList(docs: LeanPokemonDoc[]) {
+async function enrichPokemonList(docs: LeanPokemonDoc[], ivs: BaseStats) {
   const speciesIds = docs.map(p => p.speciesId);
   const speciesEntries = await PokedexCache.find({ pokeApiId: { $in: speciesIds } })
     .select('pokeApiId name types baseStats')
@@ -69,7 +70,7 @@ async function enrichPokemonList(docs: LeanPokemonDoc[]) {
 
   return docs.map(p => {
     const species = speciesMap.get(p.speciesId);
-    const stats   = species ? computeStats(species.baseStats, p.level, p.nature, p.evs) : null;
+    const stats   = species ? computeStats(species.baseStats, p.level, p.nature, p.evs, ivs) : null;
     return {
       _id:             p._id,
       speciesId:       p.speciesId,
@@ -97,7 +98,8 @@ export async function getParty(req: Request, res: Response): Promise<void> {
     isInParty: true,
   }).lean().sort({ partySlot: 1 });
 
-  sendOk(res, await enrichPokemonList(partyDocs));
+  const ivs = await getIvsForOwner(req.user!.userId, 'player');
+  sendOk(res, await enrichPokemonList(partyDocs, ivs));
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +142,8 @@ export async function getPc(req: Request, res: Response): Promise<void> {
     isInParty: false,
   }).lean().sort({ createdAt: 1 });
 
-  sendOk(res, await enrichPokemonList(pcDocs));
+  const ivs = await getIvsForOwner(req.user!.userId, 'player');
+  sendOk(res, await enrichPokemonList(pcDocs, ivs));
 }
 
 // ---------------------------------------------------------------------------
@@ -240,10 +243,11 @@ export async function healParty(req: Request, res: Response): Promise<void> {
   const speciesIds = [...new Set(party.map(p => p.speciesId))];
   const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
+  const ivs        = await getIvsForOwner(userId, 'player');
 
   await Promise.all(party.map(poke => {
     const cache      = cacheMap.get(poke.speciesId);
-    const maxHp      = cache ? computeStats(cache.baseStats as any, poke.level, poke.nature, poke.evs).hp : poke.currentHp;
+    const maxHp      = cache ? computeStats(cache.baseStats as any, poke.level, poke.nature, poke.evs, ivs).hp : poke.currentHp;
     const fullMoves  = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
       .map(m => ({ ...m, currentPP: m.maxPP }));
     return Pokemon.updateOne(
@@ -338,7 +342,8 @@ export async function getPokemon(req: Request, res: Response): Promise<void> {
     name:      chainNameMap.get(step.speciesId) ?? null,
   }));
 
-  const stats = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs);
+  const ivs = await getIvsForOwner(pokemon.ownerId, pokemon.ownerType as string);
+  const stats = computeStats(species.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs);
 
   // Build reminderMoves: level-up moves learnable at or below the Pokémon's current
   // level, enriched with display data for the Move Reminder UI.

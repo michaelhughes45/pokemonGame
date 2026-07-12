@@ -2,6 +2,11 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { User } from '../models/User';
+import { BaseStats } from '../lib/statCalc';
+import { EV_STAT_DISPLAY_NAMES } from '../lib/evData';
+import { ivsFromSpread, getUnspentTrainerIv } from '../lib/trainerIv';
+
+const TRAINER_STAT_KEYS = Object.keys(EV_STAT_DISPLAY_NAMES) as (keyof BaseStats)[];
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -73,14 +78,52 @@ export async function getMe(req: Request, res: Response): Promise<void> {
     return sendError(res, 404, 'User not found');
   }
 
+  const badgeCount = user.badges?.length ?? 0;
+
   sendOk(res, {
     id:                user._id,
     username:          user.username,
     email:             user.email,
     role:              user.role,
-    trainerStats:      user.trainerStats,
-    trainerStatChoice: user.trainerStatChoice,
+    trainerStats:      ivsFromSpread(user.trainerStats),
+    trainerIvUnspent:  getUnspentTrainerIv(badgeCount, user.trainerStats),
     badges:            user.badges,
     money:             user.money,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/auth/trainer-stat  (requires verifyToken — applied per-route in auth.ts)
+// Spends `amount` of the player's earned-but-unspent Trainer IV points
+// (milestone 5.5) into a single stat. Points are locked in once spent — a DM
+// must reset the whole spread (DELETE on the dm router) to reclaim them.
+// Body: { stat: 'hp' | 'atk' | 'def' | 'spatk' | 'spdef' | 'speed', amount: number }
+// ---------------------------------------------------------------------------
+export async function allocateTrainerIv(req: Request, res: Response): Promise<void> {
+  const { stat, amount } = req.body as { stat?: string; amount?: number };
+
+  if (!stat || !TRAINER_STAT_KEYS.includes(stat as keyof BaseStats)) {
+    return sendError(res, 400, `stat must be one of: ${TRAINER_STAT_KEYS.map(k => EV_STAT_DISPLAY_NAMES[k]).join(', ')}`);
+  }
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount <= 0) {
+    return sendError(res, 400, 'amount must be a positive integer');
+  }
+
+  const user = await User.findById(req.user!.userId).select('badges trainerStats').lean();
+  if (!user) {
+    return sendError(res, 404, 'User not found');
+  }
+
+  const unspent = getUnspentTrainerIv(user.badges?.length ?? 0, user.trainerStats);
+  if (amount > unspent) {
+    return sendError(res, 400, `Only ${unspent} unspent IV point${unspent === 1 ? '' : 's'} available.`);
+  }
+
+  await User.updateOne({ _id: req.user!.userId }, { $inc: { [`trainerStats.${stat}`]: amount } });
+
+  const updated = await User.findById(req.user!.userId).select('badges trainerStats').lean();
+  sendOk(res, {
+    trainerStats:     ivsFromSpread(updated?.trainerStats),
+    trainerIvUnspent: getUnspentTrainerIv(updated?.badges?.length ?? 0, updated?.trainerStats),
   });
 }

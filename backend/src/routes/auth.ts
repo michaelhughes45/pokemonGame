@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { verifyToken } from '../middleware/auth';
-import { register, login, getMe } from '../controllers/authController';
+import { register, login, getMe, allocateTrainerIv } from '../controllers/authController';
 
 const router = Router();
 
@@ -12,5 +12,8 @@ router.post('/login',    login);
 
 // GET  /api/auth/me       — return the authenticated user's profile
 router.get('/me', verifyToken, getMe);
+
+// POST /api/auth/trainer-stat — spend unspent Trainer IV points into one stat
+router.post('/trainer-stat', verifyToken, allocateTrainerIv);
 
 export default router;

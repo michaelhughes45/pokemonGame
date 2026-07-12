@@ -42,8 +42,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }
 
+  // Re-fetches the current user without touching the token — for use after
+  // an action that changes something on the user document (e.g. picking a
+  // Trainer IV stat) so the UI reflects it without a full logout/login.
+  async function refreshUser() {
+    const savedToken = localStorage.getItem('token');
+    if (!savedToken) return;
+    const res = await axios.get(`${API}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${savedToken}` },
+    });
+    setUser(res.data.data);
+  }
+
   return (
-    <AuthContext.Provider value={{ token, user, login, logout, loading }}>
+    <AuthContext.Provider value={{ token, user, login, logout, refreshUser, loading }}>
       {children}
     </AuthContext.Provider>
   );

@@ -11,14 +11,16 @@ export type CachedAbility = { name: string; isHidden: boolean };
 // Capitalize the first character of a string. Used to format names for @smogon/calc.
 export const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
-// Zero-valued stat block in @smogon/calc's stat key format. Used as a fallback
-// when a Pokémon's base stats are unavailable.
-export const ZERO_STATS = { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 } as const;
-
 // Convert our stored EV spread (spatk/spdef/speed) to @smogon/calc's stat key
 // format (spa/spd/spe) so a Pokémon's real EVs feed into the damage formula.
 export function toCalcEvs(evs: BaseStats) {
   return { hp: evs.hp, atk: evs.atk, def: evs.def, spa: evs.spatk, spd: evs.spdef, spe: evs.speed };
+}
+
+// Same mapping for a Pokémon owner's Trainer IV spread (milestone 5.5) — the
+// only IV source in this project (no per-Pokémon IVs exist).
+export function toCalcIvs(ivs: BaseStats) {
+  return { hp: ivs.hp, atk: ivs.atk, def: ivs.def, spa: ivs.spatk, spd: ivs.spdef, spe: ivs.speed };
 }
 
 // Convert a PokeAPI slug to a display name. "ice-beam" → "Ice Beam"

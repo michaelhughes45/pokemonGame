@@ -12,8 +12,10 @@ type IUser = {
   email: string;
   passwordHash: string;
   role: 'player' | 'dm' | 'admin';
+  // Trainer IV points the player has allocated per stat (milestone 5.5).
+  // Total earned pool is derived from badges.length * 5 (see lib/trainerIv.ts)
+  // — never stored — this map only records what's already been spent.
   trainerStats: Map<string, number>;
-  trainerStatChoice: string | null;
   badges: BadgeEntry[];
   money: number;
   currentCampaignId: mongoose.Types.ObjectId | null;
@@ -26,7 +28,6 @@ const UserSchema = new Schema<IUser>(
     passwordHash:      { type: String, required: true },
     role:              { type: String, enum: ['player', 'dm', 'admin'], default: 'player' },
     trainerStats:      { type: Map, of: Number, default: {} },
-    trainerStatChoice: { type: String, default: null },
     badges: [
       {
         badgeId:   { type: String, required: true },

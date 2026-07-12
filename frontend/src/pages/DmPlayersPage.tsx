@@ -55,7 +55,15 @@ type BadgeCatalogEntry = {
 
 type CustomBadgeEntry = { badgeId: string; name: string; imageUrl: string; createdAt: string };
 
-type Roster = { party: RosterPokemon[]; pc: RosterPokemon[]; badges: PlayerBadge[] };
+type TrainerStats = Record<EvStatKey, number>;
+
+type Roster = {
+  party: RosterPokemon[];
+  pc: RosterPokemon[];
+  badges: PlayerBadge[];
+  trainerStats: TrainerStats;
+  trainerIvUnspent: number;
+};
 
 // Matches the native <select> style used throughout DmPage
 const selectClass =
@@ -389,6 +397,83 @@ function BadgeTile({ badge, onRevoke }: { badge: PlayerBadge; onRevoke?: () => v
 }
 
 // ---------------------------------------------------------------------------
+// TrainerStatCard
+// Shows a selected player's spent Trainer IV point spread (milestone 5.5)
+// plus their unspent pool, and lets the DM reset the whole spread so the
+// player can reallocate from scratch.
+// ---------------------------------------------------------------------------
+
+type TrainerStatCardProps = {
+  username:         string;
+  trainerStats:     TrainerStats;
+  trainerIvUnspent: number;
+  headers:          { Authorization: string };
+  onRefresh:        () => void;
+};
+
+function TrainerStatCard({ username, trainerStats, trainerIvUnspent, headers, onRefresh }: TrainerStatCardProps) {
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [message, setMessage] = useState('');
+
+  async function handleReset() {
+    setBusy(true);
+    try {
+      const res = await axios.delete(`${API}/api/dm/players/${username}/trainer-stat`, { headers });
+      setMessage(res.data.data?.message ?? 'Reset');
+      setConfirming(false);
+      onRefresh();
+    } catch (err) {
+      setMessage(apiError(err, 'Failed to reset'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const spent = EV_STAT_KEYS.reduce((sum, key) => sum + trainerStats[key], 0);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">
+          Trainer IV Points
+          <Badge variant="secondary" className="ml-2 text-xs">{trainerIvUnspent} unspent</Badge>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {spent === 0 ? (
+          <p className="text-sm text-muted-foreground">No points allocated yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+            {EV_STAT_KEYS.filter(key => trainerStats[key] > 0).map(key => (
+              <span key={key}>{EV_STAT_LABELS[key]}: {trainerStats[key]}</span>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-2">
+          {spent > 0 && !confirming && (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirming(true)}>
+              Reset
+            </Button>
+          )}
+          {confirming && (
+            <>
+              <Button size="sm" variant="destructive" disabled={busy} onClick={handleReset}>
+                Confirm Reset
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+            </>
+          )}
+        </div>
+        {message && <p className="text-xs text-muted-foreground">{message}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // BadgesCard
 // Shows a selected player's held badges and lets the DM award one from the
 // catalog + campaign custom badges, or revoke a held one.
@@ -718,6 +803,13 @@ export default function DmPlayersPage() {
           )}
           {roster && !rosterLoading && (
             <>
+              <TrainerStatCard
+                username={selectedUsername}
+                trainerStats={roster.trainerStats}
+                trainerIvUnspent={roster.trainerIvUnspent}
+                headers={headers}
+                onRefresh={refreshRoster}
+              />
               <BadgesCard
                 username={selectedUsername}
                 badges={roster.badges}

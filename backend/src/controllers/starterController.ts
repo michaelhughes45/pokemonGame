@@ -3,6 +3,7 @@ import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { fetchSpecies } from '../lib/pokeapi';
 import { computeStats, expForLevel, NATURES, ZERO_EVS } from '../lib/statCalc';
+import { getIvsForOwner } from '../lib/trainerIv';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -101,7 +102,8 @@ export async function pickStarter(req: Request, res: Response): Promise<void> {
   const gender: 'male' | 'female' | 'none' =
     gr === -1 ? 'none' : Math.random() < gr / 8 ? 'female' : 'male';
 
-  const currentHp = computeStats(cached.baseStats, level, nature, ZERO_EVS).hp;
+  const ivs = await getIvsForOwner(userId, 'player');
+  const currentHp = computeStats(cached.baseStats, level, nature, ZERO_EVS, ivs).hp;
 
   const pokemon = await Pokemon.create({
     speciesId,

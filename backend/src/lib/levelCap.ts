@@ -7,6 +7,7 @@ import { computeStats, expForLevel, BaseStats } from './statCalc';
 import { slugToDisplayName, pokeDisplayName } from './battleCalc';
 import { canEvolve } from './evolution';
 import { fetchSpecies } from './pokeapi';
+import { getIvsForOwner } from './trainerIv';
 
 export const BASE_LEVEL_CAP = 6;
 export const BADGE_LEVEL_BONUS = 3;
@@ -58,9 +59,10 @@ export async function applyLevelUpLoop(params: {
   expGroup: string;
   baseStats: BaseStats | undefined;
   evs: BaseStats;
+  ivs: BaseStats;
   cap: number;
 }): Promise<LevelUpLoopResult> {
-  const { displayName, exp, nature, expGroup, baseStats, evs, cap } = params;
+  const { displayName, exp, nature, expGroup, baseStats, evs, ivs, cap } = params;
   let level = params.level;
   let currentHp = params.currentHp;
   let speciesId = params.speciesId;
@@ -68,9 +70,9 @@ export async function applyLevelUpLoop(params: {
 
   while (level < cap && exp >= expForLevel(level + 1, expGroup)) {
     if (baseStats && currentHp > 0) {
-      const oldMaxHp = computeStats(baseStats, level, nature, evs).hp;
+      const oldMaxHp = computeStats(baseStats, level, nature, evs, ivs).hp;
       level += 1;
-      currentHp += computeStats(baseStats, level, nature, evs).hp - oldMaxHp;
+      currentHp += computeStats(baseStats, level, nature, evs, ivs).hp - oldMaxHp;
     } else {
       level += 1;
     }
@@ -85,7 +87,7 @@ export async function applyLevelUpLoop(params: {
           evolvedCache = (await PokedexCache.create(fetched)).toObject();
         } catch { /* skip */ }
       }
-      if (evolvedCache?.baseStats) currentHp = computeStats(evolvedCache.baseStats as BaseStats, level, nature, evs).hp;
+      if (evolvedCache?.baseStats) currentHp = computeStats(evolvedCache.baseStats as BaseStats, level, nature, evs, ivs).hp;
       events.push(`${displayName} evolved into ${evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form'}!`);
       speciesId = evolveIntoId;
     }
@@ -117,6 +119,7 @@ export async function unlockPendingLevelUpsForPlayer(
   const speciesIds = [...new Set(growable.map(p => p.speciesId))];
   const caches = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name expGroup baseStats').lean();
   const cacheMap = new Map(caches.map(c => [c.pokeApiId as number, c]));
+  const ivs = await getIvsForOwner(ownerId, 'player');
 
   let changedCount = 0;
   for (const poke of growable) {
@@ -134,6 +137,7 @@ export async function unlockPendingLevelUpsForPlayer(
       expGroup: (cache?.expGroup as string | undefined) ?? 'medium-fast',
       baseStats: cache?.baseStats as BaseStats | undefined,
       evs: poke.evs as BaseStats,
+      ivs,
       cap,
     });
 

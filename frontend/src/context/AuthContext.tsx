@@ -7,13 +7,15 @@ export type BadgeEntry = {
   awardedAt: string;
 };
 
+export type TrainerStats = { hp: number; atk: number; def: number; spatk: number; spdef: number; speed: number };
+
 export type User = {
   id: string;
   username: string;
   email: string;
   role: 'player' | 'dm' | 'admin';
-  trainerStats: Record<string, number>;
-  trainerStatChoice: string | null;
+  trainerStats: TrainerStats;
+  trainerIvUnspent: number;
   badges: BadgeEntry[];
   money: number;
 };
@@ -23,6 +25,7 @@ export type AuthContextType = {
   user: User | null;
   login: (token: string) => Promise<void>;
   logout: () => void;
+  refreshUser: () => Promise<void>;
   loading: boolean;
 };
 

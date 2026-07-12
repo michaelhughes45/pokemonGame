@@ -76,8 +76,19 @@ function HpBar({ current, max }: { current: number; max: number | null }) {
   );
 }
 
+// Same 6 stat keys the EV system uses — Trainer IV points (milestone 5.5) can
+// be freely split across any of them, one point at a time.
+const TRAINER_STAT_OPTIONS: { key: string; label: string }[] = [
+  { key: 'hp',    label: 'HP'      },
+  { key: 'atk',   label: 'Attack'  },
+  { key: 'def',   label: 'Defense' },
+  { key: 'spatk', label: 'Sp. Atk' },
+  { key: 'spdef', label: 'Sp. Def' },
+  { key: 'speed', label: 'Speed'   },
+];
+
 export default function DashboardPage() {
-  const { user, token, logout } = useAuth();
+  const { user, token, logout, refreshUser } = useAuth();
   const navigate = useNavigate();
 
   const [party, setParty]               = useState<PartyMember[]>([]);
@@ -85,6 +96,25 @@ export default function DashboardPage() {
   const [invites, setInvites]           = useState<PendingInvite[]>([]);
   const [inviteError, setInviteError]   = useState('');
   const [activeBattle, setActiveBattle] = useState<ActiveBattle | null>(null);
+  const [allocateBusy, setAllocateBusy]   = useState(false);
+  const [allocateError, setAllocateError] = useState('');
+
+  async function handleAllocateTrainerStat(stat: string) {
+    setAllocateBusy(true);
+    setAllocateError('');
+    try {
+      await axios.post(
+        `${API}/api/auth/trainer-stat`,
+        { stat, amount: 1 },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      await refreshUser();
+    } catch (err) {
+      setAllocateError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to allocate point') : 'Failed to allocate point');
+    } finally {
+      setAllocateBusy(false);
+    }
+  }
 
   function handleLogout() {
     logout();
@@ -255,9 +285,35 @@ export default function DashboardPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
-            <div className="flex justify-between text-sm">
-              <span className="text-muted-foreground">Trainer specialty</span>
-              <span>{user.trainerStatChoice ?? 'Not chosen yet'}</span>
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Trainer IV points</span>
+                <span>{user.trainerIvUnspent} unspent</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Earn 5 points per badge. Spend them on any stat — once spent, a point is
+                locked in unless your DM resets it.
+              </p>
+              <div className="flex flex-col gap-1">
+                {TRAINER_STAT_OPTIONS.map(opt => (
+                  <div key={opt.key} className="flex items-center justify-between text-sm">
+                    <span>{opt.label}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono">{user.trainerStats[opt.key as keyof typeof user.trainerStats]}</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={allocateBusy || user.trainerIvUnspent <= 0}
+                        onClick={() => handleAllocateTrainerStat(opt.key)}
+                        className="min-h-8 min-w-8 px-2"
+                      >
+                        +1
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {allocateError && <p className="text-xs text-destructive">{allocateError}</p>}
             </div>
             <div className="flex flex-col gap-1.5 text-sm">
               <div className="flex justify-between">

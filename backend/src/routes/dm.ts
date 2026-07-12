@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   deletePlayerStarter,
+  resetPlayerTrainerStat,
   givePlayerPokemon,
   givePlayerItem,
   getNpcs,
@@ -38,6 +39,7 @@ const router = Router();
 
 // --- Players ---
 router.delete('/players/:username/starter',   deletePlayerStarter);
+router.delete('/players/:username/trainer-stat', resetPlayerTrainerStat);
 router.post('/players/:username/pokemon',     givePlayerPokemon);
 router.get('/players/:username/roster',       getPlayerRoster);
 router.post('/players/:username/badges',      awardBadge);

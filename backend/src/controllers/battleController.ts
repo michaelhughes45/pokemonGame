@@ -7,12 +7,13 @@ import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { Npc } from '../models/Npc';
 import { Item } from '../models/Item';
-import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS } from '../lib/statCalc';
+import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smogon/calc';
 import { canEvolve } from '../lib/evolution';
 import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier } from '../lib/itemData';
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
+import { ivsFromSpread, getIvsForOwner } from '../lib/trainerIv';
 import {
   NO_TARGET_MOVE_IDS,
   getMoveTargetCategory,
@@ -46,8 +47,8 @@ import {
   applyStatStageEffects,
   accuracyStageMultiplier,
   cap,
-  ZERO_STATS,
   toCalcEvs,
+  toCalcIvs,
   appendToLog,
 } from '../lib/battleCalc';
 import {
@@ -183,7 +184,7 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
       return { moveId: m.moveId, currentPP: pp, maxPP: pp, ppUps: 0 };
     });
 
-    const stats = computeStats(species.baseStats as BaseStats, level, nature, ZERO_EVS);
+    const stats = computeStats(species.baseStats as BaseStats, level, nature, ZERO_EVS, ZERO_IVS);
     const wildPoke = await Pokemon.create({
       speciesId: species.pokeApiId, ownerId: new mongoose.Types.ObjectId(req.user!.userId),
       ownerType: 'wild', nickname: null, level,
@@ -309,11 +310,12 @@ async function resolveItemAction(entry: TurnQueueEntry): Promise<string[]> {
   const effect = BATTLE_ITEM_EFFECTS[itemId];
   if (!effect) return events;
   const targetId = targets[0];
-  const pokemon = await Pokemon.findById(targetId, 'nickname speciesId level nature currentHp statusCondition evs').lean();
+  const pokemon = await Pokemon.findById(targetId, 'ownerId ownerType nickname speciesId level nature currentHp statusCondition evs').lean();
   if (!pokemon) return events;
   const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId }, 'name baseStats').lean();
   const displayName = pokeDisplayName(pokemon, cache);
-  const maxHp = cache ? computeStats(cache.baseStats as BaseStats, pokemon.level, pokemon.nature, pokemon.evs as BaseStats).hp : pokemon.currentHp;
+  const ivs = await getIvsForOwner(pokemon.ownerId, pokemon.ownerType);
+  const maxHp = cache ? computeStats(cache.baseStats as BaseStats, pokemon.level, pokemon.nature, pokemon.evs as BaseStats, ivs).hp : pokemon.currentHp;
   const user = await User.findById(actorId, 'username').lean();
   const userName = user?.username ?? 'Trainer';
   const itemName = slugToDisplayName(itemId);
@@ -458,7 +460,8 @@ async function applySwitchOutAbilities(
     events.push(`${outName}'s Natural Cure! ${outName}'s status was cured!`);
   }
   if (abilitySlug === 'regenerator') {
-    const maxHp = computeStats(outCache.baseStats as BaseStats, outgoing.level as number, outgoing.nature as string, outgoing.evs as BaseStats).hp;
+    const ivs = await getIvsForOwner(outgoing.ownerId as mongoose.Types.ObjectId, outgoing.ownerType as string);
+    const maxHp = computeStats(outCache.baseStats as BaseStats, outgoing.level as number, outgoing.nature as string, outgoing.evs as BaseStats, ivs).hp;
     const currentHp = outgoing.currentHp as number;
     if (currentHp < maxHp) {
       const healAmt = Math.max(1, Math.floor(maxHp / 3));
@@ -478,7 +481,7 @@ async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mong
   battle.markModified('consecutiveMoves');
   delete (battle.lockedMoves as Record<string, unknown>)[outgoingId.toString()];
   battle.markModified('lockedMoves');
-  const outgoing = await Pokemon.findById(outgoingId, 'nickname speciesId hasHiddenAbility statusCondition currentHp nature level evs').lean();
+  const outgoing = await Pokemon.findById(outgoingId, 'ownerId ownerType nickname speciesId hasHiddenAbility statusCondition currentHp nature level evs').lean();
   const outCache = outgoing ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name abilities baseStats').lean() : null;
   const outName = pokeDisplayName(outgoing, outCache);
   const events = [`${outName} was recalled!`];
@@ -544,7 +547,7 @@ async function resolveCatchAction(battle: HydratedDocument<IBattle>, entry: Turn
   const userName = user?.username ?? 'Trainer';
   events.push(`${userName} threw a ${slugToDisplayName(itemId)} at ${displayName}!`);
 
-  const maxHp = cache ? computeStats(cache.baseStats as BaseStats, wildPoke.level, wildPoke.nature, wildPoke.evs as BaseStats).hp : wildPoke.currentHp;
+  const maxHp = cache ? computeStats(cache.baseStats as BaseStats, wildPoke.level, wildPoke.nature, wildPoke.evs as BaseStats, ZERO_IVS).hp : wildPoke.currentHp;
   let caught = false;
 
   if (itemId === 'master-ball') {
@@ -661,7 +664,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
 }
 
 async function checkConfusion(pokemonId: mongoose.Types.ObjectId): Promise<{ hitSelf: boolean; events: string[] }> {
-  const poke = await Pokemon.findById(pokemonId, 'nickname speciesId level nature currentHp volatileStatus hasHiddenAbility evs').lean();
+  const poke = await Pokemon.findById(pokemonId, 'ownerId ownerType nickname speciesId level nature currentHp volatileStatus hasHiddenAbility evs').lean();
   if (!poke) return { hitSelf: false, events: [] };
   const confIdx = (poke.volatileStatus ?? []).findIndex(v => v.condition === 'confusion');
   if (confIdx === -1) return { hitSelf: false, events: [] };
@@ -685,7 +688,8 @@ async function checkConfusion(pokemonId: mongoose.Types.ObjectId): Promise<{ hit
 
   const events: string[] = [`${displayName} is confused...`];
   if (Math.random() < 0.5 && cache) {
-    const stats  = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats);
+    const ivs    = await getIvsForOwner(poke.ownerId, poke.ownerType);
+    const stats  = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ivs);
     const damage = Math.max(1, Math.floor(((2 * poke.level / 5 + 2) * 40 * stats.atk / stats.def) / 50 + 2));
     const newHp  = Math.max(0, poke.currentHp - damage);
     await Pokemon.updateOne({ _id: pokemonId }, { $set: { currentHp: newHp } });
@@ -745,6 +749,10 @@ async function resolveMove(
   if (!attacker || !target) return { damage: 0, isCrit: false, events: ['(Pokémon not found during move resolution)'] };
   const [attackerCache, targetCache] = await Promise.all([PokedexCache.findOne({ pokeApiId: attacker.speciesId }).lean(), PokedexCache.findOne({ pokeApiId: target.speciesId }).lean()]);
   if (!attackerCache || !targetCache) return { damage: 0, isCrit: false, events: ['(Species cache missing during move resolution)'] };
+  const [attackerIvs, targetIvs] = await Promise.all([
+    getIvsForOwner(attacker.ownerId, attacker.ownerType),
+    getIvsForOwner(target.ownerId, target.ownerType),
+  ]);
 
   const attackerName = pokeDisplayName(attacker, attackerCache);
   const targetName   = pokeDisplayName(target, targetCache);
@@ -770,7 +778,7 @@ async function resolveMove(
   if (attackerAbility) {
     const boostedType = PINCH_ABILITIES[attackerAbility.name];
     if (boostedType && moveData.type?.toLowerCase() === boostedType) {
-      const maxHp = computeStats(attackerCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats).hp;
+      const maxHp = computeStats(attackerCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats, attackerIvs).hp;
       if (attacker.currentHp <= Math.floor(maxHp / 3)) pinchEvents.push(`${attackerName}'s ${attackerAbilityName}!`);
     }
   }
@@ -778,8 +786,8 @@ async function resolveMove(
   let damage = 0; let effectNote = '';
   try {
     const toBoosts = (s?: StatStages) => s ? { atk: s.atk, def: s.def, spa: s.spa, spd: s.spd, spe: s.spe } : undefined;
-    const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: ZERO_STATS, curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any });
-    const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: ZERO_STATS, curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any });
+    const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any });
+    const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: toCalcIvs(targetIvs), curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any });
     const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName, powerOverride ? { overrides: { basePower: powerOverride } } as any : undefined), new Field({ weather: toCalcWeather(weather) as any }));
     const rolls  = Array.isArray(result.damage) ? result.damage : [result.damage];
     const picked = rolls[Math.floor(Math.random() * rolls.length)];
@@ -841,11 +849,12 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
 
   const campaign  = await Campaign.findById(battle.campaignId, 'levelCapEnabled').lean();
-  const owners    = await User.find({ _id: { $in: playerUserIds } }, 'badges').lean();
+  const owners    = await User.find({ _id: { $in: playerUserIds } }, 'badges trainerStats').lean();
   const capMap    = new Map(owners.map(u => [
     u._id.toString(),
     getEffectiveLevelCap(u.badges?.length ?? 0, campaign?.levelCapEnabled ?? true),
   ]));
+  const ivsMap    = new Map(owners.map(u => [u._id.toString(), ivsFromSpread(u.trainerStats)]));
 
   const totalEvYield = faintedEnemies.reduce((acc, p) => {
     const yieldStats = cacheMap.get(p.speciesId)?.evYield as BaseStats | undefined;
@@ -870,6 +879,7 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
       const baseStats = cache?.baseStats as BaseStats | undefined;
       const overrides = (poke.evolutionOverrides ?? []) as { condition: string; value: string }[];
       const cap       = capMap.get(playerEntry.userId.toString()) ?? 100;
+      const ivs       = ivsMap.get(playerEntry.userId.toString()) ?? ZERO_IVS;
 
       const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, events: levelEvents, cappedOut } = await applyLevelUpLoop({
         displayName,
@@ -882,6 +892,7 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
         expGroup,
         baseStats,
         evs: newEvs,
+        ivs,
         cap,
       });
       events.push(...levelEvents);
@@ -954,17 +965,24 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
   ].filter((id): id is mongoose.Types.ObjectId => id != null);
 
   if (allActiveIds.length > 0) {
-    const activePokemons = await Pokemon.find({ _id: { $in: allActiveIds }, currentHp: { $gt: 0 } }, 'speciesId level nature currentHp statusCondition statusCounter nickname volatileStatus hasHiddenAbility evs').lean();
+    const activePokemons = await Pokemon.find({ _id: { $in: allActiveIds }, currentHp: { $gt: 0 } }, 'ownerId ownerType speciesId level nature currentHp statusCondition statusCounter nickname volatileStatus hasHiddenAbility evs').lean();
     const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
     const caches     = speciesIds.length > 0 ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats types abilities').lean() : [];
     const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
     const runningHp  = new Map(activePokemons.map(p => [p._id.toString(), p.currentHp]));
     const allEvents: string[] = [];
 
+    // Batch the owners' Trainer IV spreads once per round rather than per Pokémon.
+    const playerOwnerIds = [...new Set(activePokemons.filter(p => p.ownerType === 'player').map(p => (p.ownerId as mongoose.Types.ObjectId).toString()))];
+    const ivOwners  = playerOwnerIds.length > 0 ? await User.find({ _id: { $in: playerOwnerIds } }, 'trainerStats').lean() : [];
+    const ivsMap    = new Map(ivOwners.map(u => [u._id.toString(), ivsFromSpread(u.trainerStats)]));
+    const pokeIvs   = (poke: { ownerId: mongoose.Types.ObjectId; ownerType: string }): BaseStats =>
+      poke.ownerType === 'player' ? (ivsMap.get(poke.ownerId.toString()) ?? ZERO_IVS) : ZERO_IVS;
+
     for (const poke of activePokemons) {
       if (poke.statusCondition !== 'burn' && poke.statusCondition !== 'poison' && poke.statusCondition !== 'toxic') continue;
       const cache = cacheMap.get(poke.speciesId); if (!cache) continue;
-      const maxHp = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp;
+      const maxHp = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).hp;
       const pokeName = pokeDisplayName(poke, cache);
       const abilitySlugForStatus = resolveAbilitySlug((cache.abilities as CachedAbility[]) ?? [], poke.hasHiddenAbility as boolean);
       if ((poke.statusCondition === 'poison' || poke.statusCondition === 'toxic') && abilitySlugForStatus === 'poison-heal') {
@@ -991,7 +1009,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
         const isRoosting = ((poke.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'roosting');
         const effectiveTypes = isRoosting ? ((cache.types as string[]) ?? []).filter(t => t !== 'flying') : (cache.types as string[]) ?? [];
         if (effectiveTypes.some(t => immuneSet.has(t))) continue;
-        const maxHp = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp;
+        const maxHp = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).hp;
         const damage = Math.max(1, Math.floor(maxHp / 16));
         const currentHp = runningHp.get(poke._id.toString()) ?? poke.currentHp;
         const newHp = Math.max(0, currentHp - damage);
@@ -1012,7 +1030,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       const abilitySlug = resolveAbilitySlug((cache.abilities as CachedAbility[]) ?? [], poke.hasHiddenAbility as boolean);
       if (!abilitySlug) continue;
       const pokeName = pokeDisplayName(poke, cache);
-      const maxHp    = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp;
+      const maxHp    = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).hp;
       const curHp    = runningHp.get(poke._id.toString()) ?? poke.currentHp;
 
       if (abilitySlug === 'speed-boost') { allEvents.push(...applyStatStageEffects(stageMap, poke._id.toString(), [{ stat: 'spe', stages: 1, target: 'self' }], pokeName, abilitySlug)); battle.markModified('statStages'); }
@@ -1037,7 +1055,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 
     for (const poke of activePokemons) {
       const cache = cacheMap.get(poke.speciesId); if (!cache) continue;
-      const maxHp   = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp;
+      const maxHp   = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).hp;
       const pokeName = pokeDisplayName(poke, cache);
       const pokeId   = poke._id.toString();
       const volStatus = (poke.volatileStatus as Array<{ condition: string }>) ?? [];
@@ -1058,7 +1076,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
           const recipient = activePokemons.find(p => p._id.toString() === recipientId);
           const rCache    = recipient ? cacheMap.get(recipient.speciesId) : null;
           if (recipient && rCache) {
-            const rMaxHp  = computeStats(rCache.baseStats as BaseStats, recipient.level, recipient.nature, recipient.evs as BaseStats).hp;
+            const rMaxHp  = computeStats(rCache.baseStats as BaseStats, recipient.level, recipient.nature, recipient.evs as BaseStats, pokeIvs(recipient)).hp;
             const rCurHp  = runningHp.get(recipientId) ?? recipient.currentHp;
             const restore = Math.min(drain, rMaxHp - rCurHp);
             if (restore > 0) { const rNewHp = rCurHp + restore; runningHp.set(recipientId, rNewHp); await Pokemon.updateOne({ _id: recipient._id }, { $set: { currentHp: rNewHp } }); allEvents.push(`${pokeDisplayName(recipient, rCache)} absorbed the drained energy! (+${restore} HP)`); }
@@ -1100,17 +1118,26 @@ export async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promis
   if (totalActors === 0 || battle.turnQueue.length < totalActors) return;
 
   const pokemonIds = battle.turnQueue.map(e => e.activePokemonId);
-  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'speciesId level nature statusCondition hasHiddenAbility evs').lean();
+  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'ownerId ownerType speciesId level nature statusCondition hasHiddenAbility evs').lean();
   const speciesIds = [...new Set(pokemons.map(p => p.speciesId))];
   const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats abilities').lean();
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
   const pokemonMap = new Map(pokemons.map(p => [p._id.toString(), p]));
 
+  // Batch the owners' Trainer IV spreads once per call rather than per Pokémon —
+  // this is turn-order speed, so a player who chose Speed needs this wired for
+  // the feature to matter in battle.
+  const playerOwnerIds = [...new Set(pokemons.filter(p => p.ownerType === 'player').map(p => (p.ownerId as mongoose.Types.ObjectId).toString()))];
+  const ivOwners = playerOwnerIds.length > 0 ? await User.find({ _id: { $in: playerOwnerIds } }, 'trainerStats').lean() : [];
+  const ivsMap   = new Map(ivOwners.map(u => [u._id.toString(), ivsFromSpread(u.trainerStats)]));
+  const pokeIvs  = (poke: { ownerId: mongoose.Types.ObjectId; ownerType: string }): BaseStats =>
+    poke.ownerType === 'player' ? (ivsMap.get(poke.ownerId.toString()) ?? ZERO_IVS) : ZERO_IVS;
+
   const withSpeed = battle.turnQueue.map(entry => {
     const poke  = pokemonMap.get(entry.activePokemonId.toString());
     const cache = poke ? cacheMap.get(poke.speciesId) : null;
     const abilitySlug = poke && cache ? resolveAbilitySlug((cache.abilities as CachedAbility[]) ?? [], (poke.hasHiddenAbility as boolean) ?? false) : null;
-    const rawSpeed = poke && cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).speed : 0;
+    const rawSpeed = poke && cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).speed : 0;
     const afterParalysis = poke?.statusCondition === 'paralysis' ? Math.floor(rawSpeed * 0.5) : rawSpeed;
     const weatherMatches = abilitySlug != null && (WEATHER_SPEED_DOUBLERS[abilitySlug] ?? []).includes(battle.weather ?? '');
     const speed = weatherMatches ? afterParalysis * 2 : afterParalysis;
@@ -1176,9 +1203,10 @@ async function resolveWeatherMove(
 async function resolveSelfTargetMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, moveEvents: string[],
 ): Promise<void> {
-  const attacker = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs').lean();
+  const attacker = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs').lean();
   const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats abilities types').lean() : null;
   const attackerName = pokeDisplayName(attacker, atkCache);
+  const attackerIvs = attacker ? await getIvsForOwner(attacker.ownerId, attacker.ownerType) : ZERO_IVS;
 
   const moveMeta = attacker ? await fetchMoveMeta(attacker.speciesId, entry.moveId) : undefined;
   if (moveMeta?.accuracy != null && Math.random() >= moveMeta.accuracy / 100) {
@@ -1223,7 +1251,7 @@ async function resolveSelfTargetMove(
 
     const recoveryEffect = RECOVERY_MOVES[entry.moveId];
     if (recoveryEffect && attacker && atkCache?.baseStats) {
-      const maxHp     = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats).hp;
+      const maxHp     = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats, attackerIvs).hp;
       const currentHp = attacker.currentHp as number;
       if (recoveryEffect.type === 'rest') {
         await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: maxHp, statusCondition: 'sleep', statusCounter: 2 } });
@@ -1262,7 +1290,7 @@ async function resolveSelfTargetMove(
     }
 
     if (entry.moveId === 'belly-drum' && attacker && atkCache?.baseStats) {
-      const maxHp  = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats).hp;
+      const maxHp  = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats, attackerIvs).hp;
       const curHp  = attacker.currentHp as number;
       const costHp = Math.floor(maxHp / 2);
       if (curHp <= costHp) {
@@ -1318,7 +1346,7 @@ async function resolveDamagingMove(
   }
 
   if (entry.moveId === 'curse') {
-    const atkDoc      = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId currentHp nature level hasHiddenAbility evs').lean();
+    const atkDoc      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level hasHiddenAbility evs').lean();
     const atkDocCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name baseStats types abilities').lean() : null;
     const atkName     = pokeDisplayName(atkDoc, atkDocCache);
     moveEvents.push(`${atkName} used Curse!`);
@@ -1332,7 +1360,8 @@ async function resolveDamagingMove(
         if (((tgtPoke?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'cursed')) {
           moveEvents.push(`${tgtName} is already cursed!`);
         } else {
-          const maxHp  = computeStats(atkDocCache.baseStats as BaseStats, atkDoc.level, atkDoc.nature, atkDoc.evs as BaseStats).hp;
+          const atkIvs = await getIvsForOwner(atkDoc.ownerId, atkDoc.ownerType);
+          const maxHp  = computeStats(atkDocCache.baseStats as BaseStats, atkDoc.level, atkDoc.nature, atkDoc.evs as BaseStats, atkIvs).hp;
           const newHp  = Math.max(0, (atkDoc.currentHp as number) - Math.floor(maxHp / 2));
           await Promise.all([
             Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newHp } }),
@@ -1359,9 +1388,10 @@ async function resolveDamagingMove(
   const drainEffect     = DRAIN_MOVES[entry.moveId];
   const selfStatEffects = (STAT_STAGE_MOVES[entry.moveId] ?? []).filter(e => e.target === 'self');
 
-  type AtkSnapshot = { currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats };
-  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs').lean() as AtkSnapshot | null;
+  type AtkSnapshot = { ownerId: mongoose.Types.ObjectId; ownerType: string; currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats };
+  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs').lean() as AtkSnapshot | null;
   const atkSnapCache = atkSnap ? await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'name baseStats abilities').lean() : null;
+  const atkIvs       = atkSnap ? await getIvsForOwner(atkSnap.ownerId, atkSnap.ownerType) : ZERO_IVS;
 
   // Two-turn moves (Fly, Dig, Dive, Bounce, Sky Attack, Solar Beam) that hit a foe: charge on the
   // first turn (no accuracy roll, no damage), then release on the second. Geomancy is the only
@@ -1440,11 +1470,12 @@ async function resolveDamagingMove(
     }
 
     if (entry.moveId === 'pain-split' && atkSnap && atkSnapCache?.baseStats) {
-      const tgt      = await Pokemon.findById(targetId, 'currentHp nickname speciesId level nature evs').lean();
+      const tgt      = await Pokemon.findById(targetId, 'ownerId ownerType currentHp nickname speciesId level nature evs').lean();
       const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name baseStats').lean() : null;
       if (tgt && tgtCache?.baseStats) {
-        const atkMaxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs).hp;
-        const tgtMaxHp = computeStats(tgtCache.baseStats as BaseStats, (tgt as any).level, (tgt as any).nature, (tgt as any).evs as BaseStats).hp;
+        const tgtIvs   = await getIvsForOwner((tgt as any).ownerId, (tgt as any).ownerType);
+        const atkMaxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp;
+        const tgtMaxHp = computeStats(tgtCache.baseStats as BaseStats, (tgt as any).level, (tgt as any).nature, (tgt as any).evs as BaseStats, tgtIvs).hp;
         const average  = Math.floor((atkSnap.currentHp + (targetHpMap.get(targetId) ?? (tgt as any).currentHp)) / 2);
         const newAtkHp = Math.min(atkMaxHp, average); const newTgtHp = Math.min(tgtMaxHp, average);
         await Promise.all([Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newAtkHp } }), Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newTgtHp } })]);
@@ -1500,7 +1531,7 @@ async function resolveDamagingMove(
             moveEvents.push(...applyStatStageEffects(stageMap, entry.activePokemonId.toString(), [{ stat: 'def', stages: -2, target: 'self' }], atkName, attackerAbilitySlug));
             battle.markModified('statStages');
           } else if (protectCondition === 'protecting-spiky-shield' && atkSnapCache.baseStats) {
-            const maxHp   = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs).hp;
+            const maxHp   = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp;
             const chipDmg = Math.max(1, Math.floor(maxHp / 8));
             const newHp   = Math.max(0, atkSnap.currentHp - chipDmg);
             await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newHp } });
@@ -1584,7 +1615,7 @@ async function resolveDamagingMove(
       const atkName = pokeDisplayName(atkSnap, atkSnapCache);
       let recoilDmg: number;
       if (recoilEffect.type === 'damage') { recoilDmg = Math.max(1, Math.floor(totalDamage * recoilEffect.fraction)); }
-      else { const maxHp = atkSnapCache.baseStats ? computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs).hp : 1; recoilDmg = Math.max(1, Math.floor(maxHp * recoilEffect.fraction)); }
+      else { const maxHp = atkSnapCache.baseStats ? computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp : 1; recoilDmg = Math.max(1, Math.floor(maxHp * recoilEffect.fraction)); }
       const newAtkHp = Math.max(0, atkSnap.currentHp - recoilDmg);
       await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newAtkHp } });
       atkSnap.currentHp = newAtkHp;
@@ -1592,7 +1623,7 @@ async function resolveDamagingMove(
     }
 
     if (drainEffect && totalDamage > 0 && atkSnap && atkSnapCache) {
-      const maxHp     = atkSnapCache.baseStats ? computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs).hp : 0;
+      const maxHp     = atkSnapCache.baseStats ? computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp : 0;
       const restoreAmt = Math.max(1, Math.floor(totalDamage * drainEffect.fraction));
       const newAtkHp   = Math.min(maxHp, atkSnap.currentHp + restoreAmt);
       const restored   = newAtkHp - atkSnap.currentHp;
@@ -1619,7 +1650,7 @@ async function resolveDamagingMove(
           const atkId   = entry.activePokemonId;
           if (defAbilitySlug === 'rough-skin' || defAbilitySlug === 'iron-barbs') {
             if (atkSnap && atkSnapCache?.baseStats) {
-              const maxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs).hp;
+              const maxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp;
               const dmg   = Math.max(1, Math.floor(maxHp / 8));
               const newHp = Math.max(0, atkSnap.currentHp - dmg);
               await Pokemon.updateOne({ _id: atkId }, { $set: { currentHp: newHp } });
@@ -2006,7 +2037,7 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
   ].filter((pid): pid is mongoose.Types.ObjectId => pid != null);
 
   const activePokemons = allActivePokemonIds.length > 0
-    ? await Pokemon.find({ _id: { $in: allActivePokemonIds } }, 'nickname speciesId currentHp level nature statusCondition volatileStatus moves evs').lean()
+    ? await Pokemon.find({ _id: { $in: allActivePokemonIds } }, 'ownerId ownerType nickname speciesId currentHp level nature statusCondition volatileStatus moves evs').lean()
     : [];
 
   const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
@@ -2018,13 +2049,20 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
   const stageMap   = (battle.statStages ?? {}) as Record<string, StatStages>;
 
+  // Batch the owners' Trainer IV spreads once per poll rather than per Pokémon.
+  const playerOwnerIds = [...new Set(activePokemons.filter(p => p.ownerType === 'player').map(p => (p.ownerId as mongoose.Types.ObjectId).toString()))];
+  const ivOwners = playerOwnerIds.length > 0 ? await User.find({ _id: { $in: playerOwnerIds } }, 'trainerStats').lean() : [];
+  const ivsMap   = new Map(ivOwners.map(u => [u._id.toString(), ivsFromSpread(u.trainerStats)]));
+  const pokeIvs  = (poke: { ownerId: mongoose.Types.ObjectId; ownerType: string }): BaseStats =>
+    poke.ownerType === 'player' ? (ivsMap.get(poke.ownerId.toString()) ?? ZERO_IVS) : ZERO_IVS;
+
   const buildInfo = (pokemonId: mongoose.Types.ObjectId | null) => {
     if (!pokemonId) return null;
     const poke = pokemonMap.get(pokemonId.toString());
     if (!poke) return null;
     const cache       = cacheMap.get(poke.speciesId);
     const speciesName = cache?.name ?? `#${poke.speciesId}`;
-    const maxHp       = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp : null;
+    const maxHp       = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).hp : null;
     return {
       _id:             poke._id.toString(),
       name:            poke.nickname ?? speciesName,
@@ -2252,14 +2290,16 @@ async function estimateDamage(
   targetCache: { name: unknown },
   targetAbilitySlug: string | null,
   weather: string | null,
+  attackerIvs: BaseStats = ZERO_IVS,
+  targetIvs: BaseStats = ZERO_IVS,
 ): Promise<number> {
   try {
     const calcAtk = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), {
-      level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs), ivs: ZERO_STATS,
+      level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs), ivs: toCalcIvs(attackerIvs),
       curHP: attacker.currentHp, ability: attackerAbilitySlug ? slugToDisplayName(attackerAbilitySlug) as any : undefined,
     });
     const calcTgt = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string), {
-      level: target.level, nature: cap(target.nature) as any, evs: toCalcEvs(target.evs), ivs: ZERO_STATS,
+      level: target.level, nature: cap(target.nature) as any, evs: toCalcEvs(target.evs), ivs: toCalcIvs(targetIvs),
       curHP: target.currentHp, ability: targetAbilitySlug ? slugToDisplayName(targetAbilitySlug) as any : undefined,
     });
     const result = calculate(GEN9, calcAtk, calcTgt, new CalcMove(GEN9, slugToDisplayName(moveId)), new Field({ weather: toCalcWeather(weather as any) as any }));
@@ -2303,7 +2343,7 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
 
     if (strategy === 'defensive') {
       const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'baseStats').lean();
-      const maxHp = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats).hp : poke.currentHp;
+      const maxHp = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ZERO_IVS).hp : poke.currentHp;
 
       if (poke.currentHp < Math.floor(maxHp * 0.3)) {
         const healItem = await Item.findOne({ ownerId: actorObjId, ownerType: 'npc', pocket: 'healing', quantity: { $gt: 0 } }).lean();
@@ -2334,6 +2374,13 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
         : [];
       const cacheBySpecies = new Map(tCaches.map(c => [c.pokeApiId as number, c]));
 
+      // NPC/wild attacker never carries a Trainer IV bonus, but its player targets do —
+      // batch the owners once per NPC decision (keyed via playerSide, no extra Pokemon field needed).
+      const pokeIdToUserId = new Map(battle.playerSide.filter(e => e.activePokemonId != null).map(e => [e.activePokemonId!.toString(), e.userId.toString()]));
+      const targetUserIds  = [...new Set(targetPokes.map(t => pokeIdToUserId.get(t._id.toString())).filter((id): id is string => !!id))];
+      const targetOwners   = targetUserIds.length > 0 ? await User.find({ _id: { $in: targetUserIds } }, 'trainerStats').lean() : [];
+      const targetIvsMap   = new Map(targetOwners.map(u => [u._id.toString(), ivsFromSpread(u.trainerStats)]));
+
       let bestScore = -1;
       for (const mv of movesWithPP) {
         if (NO_TARGET_MOVE_IDS.has(mv.moveId)) continue;
@@ -2341,7 +2388,8 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
           const tCache = cacheBySpecies.get(tgt.speciesId);
           if (!tCache) continue;
           const tAbility = resolveAbilitySlug(tCache.abilities as CachedAbility[], tgt.hasHiddenAbility ?? false);
-          const score = await estimateDamage(poke, atkCache ?? { name: poke.speciesId }, atkAbility, mv.moveId, tgt, tCache, tAbility, battle.weather as string | null);
+          const targetIvs = targetIvsMap.get(pokeIdToUserId.get(tgt._id.toString()) ?? '') ?? ZERO_IVS;
+          const score = await estimateDamage(poke, atkCache ?? { name: poke.speciesId }, atkAbility, mv.moveId, tgt, tCache, tAbility, battle.weather as string | null, ZERO_IVS, targetIvs);
           if (score > bestScore) { bestScore = score; chosenMoveId = mv.moveId; }
         }
       }
