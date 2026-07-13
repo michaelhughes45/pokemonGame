@@ -998,6 +998,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
   const [loadingData,    setLoadingData]    = useState(true);
   const [selectedPlayers, setSelectedPlayers] = useState<Set<string>>(new Set());
   const [selectedNpcs,   setSelectedNpcs]   = useState<Set<string>>(new Set());
+  const [selectedEnemyPlayers, setSelectedEnemyPlayers] = useState<Set<string>>(new Set());
   const [battleType,     setBattleType]     = useState<'pve' | 'wild' | 'pvp'>('pve');
   const [limit,          setLimit]          = useState('');
   const [loading,        setLoading]        = useState(false);
@@ -1009,6 +1010,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
   const [wildLevel,          setWildLevel]          = useState('');
   const [speciesQuery,       setSpeciesQuery]       = useState('');
   const [speciesLookupLoading, setSpeciesLookupLoading] = useState(false);
+  const [moneyReward,       setMoneyReward]        = useState('');
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -1030,6 +1032,28 @@ function CreateBattleCard({ token }: { token: string | null }) {
     setSelectedPlayers(prev => {
       const next = new Set(prev);
       if (next.has(id)) { next.delete(id); } else { next.add(id); }
+      return next;
+    });
+    // A player can only be on one side of a pvp battle — picking them for Team A
+    // automatically clears them from Team B.
+    setSelectedEnemyPlayers(prev => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleEnemyPlayer(id: string) {
+    setSelectedEnemyPlayers(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) { next.delete(id); } else { next.add(id); }
+      return next;
+    });
+    setSelectedPlayers(prev => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
       return next;
     });
   }
@@ -1090,16 +1114,32 @@ function CreateBattleCard({ token }: { token: string | null }) {
         return;
       }
     }
+    if (battleType === 'pvp' && selectedEnemyPlayers.size === 0) {
+      setError('Select at least one player for the opposing team.');
+      return;
+    }
+    if (moneyReward.trim() !== '') {
+      const reward = Number(moneyReward);
+      if (!Number.isInteger(reward) || reward < 0) {
+        setError('Money reward must be a non-negative whole number.');
+        return;
+      }
+    }
     setLoading(true);
     try {
       const body: Record<string, unknown> = {
         type:      battleType,
         playerIds: Array.from(selectedPlayers),
-        npcIds:    battleType === 'wild' ? [] : Array.from(selectedNpcs),
+        npcIds:    battleType === 'pve' ? Array.from(selectedNpcs) : [],
       };
       if (limit.trim() !== '') body.playerPokemonLimit = Number(limit);
       if (battleType === 'wild') {
         body.wildPokemon = { speciesId: wildSpeciesId, level: Number(wildLevel) };
+      } else if (battleType === 'pvp') {
+        body.enemyPlayerIds = Array.from(selectedEnemyPlayers);
+      }
+      if (battleType === 'pve' && moneyReward.trim() !== '') {
+        body.moneyReward = Number(moneyReward);
       }
 
       const res = await axios.post(`${API}/api/battles`, body, { headers });
@@ -1129,13 +1169,19 @@ function CreateBattleCard({ token }: { token: string | null }) {
 
             {/* Player checkboxes */}
             <div className="flex flex-col gap-1.5">
-              <Label>Players</Label>
+              <Label>{battleType === 'pvp' ? 'Team A' : 'Players'}</Label>
               <div className="flex flex-col gap-2">
                 {players.map(p => (
-                  <label key={p._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
+                  <label
+                    key={p._id}
+                    className={`flex items-center gap-2 text-sm min-h-11 ${
+                      battleType === 'pvp' && selectedEnemyPlayers.has(p._id) ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
+                    }`}
+                  >
                     <input
                       type="checkbox"
                       checked={selectedPlayers.has(p._id)}
+                      disabled={battleType === 'pvp' && selectedEnemyPlayers.has(p._id)}
                       onChange={() => togglePlayer(p._id)}
                       className="h-4 w-4"
                     />
@@ -1144,6 +1190,33 @@ function CreateBattleCard({ token }: { token: string | null }) {
                 ))}
               </div>
             </div>
+
+            {/* Team B checkboxes (pvp only) */}
+            {battleType === 'pvp' && (
+              <div className="flex flex-col gap-1.5">
+                <Label>Team B</Label>
+                <p className="text-xs text-muted-foreground">A player can only be on one side.</p>
+                <div className="flex flex-col gap-2">
+                  {players.map(p => (
+                    <label
+                      key={p._id}
+                      className={`flex items-center gap-2 text-sm min-h-11 ${
+                        selectedPlayers.has(p._id) ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedEnemyPlayers.has(p._id)}
+                        disabled={selectedPlayers.has(p._id)}
+                        onChange={() => toggleEnemyPlayer(p._id)}
+                        className="h-4 w-4"
+                      />
+                      {p.username}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* NPC checkboxes (PvE) or wild Pokémon picker */}
             {battleType === 'wild' ? (
@@ -1197,7 +1270,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
                 </div>
               </div>
             ) : (
-              npcs.length > 0 && (
+              battleType === 'pve' && npcs.length > 0 && (
                 <div className="flex flex-col gap-1.5">
                   <Label>NPCs</Label>
                   <div className="flex flex-col gap-2">
@@ -1237,7 +1310,9 @@ function CreateBattleCard({ token }: { token: string | null }) {
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="battle-limit">
                 Pokémon limit per player{' '}
-                <span className="text-muted-foreground font-normal">(optional — blank = no limit)</span>
+                <span className="text-muted-foreground font-normal">
+                  (optional — blank = no limit{battleType === 'pvp' ? ', applies to both teams' : ''})
+                </span>
               </Label>
               <Input
                 id="battle-limit"
@@ -1250,11 +1325,29 @@ function CreateBattleCard({ token }: { token: string | null }) {
               />
             </div>
 
+            {/* Money reward (pve only) — paid in full to every player on victory, not split */}
+            {battleType === 'pve' && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="battle-money">
+                  Money reward per player{' '}
+                  <span className="text-muted-foreground font-normal">(optional — blank = ₽0)</span>
+                </Label>
+                <Input
+                  id="battle-money"
+                  type="number"
+                  min={0}
+                  placeholder="e.g. 500"
+                  value={moneyReward}
+                  onChange={e => setMoneyReward(e.target.value)}
+                />
+              </div>
+            )}
+
             {error && <p className="text-sm text-destructive">{error}</p>}
 
             <Button
               type="submit"
-              disabled={loading || selectedPlayers.size === 0}
+              disabled={loading || selectedPlayers.size === 0 || (battleType === 'pvp' && selectedEnemyPlayers.size === 0)}
               className="min-h-11"
             >
               {loading ? 'Creating…' : 'Create Battle'}

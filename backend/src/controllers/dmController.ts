@@ -827,6 +827,7 @@ export async function createEncounter(req: Request, res: Response): Promise<void
     playerPokemonLimit = null,
     npcPokemonLimit = null,
     expMultiplier = 1,
+    moneyReward = 0,
     notes = '',
     isActive = true,
   } = req.body as {
@@ -837,6 +838,7 @@ export async function createEncounter(req: Request, res: Response): Promise<void
     playerPokemonLimit?: number | null;
     npcPokemonLimit?: number | null;
     expMultiplier?: number;
+    moneyReward?: number;
     notes?: string;
     isActive?: boolean;
   };
@@ -855,6 +857,12 @@ export async function createEncounter(req: Request, res: Response): Promise<void
   }
   if (typeof expMultiplier !== 'number' || expMultiplier <= 0) {
     return sendError(res, 400, 'expMultiplier must be a positive number');
+  }
+  if (!Number.isInteger(moneyReward) || moneyReward < 0) {
+    return sendError(res, 400, 'moneyReward must be a non-negative integer');
+  }
+  if (moneyReward > 0 && type !== 'pve') {
+    return sendError(res, 400, 'moneyReward is only supported for pve encounters');
   }
 
   if (type === 'pve') {
@@ -899,6 +907,7 @@ export async function createEncounter(req: Request, res: Response): Promise<void
     playerPokemonLimit,
     npcPokemonLimit,
     expMultiplier,
+    moneyReward: type === 'pve' ? moneyReward : 0,
     notes,
     isActive,
   });
@@ -927,7 +936,7 @@ export async function updateEncounter(req: Request, res: Response): Promise<void
 
   const {
     title, type, enemies, wildPokemon,
-    playerPokemonLimit, npcPokemonLimit, expMultiplier, notes, isActive,
+    playerPokemonLimit, npcPokemonLimit, expMultiplier, moneyReward, notes, isActive,
   } = req.body as {
     title?: string;
     type?: string;
@@ -936,6 +945,7 @@ export async function updateEncounter(req: Request, res: Response): Promise<void
     playerPokemonLimit?: number | null;
     npcPokemonLimit?: number | null;
     expMultiplier?: number;
+    moneyReward?: number;
     notes?: string;
     isActive?: boolean;
   };
@@ -958,6 +968,12 @@ export async function updateEncounter(req: Request, res: Response): Promise<void
   }
   if (expMultiplier !== undefined && (typeof expMultiplier !== 'number' || expMultiplier <= 0)) {
     return sendError(res, 400, 'expMultiplier must be a positive number');
+  }
+  if (moneyReward !== undefined && (!Number.isInteger(moneyReward) || moneyReward < 0)) {
+    return sendError(res, 400, 'moneyReward must be a non-negative integer');
+  }
+  if (moneyReward !== undefined && moneyReward > 0 && resolvedType !== 'pve') {
+    return sendError(res, 400, 'moneyReward is only supported for pve encounters');
   }
 
   if (enemies !== undefined && resolvedType === 'pve') {
@@ -994,6 +1010,7 @@ export async function updateEncounter(req: Request, res: Response): Promise<void
   if (isActive          !== undefined) update.isActive          = isActive;
   if (notes             !== undefined) update.notes             = notes;
   if (expMultiplier     !== undefined) update.expMultiplier     = expMultiplier;
+  if (moneyReward       !== undefined) update.moneyReward       = resolvedType === 'pve' ? moneyReward : 0;
   if (playerPokemonLimit !== undefined) update.playerPokemonLimit = playerPokemonLimit;
   if (npcPokemonLimit    !== undefined) update.npcPokemonLimit    = npcPokemonLimit;
   if (enemies !== undefined && resolvedType === 'pve') {
@@ -1151,6 +1168,7 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
       : false,
     playerPokemonLimit: encounter.playerPokemonLimit ?? null,
     npcPokemonLimit:    encounter.npcPokemonLimit    ?? null,
+    moneyReward:        encounter.type === 'pve' ? (encounter.moneyReward ?? 0) : 0,
     encounterId:        encounter._id,
     lastUpdatedAt:      new Date(),
   });

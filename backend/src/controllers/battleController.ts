@@ -78,18 +78,41 @@ async function assertDmOwnsBattle(
   return true;
 }
 
+// A player's own battle entry — normally on playerSide, but in a pvp battle the
+// opposing trainer's entry lives on enemySide instead. This is the single place
+// that resolves "which side, if any, does this user act on" so send-out, move
+// submission, and switch resolution don't need to special-case pvp individually.
+type OwnSideEntry = {
+  activePokemonId:     mongoose.Types.ObjectId | null;
+  activeSentOutOnTurn: number | null;
+  usedPokemonIds:      mongoose.Types.ObjectId[];
+  fainted:             mongoose.Types.ObjectId[];
+};
+function findOwnSideEntry(
+  battle: HydratedDocument<IBattle>,
+  userId: string,
+): { side: 'playerSide' | 'enemySide'; entry: OwnSideEntry } | null {
+  const playerEntry = battle.playerSide.find(e => e.userId.toString() === userId);
+  if (playerEntry) return { side: 'playerSide', entry: playerEntry };
+  const enemyEntry = battle.enemySide.find(e => e.userId?.toString() === userId);
+  if (enemyEntry) return { side: 'enemySide', entry: enemyEntry };
+  return null;
+}
+
 export async function createBattle(req: Request, res: Response): Promise<void> {
   const {
-    type, playerIds, npcIds = [], playerPokemonLimit = null, npcPokemonLimit = null,
-    wildPokemon, wildCatchable = true,
+    type, playerIds, npcIds = [], enemyPlayerIds = [], playerPokemonLimit = null, npcPokemonLimit = null,
+    wildPokemon, wildCatchable = true, moneyReward = 0,
   } = req.body as {
     type: string;
     playerIds: string[];
     npcIds?: string[];
+    enemyPlayerIds?: string[];
     playerPokemonLimit?: number | null;
     npcPokemonLimit?: number | null;
     wildPokemon?: { speciesId: number; level: number };
     wildCatchable?: boolean;
+    moneyReward?: number;
   };
 
   if (!['pve', 'wild', 'pvp'].includes(type)) {
@@ -115,6 +138,14 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
     res.status(400).json({ data: null, error: 'playerPokemonLimit must be a positive integer or null' });
     return;
   }
+  if (!Number.isInteger(moneyReward) || moneyReward < 0) {
+    res.status(400).json({ data: null, error: 'moneyReward must be a non-negative integer' });
+    return;
+  }
+  if (moneyReward > 0 && type !== 'pve') {
+    res.status(400).json({ data: null, error: 'moneyReward is only supported for pve battles' });
+    return;
+  }
 
   const campaign = await Campaign.findOne({ dmId: req.user!.userId, isActive: true }).lean();
   if (!campaign) {
@@ -132,7 +163,30 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
     return;
   }
 
-  if (npcIds.length > 0) {
+  if (type === 'pvp') {
+    if (!Array.isArray(enemyPlayerIds) || enemyPlayerIds.length === 0) {
+      res.status(400).json({ data: null, error: 'enemyPlayerIds must be a non-empty array for pvp battles' });
+      return;
+    }
+    const invalidEnemyIds = enemyPlayerIds.filter(id => !campaignPlayerStrings.includes(id));
+    if (invalidEnemyIds.length > 0) {
+      res.status(400).json({
+        data:  null,
+        error: `These enemy player IDs are not in your campaign: ${invalidEnemyIds.join(', ')}`,
+      });
+      return;
+    }
+    const overlap = playerIds.filter(id => enemyPlayerIds.includes(id));
+    if (overlap.length > 0) {
+      res.status(400).json({
+        data:  null,
+        error: `A player cannot be on both sides of a pvp battle: ${overlap.join(', ')}`,
+      });
+      return;
+    }
+  }
+
+  if (type !== 'pvp' && npcIds.length > 0) {
     const foundNpcs = await Npc.find({ _id: { $in: npcIds }, campaignId: campaign._id }, '_id').lean();
     if (foundNpcs.length !== npcIds.length) {
       res.status(400).json({ data: null, error: 'One or more NPCs were not found in your campaign' });
@@ -140,7 +194,13 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
     }
   }
 
-  type EnemySlot = { npcId?: mongoose.Types.ObjectId; activePokemonId: mongoose.Types.ObjectId | null; fainted: mongoose.Types.ObjectId[] };
+  type EnemySlot = {
+    npcId?: mongoose.Types.ObjectId;
+    userId?: mongoose.Types.ObjectId;
+    activePokemonId: mongoose.Types.ObjectId | null;
+    usedPokemonIds?: mongoose.Types.ObjectId[];
+    fainted: mongoose.Types.ObjectId[];
+  };
   let enemySide: EnemySlot[];
 
   if (type === 'wild') {
@@ -196,6 +256,10 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
       caughtAt: null, caughtByPlayerId: null,
     });
     enemySide = [{ activePokemonId: wildPoke._id as mongoose.Types.ObjectId, fainted: [] }];
+  } else if (type === 'pvp') {
+    enemySide = enemyPlayerIds.map((id: string) => ({
+      userId: new mongoose.Types.ObjectId(id), activePokemonId: null, usedPokemonIds: [], fainted: [],
+    }));
   } else {
     enemySide = npcIds.map(id => ({
       npcId: new mongoose.Types.ObjectId(id), activePokemonId: null, fainted: [],
@@ -209,6 +273,7 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
     })),
     enemySide, wildCatchable: type === 'wild' ? wildCatchable : true,
     playerPokemonLimit: playerPokemonLimit ?? null, npcPokemonLimit: npcPokemonLimit ?? null,
+    moneyReward: type === 'pve' ? moneyReward : 0,
     lastUpdatedAt: new Date(),
   });
 
@@ -493,6 +558,7 @@ async function resolveSwitch(battle: HydratedDocument<IBattle>, entry: TurnQueue
   if (!entry.switchToPokemonId) return [];
   const incomingId = entry.switchToPokemonId;
   const events: string[] = [];
+  let sideLabel: 'player' | 'enemy';
 
   if (entry.actorType === 'npc') {
     const npcEntry = battle.enemySide.find(
@@ -508,27 +574,30 @@ async function resolveSwitch(battle: HydratedDocument<IBattle>, entry: TurnQueue
       { _id: battle._id, 'enemySide.npcId': npcEntry.npcId },
       { $set: { 'enemySide.$.activeSentOutOnTurn': battle.turnNumber } },
     );
+    sideLabel = 'enemy';
   } else {
-    const playerEntry = battle.playerSide.find(e => e.userId.toString() === entry.actorId.toString());
-    if (!playerEntry) return [];
-    const outgoingId = playerEntry.activePokemonId;
+    // Player-controlled actor — could be on playerSide, or (pvp only) on enemySide.
+    const own = findOwnSideEntry(battle, entry.actorId.toString());
+    if (!own) return [];
+    const outgoingId = own.entry.activePokemonId;
     if (outgoingId) events.push(...await recallPokemon(battle, outgoingId));
-    playerEntry.activePokemonId = incomingId;
-    playerEntry.activeSentOutOnTurn = battle.turnNumber;
-    battle.markModified('playerSide');
+    own.entry.activePokemonId = incomingId;
+    own.entry.activeSentOutOnTurn = battle.turnNumber;
+    battle.markModified(own.side);
     await Battle.updateOne(
-      { _id: battle._id, 'playerSide.userId': playerEntry.userId },
-      { $set: { 'playerSide.$.activeSentOutOnTurn': battle.turnNumber } },
+      { _id: battle._id, [`${own.side}.userId`]: entry.actorId },
+      { $set: { [`${own.side}.$.activeSentOutOnTurn`]: battle.turnNumber } },
     );
-    if (!playerEntry.usedPokemonIds.some(id => id.toString() === incomingId.toString())) {
-      playerEntry.usedPokemonIds.push(incomingId);
+    if (!own.entry.usedPokemonIds.some(id => id.toString() === incomingId.toString())) {
+      own.entry.usedPokemonIds.push(incomingId);
     }
+    sideLabel = own.side === 'playerSide' ? 'player' : 'enemy';
   }
 
   const incoming = await Pokemon.findById(incomingId, 'nickname speciesId').lean();
   const inCache = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
   events.push(`${pokeDisplayName(incoming, inCache)} was sent out!`);
-  events.push(...await applyEntryAbilities(battle, incomingId, entry.actorType === 'npc' ? 'enemy' : 'player'));
+  events.push(...await applyEntryAbilities(battle, incomingId, sideLabel));
   return events;
 }
 
@@ -832,39 +901,45 @@ async function applyFaints(battle: HydratedDocument<IBattle>): Promise<string[]>
   return events;
 }
 
-async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[]> {
-  if (battle.expAwarded) return [];
-  battle.expAwarded = true;
+// Awards EXP/EVs (computed from a set of fainted opposing Pokémon) to every party Pokémon
+// belonging to `gainingEntries`' trainers. Shared by pve/wild (playerSide gains from
+// enemySide's fainted NPCs/wild Pokémon) and pvp (each side gains from the other's fainted
+// Pokémon — see distributeExp below).
+async function awardExpToSide(
+  battle: HydratedDocument<IBattle>,
+  gainingEntries: Array<{ userId: mongoose.Types.ObjectId; usedPokemonIds: mongoose.Types.ObjectId[] }>,
+  faintedOpponentIds: mongoose.Types.ObjectId[],
+): Promise<string[]> {
   const events: string[] = [];
-  const allFaintedEnemyIds = battle.enemySide.flatMap(e => e.fainted);
-  if (allFaintedEnemyIds.length === 0) return events;
-  const faintedEnemies = await Pokemon.find({ _id: { $in: allFaintedEnemyIds } }, 'level speciesId').lean();
-  const totalBaseExp = faintedEnemies.reduce((sum, p) => sum + p.level * 5, 0);
+  if (faintedOpponentIds.length === 0 || gainingEntries.length === 0) return events;
+
+  const faintedOpponents = await Pokemon.find({ _id: { $in: faintedOpponentIds } }, 'level speciesId').lean();
+  const totalBaseExp = faintedOpponents.reduce((sum, p) => sum + p.level * 5, 0);
   if (totalBaseExp === 0) return events;
 
-  const playerUserIds  = battle.playerSide.map(e => e.userId);
-  const allPartyPokemon = await Pokemon.find({ ownerId: { $in: playerUserIds }, ownerType: 'player', isInParty: true }, '_id ownerId nickname speciesId level exp nature currentHp evs evolutionOverrides').lean();
-  const speciesIds = [...new Set([...allPartyPokemon.map(p => p.speciesId), ...faintedEnemies.map(p => p.speciesId)])];
+  const gainingUserIds  = gainingEntries.map(e => e.userId);
+  const allPartyPokemon = await Pokemon.find({ ownerId: { $in: gainingUserIds }, ownerType: 'player', isInParty: true }, '_id ownerId nickname speciesId level exp nature currentHp evs evolutionOverrides').lean();
+  const speciesIds = [...new Set([...allPartyPokemon.map(p => p.speciesId), ...faintedOpponents.map(p => p.speciesId)])];
   const caches     = speciesIds.length > 0 ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name expGroup baseStats evYield').lean() : [];
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
 
   const campaign  = await Campaign.findById(battle.campaignId, 'levelCapEnabled').lean();
-  const owners    = await User.find({ _id: { $in: playerUserIds } }, 'badges trainerStats').lean();
+  const owners    = await User.find({ _id: { $in: gainingUserIds } }, 'badges trainerStats').lean();
   const capMap    = new Map(owners.map(u => [
     u._id.toString(),
     getEffectiveLevelCap(u.badges?.length ?? 0, campaign?.levelCapEnabled ?? true),
   ]));
   const ivsMap    = new Map(owners.map(u => [u._id.toString(), ivsFromSpread(u.trainerStats)]));
 
-  const totalEvYield = faintedEnemies.reduce((acc, p) => {
+  const totalEvYield = faintedOpponents.reduce((acc, p) => {
     const yieldStats = cacheMap.get(p.speciesId)?.evYield as BaseStats | undefined;
     if (yieldStats) (Object.keys(acc) as (keyof BaseStats)[]).forEach(k => { acc[k] += yieldStats[k]; });
     return acc;
   }, { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 } as BaseStats);
 
-  for (const playerEntry of battle.playerSide) {
-    const usedIds = new Set(playerEntry.usedPokemonIds.map(id => id.toString()));
-    const partyPokemon = allPartyPokemon.filter(p => p.ownerId.toString() === playerEntry.userId.toString());
+  for (const gainingEntry of gainingEntries) {
+    const usedIds = new Set(gainingEntry.usedPokemonIds.map(id => id.toString()));
+    const partyPokemon = allPartyPokemon.filter(p => p.ownerId.toString() === gainingEntry.userId.toString());
     for (const poke of partyPokemon) {
       const isActive = usedIds.has(poke._id.toString());
       const expGain  = isActive ? totalBaseExp : Math.floor(totalBaseExp / 2);
@@ -878,8 +953,8 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
       const expGroup  = (cache?.expGroup as string | undefined) ?? 'medium-fast';
       const baseStats = cache?.baseStats as BaseStats | undefined;
       const overrides = (poke.evolutionOverrides ?? []) as { condition: string; value: string }[];
-      const cap       = capMap.get(playerEntry.userId.toString()) ?? 100;
-      const ivs       = ivsMap.get(playerEntry.userId.toString()) ?? ZERO_IVS;
+      const cap       = capMap.get(gainingEntry.userId.toString()) ?? 100;
+      const ivs       = ivsMap.get(gainingEntry.userId.toString()) ?? ZERO_IVS;
 
       const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, events: levelEvents, cappedOut } = await applyLevelUpLoop({
         displayName,
@@ -903,45 +978,109 @@ async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[
   return events;
 }
 
+async function distributeExp(battle: HydratedDocument<IBattle>): Promise<string[]> {
+  if (battle.expAwarded) return [];
+  battle.expAwarded = true;
+
+  const enemySideFaintedIds = battle.enemySide.flatMap(e => e.fainted);
+  const events = await awardExpToSide(battle, battle.playerSide, enemySideFaintedIds);
+
+  // Pvp is the only case where enemySide is itself a roster of real trainers — they
+  // earn EXP/EVs too, based on how many of playerSide's Pokémon they knocked out.
+  // No money changes hands between sides; that's not part of any battle-reward path.
+  if (battle.type === 'pvp') {
+    const playerSideFaintedIds = battle.playerSide.flatMap(e => e.fainted);
+    const enemyTrainerEntries = battle.enemySide.filter(
+      (e): e is typeof e & { userId: mongoose.Types.ObjectId } => e.userId != null,
+    );
+    events.push(...await awardExpToSide(battle, enemyTrainerEntries, playerSideFaintedIds));
+  }
+
+  return events;
+}
+
+// pve only — pays battle.moneyReward to every playerSide trainer (not split, not scaled
+// by participation) on victory. DM sets the amount at battle/encounter creation.
+async function awardBattleMoney(battle: HydratedDocument<IBattle>): Promise<string[]> {
+  if (battle.moneyAwarded) return [];
+  battle.moneyAwarded = true;
+  if (battle.type !== 'pve' || battle.moneyReward <= 0) return [];
+
+  const playerUserIds = battle.playerSide.map(e => e.userId);
+  if (playerUserIds.length === 0) return [];
+  await User.updateMany({ _id: { $in: playerUserIds } }, { $inc: { money: battle.moneyReward } });
+  return [`Each trainer received ₽${battle.moneyReward.toLocaleString()}!`];
+}
+
+// "Does this roster of real trainers have any usable Pokémon left" — the check already
+// used for playerSide, extracted so pvp can apply the exact same rule to enemySide
+// (which is also a roster of real trainers in that case, not NPCs/wild).
+async function isTrainerSideEliminated(
+  entries: Array<{ userId: mongoose.Types.ObjectId; usedPokemonIds: mongoose.Types.ObjectId[] }>,
+  pokemonLimit: number | null,
+): Promise<boolean> {
+  if (entries.length === 0) return false;
+  const results = await Promise.all(entries.map(async entry => {
+    const usedIds      = new Set(entry.usedPokemonIds.map(id => id.toString()));
+    const limitReached = pokemonLimit !== null && entry.usedPokemonIds.length >= pokemonLimit;
+    const healthyParty  = await Pokemon.find({ ownerId: entry.userId, ownerType: 'player', isInParty: true, currentHp: { $gt: 0 } }, '_id').lean();
+    if (healthyParty.length === 0) return true;
+    return !healthyParty.some(p => usedIds.has(p._id.toString()) || !limitReached);
+  }));
+  return results.every(Boolean);
+}
+
 async function checkBattleEnd(battle: HydratedDocument<IBattle>): Promise<string[]> {
   if (battle.status !== 'active') return [];
   const hasActiveEnemy = battle.enemySide.some(e => e.activePokemonId !== null);
   let enemySideEliminated = false;
   if (!hasActiveEnemy && battle.enemySide.length > 0) {
-    const npcIds = battle.enemySide.map(e => e.npcId).filter((id): id is mongoose.Types.ObjectId => id != null);
-    if (npcIds.length > 0) {
-      if (battle.npcPokemonLimit !== null) {
-        const results = await Promise.all(battle.enemySide.map(async entry => {
-          if (!entry.npcId) return true;
-          if (entry.fainted.length >= battle.npcPokemonLimit!) return true;
-          return (await Pokemon.find({ ownerId: entry.npcId, ownerType: 'npc', currentHp: { $gt: 0 } }, '_id').lean()).length === 0;
-        }));
-        enemySideEliminated = results.every(Boolean);
-      } else {
-        enemySideEliminated = (await Pokemon.countDocuments({ ownerId: { $in: npcIds }, ownerType: 'npc', currentHp: { $gt: 0 } })) === 0;
-      }
-    } else { enemySideEliminated = true; }
+    if (battle.type === 'pvp') {
+      const pvpEnemyEntries = battle.enemySide.filter(
+        (e): e is typeof e & { userId: mongoose.Types.ObjectId } => e.userId != null,
+      );
+      enemySideEliminated = await isTrainerSideEliminated(pvpEnemyEntries, battle.playerPokemonLimit);
+    } else {
+      const npcIds = battle.enemySide.map(e => e.npcId).filter((id): id is mongoose.Types.ObjectId => id != null);
+      if (npcIds.length > 0) {
+        if (battle.npcPokemonLimit !== null) {
+          const results = await Promise.all(battle.enemySide.map(async entry => {
+            if (!entry.npcId) return true;
+            if (entry.fainted.length >= battle.npcPokemonLimit!) return true;
+            return (await Pokemon.find({ ownerId: entry.npcId, ownerType: 'npc', currentHp: { $gt: 0 } }, '_id').lean()).length === 0;
+          }));
+          enemySideEliminated = results.every(Boolean);
+        } else {
+          enemySideEliminated = (await Pokemon.countDocuments({ ownerId: { $in: npcIds }, ownerType: 'npc', currentHp: { $gt: 0 } })) === 0;
+        }
+      } else { enemySideEliminated = true; }
+    }
   }
 
   const hasActivePlayer = battle.playerSide.some(e => e.activePokemonId !== null);
   let playerSideEliminated = false;
   if (!hasActivePlayer && battle.playerSide.length > 0) {
-    const results = await Promise.all(battle.playerSide.map(async entry => {
-      const usedIds      = new Set(entry.usedPokemonIds.map(id => id.toString()));
-      const limitReached = battle.playerPokemonLimit !== null && entry.usedPokemonIds.length >= battle.playerPokemonLimit;
-      const healthyParty = await Pokemon.find({ ownerId: entry.userId, ownerType: 'player', isInParty: true, currentHp: { $gt: 0 } }, '_id').lean();
-      if (healthyParty.length === 0) return true;
-      return !healthyParty.some(p => usedIds.has(p._id.toString()) || !limitReached);
-    }));
-    playerSideEliminated = results.every(Boolean);
+    playerSideEliminated = await isTrainerSideEliminated(battle.playerSide, battle.playerPokemonLimit);
   }
 
   if (!enemySideEliminated && !playerSideEliminated) return [];
   battle.status = 'complete'; battle.endedAt = new Date();
+  battle.winningSide = enemySideEliminated ? 'playerSide' : 'enemySide';
+
+  if (battle.type === 'pvp') {
+    // Both sides may have earned EXP over the course of the battle regardless of which
+    // side ran out of usable Pokémon first — distributeExp handles both directions.
+    // The log stays neutral (no "you win"/"you lose") since it's shared by both viewers;
+    // the frontend uses battle.winningSide to render a personalized result per player.
+    const expEvents = await distributeExp(battle);
+    return ['One side has no more usable Pokémon — the battle is over!', ...expEvents];
+  }
+
   if (enemySideEliminated) {
     const expEvents = await distributeExp(battle);
+    const moneyEvents = await awardBattleMoney(battle);
     if (battle.type === 'wild') { const wasCaught = battle.catchAttempts.some(a => a.result === 'caught'); return wasCaught ? expEvents : ['The wild Pokémon was defeated!', ...expEvents]; }
-    return ['All enemies have been defeated! The players win!', ...expEvents];
+    return ['All enemies have been defeated! The players win!', ...expEvents, ...moneyEvents];
   }
   return ['All players have been defeated!'];
 }
@@ -1111,9 +1250,11 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
 
 export async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promise<void> {
   if (battle.playerSide.some(e => e.activePokemonId == null)) return;
+  // In pvp, enemySide entries are real trainers too — they must send out just like playerSide.
+  if (battle.type === 'pvp' && battle.enemySide.some(e => e.activePokemonId == null)) return;
 
   const playerActors = battle.playerSide;
-  const npcActors    = battle.enemySide.filter(e => e.activePokemonId != null);
+  const npcActors    = battle.type === 'pvp' ? battle.enemySide : battle.enemySide.filter(e => e.activePokemonId != null);
   const totalActors  = playerActors.length + npcActors.length;
   if (totalActors === 0 || battle.turnQueue.length < totalActors) return;
 
@@ -1334,9 +1475,10 @@ async function resolveDamagingMove(
   protectingTargets: Map<string, string | null>, moveEvents: string[],
 ): Promise<void> {
   if (entry.moveId === 'fake-out') {
-    const sideEntry = entry.actorType === 'player'
-      ? battle.playerSide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString())
-      : battle.enemySide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString());
+    // A live Pokémon's activePokemonId is unique across both sides, so match on that
+    // directly rather than branching on actorType (which doesn't tell us the side in pvp).
+    const sideEntry = battle.playerSide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString())
+      ?? battle.enemySide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString());
     if (!sideEntry || sideEntry.activeSentOutOnTurn !== battle.turnNumber) {
       const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
       const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
@@ -1744,8 +1886,9 @@ export async function sendOut(req: Request, res: Response): Promise<void> {
   if (battle.status !== 'active')       { res.status(400).json({ data: null, error: 'Battle is not active' }); return; }
   if (battle.phase !== 'move_submission') { res.status(400).json({ data: null, error: 'Cannot send out a Pokémon outside move submission phase' }); return; }
 
-  const playerEntry = battle.playerSide.find(e => e.userId.toString() === userId.toString());
-  if (!playerEntry) { res.status(403).json({ data: null, error: 'You are not in this battle' }); return; }
+  const own = findOwnSideEntry(battle, userId.toString());
+  if (!own) { res.status(403).json({ data: null, error: 'You are not in this battle' }); return; }
+  const { side, entry: playerEntry } = own;
 
   const pokeId  = new mongoose.Types.ObjectId(pokemonId);
   const pokemon = await Pokemon.findOne({ _id: pokeId, ownerId: userId, ownerType: 'player', isInParty: true }).lean();
@@ -1765,17 +1908,17 @@ export async function sendOut(req: Request, res: Response): Promise<void> {
   }
 
   playerEntry.activePokemonId = pokeId;
-  battle.markModified('playerSide');
+  battle.markModified(side);
   if (!alreadyUsed) playerEntry.usedPokemonIds.push(pokeId);
 
-  const entryEvents = await applyEntryAbilities(battle, pokeId, 'player');
+  const entryEvents = await applyEntryAbilities(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy');
   appendToLog(battle, ...entryEvents);
   battle.lastUpdatedAt = new Date();
   await battle.save();
   // Direct update for activeSentOutOnTurn — bypasses Mongoose subdocument tracking.
   await Battle.updateOne(
-    { _id: battle._id, 'playerSide.userId': userId },
-    { $set: { 'playerSide.$.activeSentOutOnTurn': battle.turnNumber } },
+    { _id: battle._id, [`${side}.userId`]: userId },
+    { $set: { [`${side}.$.activeSentOutOnTurn`]: battle.turnNumber } },
   );
 
   res.json({ data: { activePokemonId: pokemonId }, error: null });
@@ -1797,8 +1940,9 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
   if (battle.status !== 'active')         { res.status(400).json({ data: null, error: 'Battle is not active' }); return; }
   if (battle.phase !== 'move_submission') { res.status(400).json({ data: null, error: 'Not in move submission phase' }); return; }
 
-  const playerEntry = battle.playerSide.find(e => e.userId.toString() === userId.toString());
-  if (!playerEntry)                 { res.status(403).json({ data: null, error: 'You are not in this battle' }); return; }
+  const own = findOwnSideEntry(battle, userId.toString());
+  if (!own)                              { res.status(403).json({ data: null, error: 'You are not in this battle' }); return; }
+  const playerEntry = own.entry;
   if (!playerEntry.activePokemonId) { res.status(400).json({ data: null, error: 'You have not sent out a Pokémon yet' }); return; }
 
   const alreadySubmitted = battle.turnQueue.some(
@@ -1943,8 +2087,12 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
     res.status(400).json({ data: null, error: 'targets must be a non-empty array of Pokémon IDs' }); return;
   }
 
-  const isPlayerActor = currentEntry.actorType === 'player';
-  const validTargetIds = isPlayerActor
+  // Which side the acting Pokémon belongs to — NOT the same thing as actorType.
+  // In pvp, the opposing trainer's entries live on enemySide but are still actorType 'player'.
+  const actingSide: 'playerSide' | 'enemySide' = currentEntry.actorType === 'npc'
+    ? 'enemySide'
+    : (findOwnSideEntry(battle, currentEntry.actorId.toString())?.side ?? 'playerSide');
+  const validTargetIds = actingSide === 'playerSide'
     ? battle.enemySide.filter(e => e.activePokemonId != null).map(e => e.activePokemonId!.toString())
     : battle.playerSide.filter(e => e.activePokemonId != null).map(e => e.activePokemonId!.toString());
 
@@ -2016,7 +2164,10 @@ export async function getDmBattles(req: Request, res: Response): Promise<void> {
 
 export async function getActiveBattle(req: Request, res: Response): Promise<void> {
   const userId = new mongoose.Types.ObjectId(req.user!.userId);
-  const battle = await Battle.findOne({ 'playerSide.userId': userId, status: { $ne: 'complete' } }).sort({ lastUpdatedAt: -1 }).lean();
+  const battle = await Battle.findOne({
+    $or: [{ 'playerSide.userId': userId }, { 'enemySide.userId': userId }],
+    status: { $ne: 'complete' },
+  }).sort({ lastUpdatedAt: -1 }).lean();
   if (!battle) { res.json({ data: null, error: null }); return; }
   res.json({ data: { _id: battle._id, status: battle.status, type: battle.type, turnNumber: battle.turnNumber, lastUpdatedAt: battle.lastUpdatedAt }, error: null });
 }
@@ -2027,9 +2178,11 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
   const battle = await Battle.findById(id).lean();
   if (!battle) { res.status(404).json({ data: null, error: 'Battle not found' }); return; }
 
-  const userIds     = battle.playerSide.map(entry => entry.userId);
-  const users       = await User.find({ _id: { $in: userIds } }, 'username').lean();
-  const usernameMap = new Map(users.map(u => [u._id.toString(), u.username]));
+  // enemySide only carries userIds in pvp battles — harmless no-op filter otherwise.
+  const enemyUserIds = battle.enemySide.map(e => e.userId).filter((id): id is mongoose.Types.ObjectId => id != null);
+  const userIds      = [...battle.playerSide.map(entry => entry.userId), ...enemyUserIds];
+  const users        = await User.find({ _id: { $in: userIds } }, 'username').lean();
+  const usernameMap  = new Map(users.map(u => [u._id.toString(), u.username]));
 
   const allActivePokemonIds = [
     ...battle.playerSide.map(e => e.activePokemonId),
@@ -2093,10 +2246,18 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
 
   const enemySideWithInfo = battle.enemySide.map(entry => ({
     ...entry,
-    npcName:           entry.npcId ? (npcNameMap.get(entry.npcId.toString()) ?? 'NPC') : 'Wild Pokémon',
-    activePokemonInfo: buildInfo(entry.activePokemonId),
-    faintedCount:      entry.fainted.length,
-    npcLimitReached:   battle.npcPokemonLimit !== null && entry.fainted.length >= battle.npcPokemonLimit,
+    npcName: entry.npcId
+      ? (npcNameMap.get(entry.npcId.toString()) ?? 'NPC')
+      : entry.userId
+        ? (usernameMap.get(entry.userId.toString()) ?? 'Unknown')
+        : 'Wild Pokémon',
+    // Only meaningful for pvp (a real trainer roster on enemySide) — mirrors playerSide's fields.
+    username:            entry.userId ? (usernameMap.get(entry.userId.toString()) ?? 'Unknown') : undefined,
+    usedPokemonCount:    entry.usedPokemonIds?.length ?? 0,
+    pokemonLimitReached: battle.playerPokemonLimit !== null && (entry.usedPokemonIds?.length ?? 0) >= battle.playerPokemonLimit,
+    activePokemonInfo:   buildInfo(entry.activePokemonId),
+    faintedCount:        entry.fainted.length,
+    npcLimitReached:     battle.npcPokemonLimit !== null && entry.fainted.length >= battle.npcPokemonLimit,
   }));
 
   let currentMoveTargetCategory: 'single' | 'auto' | null = null;

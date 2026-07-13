@@ -199,6 +199,7 @@ export default function EncounterFormPage() {
   const [playerPokemonLimit, setPlayerPokemonLimit] = useState('');
   const [npcPokemonLimit,    setNpcPokemonLimit]    = useState('');
   const [expMultiplier,      setExpMultiplier]      = useState('1');
+  const [moneyReward,        setMoneyReward]        = useState('');
   const [notes,              setNotes]              = useState('');
   const [isActive,           setIsActive]           = useState(true);
 
@@ -225,6 +226,7 @@ export default function EncounterFormPage() {
           setIsActive(enc.isActive);
           setNotes(enc.notes ?? '');
           setExpMultiplier(String(enc.expMultiplier ?? 1));
+          setMoneyReward(enc.moneyReward ? String(enc.moneyReward) : '');
           setPlayerPokemonLimit(enc.playerPokemonLimit !== null ? String(enc.playerPokemonLimit) : '');
           setNpcPokemonLimit(enc.npcPokemonLimit !== null ? String(enc.npcPokemonLimit) : '');
 
@@ -316,6 +318,13 @@ export default function EncounterFormPage() {
       setSubmitError('Select at least one NPC for a PvE encounter.');
       return;
     }
+    if (type === 'pve' && moneyReward.trim() !== '') {
+      const reward = Number(moneyReward);
+      if (!Number.isInteger(reward) || reward < 0) {
+        setSubmitError('Money reward must be a non-negative whole number.');
+        return;
+      }
+    }
     if (type === 'wild') {
       if (wildEntries.length === 0) {
         setSubmitError('Add at least one wild Pokémon.');
@@ -349,6 +358,7 @@ export default function EncounterFormPage() {
         npcId,
         ...(slotCount !== null ? { slotCount } : {}),
       }));
+      body.moneyReward = moneyReward.trim() !== '' ? Number(moneyReward) : 0;
     } else {
       body.wildPokemon = wildEntries.map(wp => ({
         speciesId: wp.speciesId,
@@ -580,6 +590,24 @@ export default function EncounterFormPage() {
                   onChange={e => setExpMultiplier(e.target.value)}
                 />
               </div>
+
+              {/* Money reward (pve only) — paid in full to every player on victory, not split */}
+              {type === 'pve' && (
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="enc-money">
+                    Money reward per player{' '}
+                    <span className="text-muted-foreground font-normal text-xs">(optional — blank = ₽0)</span>
+                  </Label>
+                  <Input
+                    id="enc-money"
+                    type="number"
+                    min={0}
+                    placeholder="e.g. 500"
+                    value={moneyReward}
+                    onChange={e => setMoneyReward(e.target.value)}
+                  />
+                </div>
+              )}
 
               {/* Notes ─────────────────────────────────────────────────── */}
               <div className="flex flex-col gap-1.5">

@@ -43,6 +43,9 @@ export type IEncounter = {
   // EXP multiplier applied to all EXP awards after the battle. 1 = normal.
   // Placeholder for Phase 5 — stored now, not yet wired into distributeExp.
   expMultiplier: number;
+  // pve only — Pokédollars paid to every playerSide trainer (not split) on victory.
+  // Carried into the Battle document at launch. Always 0 for wild encounters.
+  moneyReward: number;
   notes: string;
   isActive: boolean;
 };
@@ -78,6 +81,7 @@ const EncounterSchema = new Schema<IEncounter>(
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     expMultiplier:      { type: Number, default: 1 },
+    moneyReward:        { type: Number, default: 0 },
     notes:              { type: String, default: '' },
     isActive:           { type: Boolean, default: true },
   },

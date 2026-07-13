@@ -69,8 +69,15 @@ type PlayerSideEntry = {
 };
 
 type EnemySideEntry = {
-  npcId?: string;  // absent for wild battles
+  npcId?: string;  // absent for wild and pvp battles
   npcName: string;
+  // Only present for pvp — the opposing trainer's own fields, mirroring PlayerSideEntry.
+  userId?: string;
+  username?: string;
+  usedPokemonIds?: string[];
+  // Unlike the fields above, these two are always sent (0/false for npc/wild entries).
+  usedPokemonCount: number;
+  pokemonLimitReached: boolean;
   activePokemonId: string | null;
   fainted: string[];
   activePokemonInfo: ActivePokemonInfo | null;
@@ -110,6 +117,7 @@ type BattleState = {
   wildCatchable: boolean;
   turnLog: TurnLogEntry[];
   lastUpdatedAt: string;
+  winningSide: 'playerSide' | 'enemySide' | null;
 };
 
 // Returned by GET /api/pokemon/party
@@ -420,8 +428,18 @@ export default function BattlePage() {
     setRunConfirmPending(false);
   }, [battle?.turnNumber]);
 
-  // Fetch active Pokémon detail (moves, type data) when activePokemonId becomes known
-  const myEntry = battle?.playerSide.find(e => e.userId === user?.id);
+  // Fetch active Pokémon detail (moves, type data) when activePokemonId becomes known.
+  // In pvp, "you" might be on playerSide or (as the opposing trainer) on enemySide —
+  // check both, and remember which one so display logic below can tell the sides apart.
+  const myPlayerEntry = battle?.playerSide.find(e => e.userId === user?.id);
+  const myEnemyEntry  = battle?.enemySide.find(e => e.userId === user?.id);
+  const mySide: 'playerSide' | 'enemySide' | null =
+    myPlayerEntry ? 'playerSide' : myEnemyEntry ? 'enemySide' : null;
+  const myEntry = myPlayerEntry
+    ? myPlayerEntry
+    : myEnemyEntry
+      ? { ...myEnemyEntry, usedPokemonIds: myEnemyEntry.usedPokemonIds ?? [] }
+      : undefined;
   const activePokemonId = myEntry?.activePokemonId ?? null;
 
   // Wild encounters: list of enemy slots that still have an active wild Pokémon.
@@ -501,11 +519,15 @@ export default function BattlePage() {
       (currentTargetEntry.actorType === 'npc' && isDm)
     : false;
 
-  // Display name for the actor currently picking targets
+  // Display name for the actor currently picking targets. actorType 'player' can mean
+  // either side in pvp (the opposing trainer's entries live on enemySide but are still
+  // actorType 'player'), so check both rather than assuming playerSide.
   const targetActorDisplayName = (() => {
     if (!currentTargetEntry || !battle) return '';
     if (currentTargetEntry.actorType === 'player') {
-      return battle.playerSide.find(e => e.userId === currentTargetEntry.actorId)?.username ?? 'Unknown';
+      return battle.playerSide.find(e => e.userId === currentTargetEntry.actorId)?.username
+        ?? battle.enemySide.find(e => e.userId === currentTargetEntry.actorId)?.username
+        ?? 'Unknown';
     }
     return battle.enemySide.find(e => e.npcId === currentTargetEntry.actorId)
       ?.activePokemonInfo?.name ?? 'NPC';
@@ -518,10 +540,15 @@ export default function BattlePage() {
   const isAutoTargetMove = !isNoTargetMove && battle?.currentMoveTargetCategory === 'auto';
   const isSingleTargetMove = !isNoTargetMove && !isAutoTargetMove;
 
-  // Valid targets the current actor can choose from (opposing side, active and alive)
+  // Valid targets the current actor can choose from (opposing side, active and alive).
+  // Which side is "opposing" depends on which side the actor is ON, not actorType —
+  // in pvp the opposing trainer's entries live on enemySide but are still actorType 'player'.
   const opposingTargets: ActivePokemonInfo[] = (() => {
     if (!currentTargetEntry || !battle) return [];
-    const side = currentTargetEntry.actorType === 'player' ? battle.enemySide : battle.playerSide;
+    const actingSide: 'playerSide' | 'enemySide' = currentTargetEntry.actorType === 'npc'
+      ? 'enemySide'
+      : battle.playerSide.some(e => e.userId === currentTargetEntry.actorId) ? 'playerSide' : 'enemySide';
+    const side = actingSide === 'playerSide' ? battle.enemySide : battle.playerSide;
     return side
       .filter(e => e.activePokemonId && e.activePokemonInfo && e.activePokemonInfo.currentHp > 0)
       .map(e => e.activePokemonInfo!);
@@ -848,6 +875,16 @@ export default function BattlePage() {
 
   const statusColour = STATUS_COLOURS[battle.status] ?? 'bg-muted text-muted-foreground';
 
+  // In pvp, "Player Side"/"Enemy Side" are meaningless labels — both are real trainers.
+  // Label them relative to the viewer when they're a participant, or neutrally (Team A/B)
+  // when the viewer is the DM observing.
+  const playerSideTitle = battle.type !== 'pvp'
+    ? 'Player Side'
+    : mySide === 'playerSide' ? 'Your Team' : mySide === 'enemySide' ? 'Opponent Team' : 'Team A';
+  const enemySideTitle = battle.type !== 'pvp'
+    ? 'Enemy Side'
+    : mySide === 'enemySide' ? 'Your Team' : mySide === 'playerSide' ? 'Opponent Team' : 'Team B';
+
   return (
     <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="max-w-2xl mx-auto flex flex-col gap-6">
@@ -902,7 +939,11 @@ export default function BattlePage() {
             </CardHeader>
             <CardContent>
               <p className="text-sm text-muted-foreground">
-                This battle has ended. See the battle log below for the full summary.
+                {/* The turn log itself stays neutral (both pvp viewers read the same lines) —
+                    winningSide + mySide let us show each participant a personal result here. */}
+                {battle.type === 'pvp' && mySide && battle.winningSide
+                  ? (battle.winningSide === mySide ? 'You won this battle!' : 'You lost this battle.')
+                  : 'This battle has ended. See the battle log below for the full summary.'}
               </p>
             </CardContent>
           </Card>
@@ -1253,8 +1294,8 @@ export default function BattlePage() {
           </Card>
         )}
 
-        {/* DM: NPC actions during move submission */}
-        {isDm && battle.status === 'active' && battle.phase === 'move_submission' && battle.enemySide.length > 0 && (
+        {/* DM: NPC actions during move submission — not applicable to pvp, where enemySide is a player roster, not NPCs */}
+        {isDm && battle.type !== 'pvp' && battle.status === 'active' && battle.phase === 'move_submission' && battle.enemySide.length > 0 && (
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
@@ -1757,7 +1798,7 @@ export default function BattlePage() {
 
         {/* Player side — shows send-out and submission status for everyone */}
         <Card>
-          <CardHeader><CardTitle>Player Side</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{playerSideTitle}</CardTitle></CardHeader>
           <CardContent>
             {battle.playerSide.length === 0 ? (
               <p className="text-sm text-muted-foreground">No players in this battle.</p>
@@ -1793,12 +1834,39 @@ export default function BattlePage() {
 
         {/* Enemy side */}
         <Card>
-          <CardHeader><CardTitle>Enemy Side</CardTitle></CardHeader>
+          <CardHeader><CardTitle>{enemySideTitle}</CardTitle></CardHeader>
           <CardContent>
             {battle.enemySide.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 No enemies yet — enemies are added via the encounter builder (coming soon).
               </p>
+            ) : battle.type === 'pvp' ? (
+              // Pvp: enemySide is a roster of real trainers — render exactly like Player Side above.
+              <div className="flex flex-col gap-3">
+                {battle.enemySide.map(entry => {
+                  const submitted = battle.turnQueue.some(
+                    e => e.actorId === entry.userId && e.actorType === 'player'
+                  );
+                  return (
+                    <div key={entry.userId} className="flex flex-col gap-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-medium">{entry.username}</span>
+                        {battle.status === 'active' && battle.phase === 'move_submission' && (
+                          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+                            submitted ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                          }`}>
+                            {submitted ? 'Submitted' : 'Pending'}
+                          </span>
+                        )}
+                      </div>
+                      {entry.activePokemonInfo
+                        ? <BattlePokemonCard info={entry.activePokemonInfo} />
+                        : <p className="text-xs text-muted-foreground">No Pokémon out</p>
+                      }
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
               <div className="flex flex-col gap-3">
                 {(() => {

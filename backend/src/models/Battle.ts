@@ -18,9 +18,13 @@ export type PlayerSideEntry = {
 };
 
 export type EnemySideEntry = {
-  npcId?: mongoose.Types.ObjectId;  // absent for wild battles
+  npcId?: mongoose.Types.ObjectId;  // absent for wild and pvp battles
+  userId?: mongoose.Types.ObjectId;  // present only for pvp battles (opposing trainer)
   activePokemonId: mongoose.Types.ObjectId | null;
   activeSentOutOnTurn: number | null;
+  // Tracks distinct Pokémon sent out, same semantics as PlayerSideEntry.
+  // Only populated for pvp battles (npc/wild entries don't enforce a Pokémon limit this way).
+  usedPokemonIds: mongoose.Types.ObjectId[];
   fainted: mongoose.Types.ObjectId[];
 };
 
@@ -87,6 +91,10 @@ export type IBattle = {
   npcPokemonLimit: number | null;
   // wild battles only — false lets DM use the wild Pokémon as a pure fight
   wildCatchable: boolean;
+  // pve only — Pokédollars paid to every playerSide trainer (not split) on victory.
+  // Set by the DM at creation, or copied from Encounter.moneyReward at launch. Always
+  // 0 for wild/pvp battles (wild has no trainer to pay it out, pvp deliberately excluded).
+  moneyReward: number;
   // Keyed by pokemonId.toString(). Entries are added on first stage change and
   // deleted when a Pokémon switches out or faints. Schema.Types.Mixed so the
   // map is flexible; call battle.markModified('statStages') after mutations.
@@ -98,6 +106,12 @@ export type IBattle = {
   // (Rollout, Thrash, Outrage, Petal Dance, etc.). Cleared on switch-out or faint.
   lockedMoves: Record<string, { moveId: string; turnsRemaining: number }>;
   expAwarded: boolean;
+  moneyAwarded: boolean;
+  // Set once the battle completes. For pve/wild this always mirrors "did the players win"
+  // (playerSide) vs lose (enemySide). For pvp it tells you which trainer roster is left
+  // standing — the frontend uses it to render a personalized win/loss banner per viewer,
+  // since the turn log itself is shared and can't say "you win" from one side's perspective.
+  winningSide: 'playerSide' | 'enemySide' | null;
   encounterId: mongoose.Types.ObjectId | null;
   lastUpdatedAt: Date;
   endedAt: Date | null;
@@ -132,8 +146,10 @@ const BattleSchema = new Schema<IBattle>(
     enemySide: [
       {
         npcId:               { type: Schema.Types.ObjectId, ref: 'Npc', default: null },
+        userId:              { type: Schema.Types.ObjectId, ref: 'User', default: null },
         activePokemonId:     { type: Schema.Types.ObjectId, ref: 'Pokemon', default: null },
         activeSentOutOnTurn: { type: Number, default: null },
+        usedPokemonIds:      [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
         fainted:             [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
         _id:                 false,
       },
@@ -198,7 +214,10 @@ const BattleSchema = new Schema<IBattle>(
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },
+    moneyReward:        { type: Number, default: 0 },
     expAwarded:         { type: Boolean, default: false },
+    moneyAwarded:       { type: Boolean, default: false },
+    winningSide:        { type: String, enum: ['playerSide', 'enemySide', null], default: null },
     encounterId:        { type: Schema.Types.ObjectId, ref: 'Encounter', default: null },
     lastUpdatedAt:      { type: Date, default: Date.now },
     endedAt:            { type: Date, default: null },

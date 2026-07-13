@@ -33,10 +33,17 @@ app.use('/api/battles', verifyToken, battlesRouter);
 app.use('/api/dm', verifyToken, requireDm, dmRouter);
 app.use('/api/admin', verifyToken, requireAdmin, adminRouter);
 
-// Global error handler — catches any unhandled error passed to next(err) or thrown in an async handler
+// Global error handler — catches any unhandled error passed to next(err) or thrown in an async handler.
+// Respects the error's own statusCode/status when present (e.g. body-parser's 400 on malformed
+// JSON) instead of always reporting 500 — but only surfaces the error's own message for 4xx
+// errors, since those are client-caused and safe to show; 5xx/unrecognized errors stay generic
+// to avoid leaking internals (stack traces, DB errors, etc.) to the client.
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error(err);
-  res.status(500).json({ data: null, error: 'Internal server error' });
+  const errObj  = err as { statusCode?: number; status?: number; message?: string };
+  const status  = errObj?.statusCode ?? errObj?.status ?? 500;
+  const message = status >= 400 && status < 500 && errObj?.message ? errObj.message : 'Internal server error';
+  res.status(status).json({ data: null, error: message });
 });
 
 connectDB()
