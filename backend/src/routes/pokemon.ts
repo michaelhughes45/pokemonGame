@@ -7,6 +7,7 @@ import {
   withdrawFromParty,
   healParty,
   replaceMoveSlot,
+  teachTmMove,
   getPokemon,
   releasePokemon,
 } from '../controllers/pokemonController';
@@ -35,6 +36,9 @@ router.post('/heal-party',     healParty);
 
 // PATCH /api/pokemon/:id/moves      — replace a move slot via Move Reminder
 router.patch('/:id/moves',     replaceMoveSlot);
+
+// PATCH /api/pokemon/:id/teach-tm   — replace a move slot by teaching a TM/HM
+router.patch('/:id/teach-tm',  teachTmMove);
 
 // GET  /api/pokemon/:id             — full detail for one pokemon
 router.get('/:id',             getPokemon);

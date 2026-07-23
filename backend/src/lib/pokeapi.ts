@@ -30,6 +30,7 @@ export type TransformedSpecies = {
   abilities: Ability[];
   moves: Move[];
   levelUpMoves: LevelUpMove[]; // sorted ascending by level, used for moveset calculation
+  machineMoves: string[]; // moves this species can learn via TM/HM, in any game version
   evolutionChain: EvolutionStep[];
   evYield: BaseStats;
   catchRate: number;
@@ -151,6 +152,25 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
 
   const levelUpMoveNames = levelUpMoveData.map(m => m.moveId);
 
+  // Collect moves learnable via TM/HM ('machine') in any game version — this
+  // is a per-species compatibility list, distinct from the global "does this
+  // move exist as a real TM/HM at all" catalog in lib/tmHmData.ts.
+  const machineMoveNames: string[] = [];
+  const machineSeen = new Set<string>();
+  for (const m of pokemon.moves) {
+    const isMachineMove = (m.version_group_details as any[])
+      .some((d: any) => d.move_learn_method.name === 'machine');
+    if (isMachineMove && !machineSeen.has(m.move.name)) {
+      machineSeen.add(m.move.name);
+      machineMoveNames.push(m.move.name as string);
+    }
+  }
+
+  // Full move detail (power, type, effect, etc.) is fetched for the union of
+  // level-up and machine-learnable moves — a TM-taught move needs the same
+  // cached data as a level-up move for battle resolution to find it.
+  const detailMoveNames = Array.from(new Set([...levelUpMoveNames, ...machineMoveNames]));
+
   const abilityNames: string[] = pokemon.abilities.map((a: any) => a.ability.name);
   const abilityIsHiddenMap = new Map<string, boolean>(
     pokemon.abilities.map((a: any) => [a.ability.name, a.is_hidden as boolean])
@@ -165,7 +185,7 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
     ),
     fetch(species.evolution_chain.url).then(r => r.json()),
     Promise.all(
-      levelUpMoveNames.map(name =>
+      detailMoveNames.map(name =>
         fetch(`https://pokeapi.co/api/v2/move/${name}`).then(r => r.json())
       )
     ),
@@ -210,6 +230,7 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
     abilities,
     moves,
     levelUpMoves:   levelUpMoveData,
+    machineMoves:   machineMoveNames,
     evolutionChain: flattenEvolutionChain((evolutionChainData as any).chain),
     evYield,
     catchRate:      species.capture_rate as number,

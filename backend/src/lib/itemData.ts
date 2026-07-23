@@ -121,9 +121,24 @@ const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
 /**
  * Returns the correct bag pocket for a given PokeAPI item slug,
  * or null if the item isn't in the supported list.
+ *
+ * TM/HM items aren't hardcoded like every other item here — there are
+ * hundreds of possible moves, so any itemId of the form "tm-<moveId>" is
+ * recognised by pattern instead of an exhaustive map entry. Whether the
+ * move itself is a real TM/HM (not just any move) is validated separately
+ * against the catalog in lib/tmHmData.ts.
  */
 export function getPocket(itemId: string): ItemPocket | null {
+  if (itemId.startsWith('tm-')) return 'tm_hm';
   return ITEM_POCKET_MAP[itemId] ?? null;
+}
+
+/**
+ * Extracts the move slug from a TM/HM itemId ("tm-flamethrower" -> "flamethrower"),
+ * or null if itemId isn't in that shape.
+ */
+export function moveIdFromTmItem(itemId: string): string | null {
+  return itemId.startsWith('tm-') ? itemId.slice(3) : null;
 }
 
 // ---------------------------------------------------------------------------

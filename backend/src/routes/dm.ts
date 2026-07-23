@@ -4,6 +4,8 @@ import {
   resetPlayerTrainerStat,
   givePlayerPokemon,
   givePlayerItem,
+  giveCampaignItem,
+  getTmHmCatalog,
   getNpcs,
   createNpc,
   giveNpcPokemon,
@@ -53,6 +55,8 @@ router.delete('/badges/custom/:badgeId',      deleteCustomBadge);
 
 // --- Player items ---
 router.post('/items/give',                    givePlayerItem);
+router.post('/campaign/items/give',           giveCampaignItem);
+router.get('/tm-hm-moves',                    getTmHmCatalog);
 
 // --- NPCs ---
 router.get('/npcs',                           getNpcs);

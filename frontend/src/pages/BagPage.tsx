@@ -15,7 +15,7 @@ const API = import.meta.env.VITE_API_URL;
 
 type ItemPocket =
   | 'healing' | 'status_cure' | 'pp_recovery'
-  | 'stat_booster' | 'held_type' | 'pokeballs' | 'escape' | 'berry';
+  | 'stat_booster' | 'held_type' | 'pokeballs' | 'escape' | 'berry' | 'tm_hm';
 
 type BagItem = {
   _id: string;
@@ -49,7 +49,13 @@ const POCKET_LABEL: Record<ItemPocket, string> = {
   pokeballs:    'Poké Balls',
   escape:       'Escape',
   berry:        'Berries',
+  tm_hm:        'TMs & HMs',
 };
+
+// Canonical pocket display order, reused wherever pockets are sorted/matched.
+const POCKET_ORDER: ItemPocket[] = [
+  'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry', 'tm_hm',
+];
 
 // Pockets that cannot be used outside of battle (show a notice, skip targeting flow)
 const BATTLE_ONLY_POCKETS: ItemPocket[] = ['pokeballs'];
@@ -63,8 +69,13 @@ const DIRECT_USE_POCKETS: ItemPocket[] = ['escape'];
 const PP_ONE_ITEMS = new Set(['ether', 'max-ether', 'pp-up', 'pp-max']);
 const PP_UP_ITEMS = new Set(['pp-up', 'pp-max']);
 
-// Format a PokeAPI slug like "super-potion" → "Super Potion"
+// Format a PokeAPI slug like "super-potion" → "Super Potion".
+// TM/HM items ("tm-flamethrower") are special-cased to "TM: Flamethrower"
+// rather than the naive "Tm Flamethrower" the generic split would produce.
 function formatItemName(slug: string): string {
+  if (slug.startsWith('tm-')) {
+    return `TM: ${formatItemName(slug.slice(3))}`;
+  }
   return slug
     .split('-')
     .map(w => w.charAt(0).toUpperCase() + w.slice(1))
@@ -165,10 +176,7 @@ export default function BagPage() {
 
     // Default active pocket to first occupied one
     if (fetchedItems.length > 0) {
-      const pocketOrder: ItemPocket[] = [
-        'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry',
-      ];
-      const firstOccupied = pocketOrder.find(p =>
+      const firstOccupied = POCKET_ORDER.find(p =>
         fetchedItems.some(i => i.pocket === p)
       );
       if (firstOccupied) setActivePocket(firstOccupied);
@@ -191,10 +199,7 @@ export default function BagPage() {
   }, {});
 
   const occupiedPockets = (Object.keys(byPocket) as ItemPocket[]).sort((a, b) => {
-    const order: ItemPocket[] = [
-      'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry',
-    ];
-    return order.indexOf(a) - order.indexOf(b);
+    return POCKET_ORDER.indexOf(a) - POCKET_ORDER.indexOf(b);
   });
 
   function selectItem(item: BagItem) {
@@ -263,6 +268,34 @@ export default function BagPage() {
     }
   }
 
+  // Teach a TM/HM into one of the target Pokémon's 4 move slots. Unlike every
+  // other bag item, this does NOT go through /api/items/use and the item is
+  // never consumed (TM/HM items are reusable — Gen 8+ style).
+  async function teachMove(slot: number) {
+    if (!selectedItem || !targetPokemon) return;
+    setUsing(true);
+    setFeedback(null);
+    try {
+      await axios.patch(
+        `${API}/api/pokemon/${targetPokemon._id}/teach-tm`,
+        { slot, itemId: selectedItem.itemId },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+
+      setFeedback({ ok: true, msg: `Taught ${formatItemName(selectedItem.itemId.slice(3))}!` });
+      await loadBag();
+      setSelectedItem(null);
+      setTargetPokemon(null);
+    } catch (err: unknown) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data?.error ?? 'Failed to teach move.')
+        : 'Failed to teach move.';
+      setFeedback({ ok: false, msg });
+    } finally {
+      setUsing(false);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Render helpers
   // ---------------------------------------------------------------------------
@@ -274,9 +307,13 @@ export default function BagPage() {
     return null;
   }
 
-  // Whether the selected item requires picking a single move (Ether / Max Ether / PP Up / PP Max)
+  // Teaching a TM/HM also needs a move-slot pick, same two-step shape as
+  // Ether/PP Up, but it replaces a slot instead of applying an effect to it.
+  const isTeachItem = selectedItem !== null && selectedItem.pocket === 'tm_hm';
+
+  // Whether the selected item requires picking a single move (Ether / Max Ether / PP Up / PP Max / TM-HM)
   const needsMoveTarget =
-    selectedItem !== null && PP_ONE_ITEMS.has(selectedItem.itemId);
+    selectedItem !== null && (PP_ONE_ITEMS.has(selectedItem.itemId) || isTeachItem);
 
   // PP Up / PP Max target a move's PP-Up count, not its current PP
   const isPpUpItem =
@@ -387,7 +424,7 @@ export default function BagPage() {
                                   : selectItem(item)
                               }
                             >
-                              Use
+                              {item.pocket === 'tm_hm' ? 'Teach' : 'Use'}
                             </Button>
                           )}
                         </CardContent>
@@ -400,7 +437,9 @@ export default function BagPage() {
                     <div className="flex flex-col gap-3">
                       <p className="text-sm font-medium">
                         {needsMoveTarget && targetPokemon
-                          ? `Choose a move on ${targetPokemon.nickname ? formatPokemonName(targetPokemon.nickname) : formatPokemonName(targetPokemon.speciesName ?? '')}:`
+                          ? isTeachItem
+                            ? `Replace which move with ${formatItemName(selectedItem.itemId.slice(3))}?`
+                            : `Choose a move on ${targetPokemon.nickname ? formatPokemonName(targetPokemon.nickname) : formatPokemonName(targetPokemon.speciesName ?? '')}:`
                           : 'Choose a Pokémon:'}
                       </p>
 
@@ -415,12 +454,12 @@ export default function BagPage() {
                                 key={idx}
                                 variant="outline"
                                 className="justify-between min-h-11"
-                                disabled={(isPpUpItem ? (move.ppUps ?? 0) >= 3 : move.currentPP >= move.maxPP) || using}
-                                onClick={() => applyItem(idx)}
+                                disabled={using || (!isTeachItem && (isPpUpItem ? (move.ppUps ?? 0) >= 3 : move.currentPP >= move.maxPP))}
+                                onClick={() => isTeachItem ? teachMove(idx) : applyItem(idx)}
                               >
                                 <span>{formatItemName(move.moveId)}</span>
                                 <span className="text-xs text-muted-foreground font-mono">
-                                  {isPpUpItem ? `PP Ups: ${move.ppUps ?? 0}/3` : `${move.currentPP}/${move.maxPP} PP`}
+                                  {isTeachItem ? 'Replace' : isPpUpItem ? `PP Ups: ${move.ppUps ?? 0}/3` : `${move.currentPP}/${move.maxPP} PP`}
                                 </span>
                               </Button>
                             ))

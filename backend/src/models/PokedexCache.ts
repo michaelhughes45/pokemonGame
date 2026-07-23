@@ -68,6 +68,7 @@ const PokedexCacheSchema = new Schema(
     abilities:      [AbilitySchema],
     moves:          [MoveSchema],
     levelUpMoves:   [LevelUpMoveSchema], // for moveset calculation — see LevelUpMoveSchema
+    machineMoves:   [{ type: String }], // moves this species can learn via TM/HM, in any game version
     evolutionChain: [EvolutionStepSchema],
     evYield:        { type: StatSchema, required: true },
     catchRate:      { type: Number, default: 0 },

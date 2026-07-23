@@ -460,25 +460,56 @@ function GiveItemCard({ token }: { token: string | null }) {
   const [username, setUsername] = useState('');
   const [itemId,   setItemId]   = useState('');
   const [quantity, setQuantity] = useState('1');
+  const [giveToAll, setGiveToAll] = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [result,   setResult]   = useState('');
   const [error,    setError]    = useState('');
+
+  // TM/HM move picker — static catalog fetched once, filtered client-side as
+  // the DM types (only ~360 entries, no need for a server-side search route).
+  const [tmHmMoves, setTmHmMoves] = useState<string[]>([]);
+  const [tmSearch,  setTmSearch]  = useState('');
+
+  useEffect(() => {
+    axios.get(`${API}/api/dm/tm-hm-moves`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(res => setTmHmMoves(res.data.data ?? []))
+      .catch(() => {});
+  }, [token]);
+
+  const tmMatches = tmSearch.trim().length > 0
+    ? tmHmMoves.filter(m => m.includes(tmSearch.trim().toLowerCase())).slice(0, 8)
+    : [];
+
+  function pickTmMove(moveId: string) {
+    setItemId(`tm-${moveId}`);
+    setTmSearch('');
+  }
 
   async function handleSubmit(e: { preventDefault(): void }) {
     e.preventDefault();
     setResult(''); setError(''); setLoading(true);
     try {
-      const res = await axios.post(
-        `${API}/api/dm/items/give`,
-        {
-          username: username.trim(),
-          itemId:   itemId.trim(),
-          quantity: Number(quantity),
-        },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      const d = res.data.data;
-      setResult(`Gave ×${quantity} ${d.itemId} to ${d.username}. They now have ×${d.quantity}.`);
+      if (giveToAll) {
+        const res = await axios.post(
+          `${API}/api/dm/campaign/items/give`,
+          { itemId: itemId.trim(), quantity: Number(quantity) },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const d = res.data.data;
+        setResult(`Gave ×${quantity} ${d.itemId} to all ${d.playerCount} player(s) in your campaign.`);
+      } else {
+        const res = await axios.post(
+          `${API}/api/dm/items/give`,
+          {
+            username: username.trim(),
+            itemId:   itemId.trim(),
+            quantity: Number(quantity),
+          },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const d = res.data.data;
+        setResult(`Gave ×${quantity} ${d.itemId} to ${d.username}. They now have ×${d.quantity}.`);
+      }
       setItemId('');
       setQuantity('1');
     } catch (err: unknown) {
@@ -494,16 +525,28 @@ function GiveItemCard({ token }: { token: string | null }) {
       <CardContent>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
 
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="item-username">Player username</Label>
-            <Input
-              id="item-username"
-              placeholder="e.g. ash"
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              required
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={giveToAll}
+              onChange={e => setGiveToAll(e.target.checked)}
+              className="h-4 w-4"
             />
-          </div>
+            Give to entire campaign roster instead of one player
+          </label>
+
+          {!giveToAll && (
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="item-username">Player username</Label>
+              <Input
+                id="item-username"
+                placeholder="e.g. ash"
+                value={username}
+                onChange={e => setUsername(e.target.value)}
+                required
+              />
+            </div>
+          )}
 
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="item-id">
@@ -517,6 +560,35 @@ function GiveItemCard({ token }: { token: string | null }) {
               onChange={e => setItemId(e.target.value)}
               required
             />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="tm-search">
+              Or find a TM/HM by move name{' '}
+              <span className="text-muted-foreground font-normal">(only real TMs/HMs are shown)</span>
+            </Label>
+            <Input
+              id="tm-search"
+              placeholder="e.g. flamethrower"
+              value={tmSearch}
+              onChange={e => setTmSearch(e.target.value)}
+            />
+            {tmMatches.length > 0 && (
+              <div className="flex flex-col gap-1 border rounded-md p-1">
+                {tmMatches.map(m => (
+                  <Button
+                    key={m}
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="justify-start min-h-9"
+                    onClick={() => pickTmMove(m)}
+                  >
+                    {m.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
+                  </Button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -537,10 +609,10 @@ function GiveItemCard({ token }: { token: string | null }) {
 
           <Button
             type="submit"
-            disabled={loading || !username.trim() || !itemId.trim()}
+            disabled={loading || !itemId.trim() || (!giveToAll && !username.trim())}
             className="min-h-11"
           >
-            {loading ? 'Giving…' : 'Give Item'}
+            {loading ? 'Giving…' : giveToAll ? 'Give to Whole Campaign' : 'Give Item'}
           </Button>
         </form>
       </CardContent>

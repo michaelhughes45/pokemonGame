@@ -8,7 +8,8 @@ import { Campaign } from '../models/Campaign';
 import { Npc } from '../models/Npc';
 import { Encounter } from '../models/Encounter';
 import { Battle } from '../models/Battle';
-import { getPocket } from '../lib/itemData';
+import { getPocket, moveIdFromTmItem } from '../lib/itemData';
+import { isTmHmMove, TM_HM_MOVES } from '../lib/tmHmData';
 import { fetchSpecies } from '../lib/pokeapi';
 import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
@@ -151,7 +152,8 @@ async function assertDmEncounter(dmUserId: string, encounterId: string, res: Res
 }
 
 // Looks up a species from the PokedexCache, fetching from PokeAPI when absent.
-// Also refreshes the levelUpMoves field if missing from an existing cache entry.
+// Also refreshes levelUpMoves/machineMoves/moves if either is missing from an
+// existing cache entry (covers entries cached before machineMoves existed).
 // Returns the species document or null (after sending a 404).
 async function resolveSpeciesDoc(species: string | number, res: Response) {
   const isNumeric   = /^\d+$/.test(String(species));
@@ -168,15 +170,21 @@ async function resolveSpeciesDoc(species: string | number, res: Response) {
       sendError(res, 404, `Species "${species}" not found in PokeAPI.`);
       return null;
     }
-  } else if (!speciesDoc.levelUpMoves?.length) {
+  } else if (!speciesDoc.levelUpMoves?.length || !speciesDoc.machineMoves?.length) {
     try {
       const transformed = await fetchSpecies(fetchKey);
       await PokedexCache.updateOne(
         { pokeApiId: transformed.pokeApiId },
-        { $set: { levelUpMoves: transformed.levelUpMoves } },
+        { $set: {
+          levelUpMoves: transformed.levelUpMoves,
+          machineMoves: transformed.machineMoves,
+          moves:        transformed.moves,
+        } },
       );
       // Cast to any: lean() returns a plain object at runtime; this is purely a TS annotation issue.
       (speciesDoc as any).levelUpMoves = transformed.levelUpMoves;
+      (speciesDoc as any).machineMoves = transformed.machineMoves;
+      (speciesDoc as any).moves        = transformed.moves;
     } catch {
       // non-fatal — Pokémon will be created without learnable moves
     }
@@ -217,6 +225,8 @@ function deriveStartingMoves(
 }
 
 // Resolves the pocket for an item slug; sends a 400 and returns null if unrecognised.
+// For TM/HM items ("tm-<moveId>"), also rejects moves that have never actually
+// been released as a real TM/HM in any game (checked against lib/tmHmData.ts).
 function resolveItemPocket(itemId: string, res: Response): string | null {
   const pocket = getPocket(itemId);
   if (!pocket) {
@@ -224,6 +234,13 @@ function resolveItemPocket(itemId: string, res: Response): string | null {
       `"${itemId}" is not a recognised item. Check the PokeAPI slug (e.g. "super-potion", "poke-ball").`,
     );
     return null;
+  }
+  if (pocket === 'tm_hm') {
+    const moveId = moveIdFromTmItem(itemId);
+    if (!moveId || !isTmHmMove(moveId)) {
+      sendError(res, 400, `"${moveId ?? itemId}" has never been released as a TM/HM in any game.`);
+      return null;
+    }
   }
   return pocket;
 }
@@ -356,6 +373,57 @@ export async function givePlayerItem(req: Request, res: Response): Promise<void>
   );
 
   sendOk(res, { itemId: item.itemId, quantity: item.quantity, pocket: item.pocket, username }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/campaign/items/give
+// Give the same item to every player in the DM's active campaign at once —
+// each player still gets their own independent Item doc/quantity, exactly
+// like givePlayerItem, just looped across the whole roster in one action.
+// Body: { itemId, quantity? }
+// ---------------------------------------------------------------------------
+export async function giveCampaignItem(req: Request, res: Response): Promise<void> {
+  const { itemId, quantity = 1 } = req.body as {
+    itemId?: string;
+    quantity?: number;
+  };
+
+  if (!itemId?.trim()) {
+    return sendError(res, 400, 'itemId is required');
+  }
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    return sendError(res, 400, 'quantity must be an integer between 1 and 99');
+  }
+
+  const pocket = resolveItemPocket(itemId.trim(), res);
+  if (!pocket) return;
+
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  if (campaign.playerIds.length === 0) {
+    return sendError(res, 400, 'Your campaign has no players yet');
+  }
+
+  await Promise.all(campaign.playerIds.map(playerId =>
+    Item.findOneAndUpdate(
+      { ownerId: playerId, itemId: itemId.trim() },
+      { $inc: { quantity }, $setOnInsert: { pocket } },
+      { upsert: true },
+    ),
+  ));
+
+  sendOk(res, { itemId: itemId.trim(), quantity, pocket, playerCount: campaign.playerIds.length }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/dm/tm-hm-moves
+// Returns the full static catalog of moves that have ever been a real TM/HM,
+// so the DM's give-item UI can search/pick one client-side. Static reference
+// data (see lib/tmHmData.ts) — no campaign scoping needed.
+// ---------------------------------------------------------------------------
+export async function getTmHmCatalog(_req: Request, res: Response): Promise<void> {
+  sendOk(res, TM_HM_MOVES);
 }
 
 // ---------------------------------------------------------------------------

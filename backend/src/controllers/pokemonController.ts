@@ -3,9 +3,13 @@ import mongoose from 'mongoose';
 import { Pokemon } from '../models/Pokemon';
 import { Npc } from '../models/Npc';
 import { PokedexCache } from '../models/PokedexCache';
+import { Item } from '../models/Item';
 import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 import { getIvsForOwner } from '../lib/trainerIv';
+import { moveIdFromTmItem } from '../lib/itemData';
+import { isTmHmMove } from '../lib/tmHmData';
+import { slugToDisplayName } from '../lib/battleCalc';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -308,6 +312,73 @@ export async function replaceMoveSlot(req: Request, res: Response): Promise<void
     i === (slot as number) ? { moveId: moveId as string, currentPP: pp, maxPP: pp, ppUps: 0 } : m,
   );
 
+  await Pokemon.updateOne({ _id: pokemon._id }, { moves: newMoves });
+  sendOk(res, { moves: newMoves });
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/pokemon/:id/teach-tm
+// Replace one move slot by teaching a TM/HM from the trainer's own bag.
+// Body: { slot: 0–3, itemId: string } — itemId is the "tm-<moveId>" bag item.
+// Unlike every other bag item, the TM/HM is NOT consumed on use (Gen 8+
+// style, unlimited uses) — the player just needs to currently own at least
+// one copy. Players can only teach their own Pokémon; DM/admin can teach any,
+// but the bag checked is always the Pokémon's own owner's, not the caller's.
+// ---------------------------------------------------------------------------
+export async function teachTmMove(req: Request, res: Response): Promise<void> {
+  const { userId, role } = req.user!;
+  const { slot, itemId } = req.body as { slot: unknown; itemId: unknown };
+
+  if (!Number.isInteger(slot) || (slot as number) < 0 || (slot as number) > 3) {
+    return sendError(res, 400, 'slot must be an integer 0–3');
+  }
+  if (!itemId || typeof itemId !== 'string') {
+    return sendError(res, 400, 'itemId is required');
+  }
+
+  const moveId = moveIdFromTmItem(itemId);
+  if (!moveId || !isTmHmMove(moveId)) {
+    return sendError(res, 400, `"${itemId}" is not a valid TM/HM item`);
+  }
+
+  const pokemon = await assertPokemonAccess(String(req.params.id), userId, role, res);
+  if (!pokemon) return;
+
+  if (pokemon.ownerType !== 'player') {
+    return sendError(res, 400, 'Only player-owned Pokémon can learn TM/HM moves');
+  }
+
+  const bagItem = await Item.findOne({ ownerId: pokemon.ownerId, itemId }).lean();
+  if (!bagItem || bagItem.quantity < 1) {
+    return sendError(res, 400, `You don't have a "${itemId}" TM/HM`);
+  }
+
+  const species = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId }).lean();
+  if (!species) {
+    return sendError(res, 404, 'Species data not cached');
+  }
+
+  const machineMoves = (species.machineMoves ?? []) as string[];
+  if (!machineMoves.includes(moveId)) {
+    return sendError(res, 400, `${slugToDisplayName(species.name)} can't learn this move via TM/HM`);
+  }
+
+  type MoveRecord = { name: string; pp: number | null };
+  const moveDetail = ((species.moves ?? []) as MoveRecord[]).find(m => m.name === moveId);
+  const pp = moveDetail?.pp ?? 5;
+
+  type MoveSlot = { moveId: string; currentPP: number; maxPP: number; ppUps: number };
+  const currentMoves = (pokemon.moves ?? []) as MoveSlot[];
+
+  if ((slot as number) >= currentMoves.length) {
+    return sendError(res, 400, `No move in slot ${slot}`);
+  }
+
+  const newMoves: MoveSlot[] = currentMoves.map((m, i) =>
+    i === (slot as number) ? { moveId, currentPP: pp, maxPP: pp, ppUps: 0 } : m,
+  );
+
+  // No item deduction here — TM/HM items are reusable, unlike every other bag item.
   await Pokemon.updateOne({ _id: pokemon._id }, { moves: newMoves });
   sendOk(res, { moves: newMoves });
 }
