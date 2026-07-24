@@ -15,12 +15,21 @@ import TownPage from './pages/TownPage';
 import EncountersPage from './pages/EncountersPage';
 import EncounterFormPage from './pages/EncounterFormPage';
 import DmPlayersPage from './pages/DmPlayersPage';
+import AdminPage from './pages/AdminPage';
 
 function RequireDm({ children }: { children: React.ReactNode }) {
   const { token, user, loading } = useAuth();
   if (loading) return null;
   if (!token) return <Navigate to="/login" replace />;
   if (user?.role !== 'dm' && user?.role !== 'admin') return <Navigate to="/dashboard" replace />;
+  return <>{children}</>;
+}
+
+function RequireAdmin({ children }: { children: React.ReactNode }) {
+  const { token, user, loading } = useAuth();
+  if (loading) return null;
+  if (!token) return <Navigate to="/login" replace />;
+  if (user?.role !== 'admin') return <Navigate to="/dashboard" replace />;
   return <>{children}</>;
 }
 
@@ -147,6 +156,14 @@ function AppRoutes() {
           <RequireDm>
             <DmPlayersPage />
           </RequireDm>
+        }
+      />
+      <Route
+        path="/admin"
+        element={
+          <RequireAdmin>
+            <AdminPage />
+          </RequireAdmin>
         }
       />
       {/* Default: redirect root to dashboard (ProtectedRoute will bounce to /login if needed) */}

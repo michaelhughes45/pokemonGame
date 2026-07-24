@@ -20,8 +20,6 @@ function sendOk(res: Response, data: unknown, status = 200): void {
   res.status(status).json({ data, error: null });
 }
 
-const ALLOWED_ROLES = ['player', 'dm', 'admin'] as const;
-
 function signToken(userId: string, role: string): string {
   return jwt.sign({ userId, role }, process.env.JWT_SECRET!, { expiresIn: '7d' });
 }
@@ -30,16 +28,17 @@ function signToken(userId: string, role: string): string {
 // POST /api/auth/register
 // ---------------------------------------------------------------------------
 export async function register(req: Request, res: Response): Promise<void> {
-  const { username, email, password, role } = req.body;
+  const { username, email, password } = req.body;
 
   if (!username || !email || !password) {
     return sendError(res, 400, 'username, email, and password are required');
   }
 
-  // Default to 'player' if role is missing or not in the allowed list
-  const assignedRole = ALLOWED_ROLES.includes(role) ? role : 'player';
+  // Role is never accepted from the client — every new account starts as
+  // 'player'. Elevating to 'dm'/'admin' only ever happens via an existing
+  // admin's PATCH /api/admin/users/:id/role (see adminController.ts).
   const passwordHash = await bcrypt.hash(password, 12);
-  const user         = await User.create({ username, email, passwordHash, role: assignedRole });
+  const user         = await User.create({ username, email, passwordHash, role: 'player' });
   const token        = signToken(user._id.toString(), user.role);
 
   sendOk(res, { token, user: { id: user._id, username: user.username, role: user.role } }, 201);

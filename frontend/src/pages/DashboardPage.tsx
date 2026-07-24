@@ -235,6 +235,11 @@ export default function DashboardPage() {
               DM Panel →
             </Link>
           )}
+          {user.role === 'admin' && (
+            <Link to="/admin" className="text-sm underline text-muted-foreground">
+              Admin Panel →
+            </Link>
+          )}
         </div>
 
         {/* ── Pending campaign invites (players only) ── */}
