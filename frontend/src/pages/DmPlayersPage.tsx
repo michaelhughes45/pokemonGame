@@ -133,7 +133,7 @@ function EvSummary({ evs }: { evs: RosterPokemon['evs'] }) {
     <div className="flex items-center gap-1.5 flex-wrap text-xs text-muted-foreground">
       <span>EVs: {total}/{EV_TOTAL_CAP}</span>
       {nonZero.map(k => (
-        <span key={k} className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">
+        <span key={k} className="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-200 font-medium">
           {EV_STAT_LABELS[k]} {evs[k]}
         </span>
       ))}
@@ -327,7 +327,7 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
         </Button>
       </div>
       {message && (
-        <p className={`text-xs ${isError ? 'text-red-500' : 'text-green-600'}`}>{message}</p>
+        <p className={`text-xs ${isError ? 'text-red-500 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>{message}</p>
       )}
 
       {!evOpen ? (
@@ -352,10 +352,10 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
               </div>
             ))}
           </div>
-          <p className={`text-xs ${evTotal > EV_TOTAL_CAP ? 'text-red-500' : 'text-muted-foreground'}`}>
+          <p className={`text-xs ${evTotal > EV_TOTAL_CAP ? 'text-red-500 dark:text-red-400' : 'text-muted-foreground'}`}>
             Total: {evTotal}/{EV_TOTAL_CAP}
           </p>
-          {evError && <p className="text-xs text-red-500">{evError}</p>}
+          {evError && <p className="text-xs text-red-500 dark:text-red-400">{evError}</p>}
           <div className="flex gap-2">
             <Button size="sm" disabled={evBusy} onClick={handleSaveEvs} className="shrink-0">
               Save EVs
@@ -589,7 +589,7 @@ function BadgesCard({ username, badges, catalog, customBadges, headers, onRefres
           </Button>
         </div>
         {message && (
-          <p className={`text-xs ${isError ? 'text-red-500' : 'text-green-600'}`}>{message}</p>
+          <p className={`text-xs ${isError ? 'text-red-500 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>{message}</p>
         )}
       </CardContent>
     </Card>
@@ -691,7 +691,7 @@ function CustomBadgesCard({ customBadges, headers, onRefresh }: CustomBadgesCard
           </Button>
         </div>
         {message && (
-          <p className={`text-xs ${isError ? 'text-red-500' : 'text-green-600'}`}>{message}</p>
+          <p className={`text-xs ${isError ? 'text-red-500 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>{message}</p>
         )}
       </CardContent>
     </Card>
@@ -755,7 +755,7 @@ export default function DmPlayersPage() {
   }, [selectedUsername, rosterKey]);
 
   if (playersLoading) return <div className="p-6 text-center text-muted-foreground">Loading…</div>;
-  if (playersError)   return <div className="p-6 text-center text-red-500">{playersError}</div>;
+  if (playersError)   return <div className="p-6 text-center text-red-500 dark:text-red-400">{playersError}</div>;
 
   return (
     <div className="max-w-3xl mx-auto p-4 space-y-6">
@@ -799,7 +799,7 @@ export default function DmPlayersPage() {
             <p className="text-center text-muted-foreground">Loading roster…</p>
           )}
           {rosterError && (
-            <p className="text-center text-red-500">{rosterError}</p>
+            <p className="text-center text-red-500 dark:text-red-400">{rosterError}</p>
           )}
           {roster && !rosterLoading && (
             <>

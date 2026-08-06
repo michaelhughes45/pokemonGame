@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
+import { TYPE_BG } from '../lib/typeColors';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -25,19 +26,6 @@ const roleBadgeVariant: Record<string, 'default' | 'secondary' | 'destructive'> 
   admin: 'destructive',
   dm:    'default',
   player: 'secondary',
-};
-
-// Standard Pokémon type colours — same map as PokemonDetailPage
-const TYPE_BG: Record<string, string> = {
-  normal:   'bg-stone-400',   fire:     'bg-orange-500',
-  water:    'bg-blue-500',    electric: 'bg-yellow-400',
-  grass:    'bg-green-500',   ice:      'bg-cyan-300',
-  fighting: 'bg-red-700',     poison:   'bg-purple-500',
-  ground:   'bg-yellow-600',  flying:   'bg-indigo-300',
-  psychic:  'bg-pink-500',    bug:      'bg-lime-500',
-  rock:     'bg-yellow-700',  ghost:    'bg-purple-700',
-  dragon:   'bg-indigo-600',  dark:     'bg-gray-700',
-  steel:    'bg-slate-400',   fairy:    'bg-pink-300',
 };
 
 type PartyMember = {
@@ -195,15 +183,15 @@ export default function DashboardPage() {
         {/* ── Active battle banner (players only) ── */}
         {activeBattle && (
           <Link to={`/battle/${activeBattle._id}`}>
-            <Card className="border-green-500 bg-green-50 hover:bg-green-100 transition-colors cursor-pointer">
+            <Card className="border-green-500 bg-green-50 hover:bg-green-100 dark:border-green-700 dark:bg-green-950 dark:hover:bg-green-900 transition-colors cursor-pointer">
               <CardContent className="pt-4 flex items-center justify-between">
                 <div className="flex flex-col gap-0.5">
-                  <p className="font-semibold text-sm text-green-900">
+                  <p className="font-semibold text-sm text-green-900 dark:text-green-100">
                     {activeBattle.status === 'waiting' ? 'Battle Starting…' : `Battle in Progress — Turn ${activeBattle.turnNumber}`}
                   </p>
-                  <p className="text-xs text-green-700 capitalize">{activeBattle.type} battle</p>
+                  <p className="text-xs text-green-700 dark:text-green-400 capitalize">{activeBattle.type} battle</p>
                 </div>
-                <span className="text-green-700 text-sm font-medium">Enter →</span>
+                <span className="text-green-700 dark:text-green-400 text-sm font-medium">Enter →</span>
               </CardContent>
             </Card>
           </Link>

@@ -345,7 +345,7 @@ export default function BagPage() {
 
         {/* ── Global feedback banner ── */}
         {feedback && (
-          <p className={`text-sm ${feedback.ok ? 'text-green-600' : 'text-destructive'}`}>
+          <p className={`text-sm ${feedback.ok ? 'text-green-600 dark:text-green-400' : 'text-destructive'}`}>
             {feedback.msg}
           </p>
         )}

@@ -11,6 +11,16 @@ export type CachedAbility = { name: string; isHidden: boolean };
 // Capitalize the first character of a string. Used to format names for @smogon/calc.
 export const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 
+// Computes the real type-effectiveness multiplier (0, 0.25, 0.5, 1, 2, 4, ...) for a
+// move type against a (possibly dual-type) defender. @smogon/calc's result.desc() text
+// never actually contains the words "super effective" / "not very effective" — this is
+// the only reliable way to know effectiveness for turn-log narration.
+export function getTypeEffectiveness(moveType: string, defenderTypes: string[]): number {
+  const type = GEN9.types.get(moveType.toLowerCase() as any);
+  if (!type) return 1;
+  return defenderTypes.reduce((mult, t) => mult * ((type.effectiveness as any)[cap(t)] ?? 1), 1);
+}
+
 // Convert our stored EV spread (spatk/spdef/speed) to @smogon/calc's stat key
 // format (spa/spd/spe) so a Pokémon's real EVs feed into the damage formula.
 export function toCalcEvs(evs: BaseStats) {

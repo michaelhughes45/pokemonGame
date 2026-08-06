@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { TYPE_BG } from '../lib/typeColors';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -82,28 +83,6 @@ type PokemonDetail = {
 // ---------------------------------------------------------------------------
 // Display helpers
 // ---------------------------------------------------------------------------
-
-// Standard Pokémon type colours (Tailwind bg classes)
-const TYPE_BG: Record<string, string> = {
-  normal:   'bg-stone-400',
-  fire:     'bg-orange-500',
-  water:    'bg-blue-500',
-  electric: 'bg-yellow-400',
-  grass:    'bg-green-500',
-  ice:      'bg-cyan-300',
-  fighting: 'bg-red-700',
-  poison:   'bg-purple-500',
-  ground:   'bg-yellow-600',
-  flying:   'bg-indigo-300',
-  psychic:  'bg-pink-500',
-  bug:      'bg-lime-500',
-  rock:     'bg-yellow-700',
-  ghost:    'bg-purple-700',
-  dragon:   'bg-indigo-600',
-  dark:     'bg-gray-700',
-  steel:    'bg-slate-400',
-  fairy:    'bg-pink-300',
-};
 
 // Stat bar colour: red < 50, yellow < 80, green >= 80 (relative to 255 base-stat max)
 function statBarColor(base: number): string {
@@ -754,7 +733,7 @@ export default function PokemonDetailPage() {
                     <Badge variant="secondary" className="text-xs">Hidden</Badge>
                   )}
                   {a.isHidden && pokemon.hasHiddenAbility && (
-                    <Badge className="text-xs bg-purple-100 text-purple-700 border-purple-300">Active</Badge>
+                    <Badge className="text-xs bg-purple-100 text-purple-700 border-purple-300 dark:bg-purple-900 dark:text-purple-200 dark:border-purple-700">Active</Badge>
                   )}
                 </div>
                 {a.effect && (
@@ -770,7 +749,7 @@ export default function PokemonDetailPage() {
                   size="sm"
                   variant="outline"
                   className={pokemon.hasHiddenAbility
-                    ? 'border-purple-400 text-purple-700 hover:bg-purple-50 w-fit'
+                    ? 'border-purple-400 text-purple-700 hover:bg-purple-50 dark:text-purple-300 dark:hover:bg-purple-950 w-fit'
                     : 'border-muted text-muted-foreground w-fit'}
                   disabled={hiddenAbilityBusy}
                   onClick={toggleHiddenAbility}
@@ -857,13 +836,13 @@ export default function PokemonDetailPage() {
               {isDm && (
                 <div className="mt-3 flex flex-col gap-1">
                   {isPrevented && (
-                    <p className="text-xs text-yellow-600 font-medium">Evolution is blocked for this Pokémon.</p>
+                    <p className="text-xs text-yellow-600 dark:text-yellow-400 font-medium">Evolution is blocked for this Pokémon.</p>
                   )}
                   <Button
                     size="sm"
                     variant="outline"
                     className={isPrevented
-                      ? 'border-yellow-500 text-yellow-600 hover:bg-yellow-50 w-fit'
+                      ? 'border-yellow-500 text-yellow-600 hover:bg-yellow-50 dark:text-yellow-400 dark:hover:bg-yellow-950 w-fit'
                       : 'border-muted text-muted-foreground w-fit'}
                     disabled={overrideBusy}
                     onClick={toggleEvolutionBlock}

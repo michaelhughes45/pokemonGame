@@ -50,6 +50,7 @@ import {
   toCalcEvs,
   toCalcIvs,
   appendToLog,
+  getTypeEffectiveness,
 } from '../lib/battleCalc';
 import {
   StatusCondition,
@@ -852,7 +853,13 @@ async function resolveMove(
     }
   }
 
-  let damage = 0; let effectNote = '';
+  // @smogon/calc's result.desc() never actually contains the words "super effective" /
+  // "not very effective" (checked the library source), so effectiveness has to be computed
+  // directly from the move's type vs the target's type(s) rather than string-matched.
+  const moveType = moveData.type?.toLowerCase();
+  const typeEffectiveness = moveType ? getTypeEffectiveness(moveType, (targetCache.types as string[]) ?? []) : 1;
+
+  let damage = 0;
   try {
     const toBoosts = (s?: StatStages) => s ? { atk: s.atk, def: s.def, spa: s.spa, spd: s.spd, spe: s.spe } : undefined;
     const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any });
@@ -862,17 +869,20 @@ async function resolveMove(
     const picked = rolls[Math.floor(Math.random() * rolls.length)];
     damage = Array.isArray(picked) ? picked[Math.floor(Math.random() * picked.length)] : (picked as number);
     if (isCrit && damage > 0) damage = Math.floor(damage * 1.5);
-    const desc = result.desc();
-    if (damage === 0 || desc.includes('immune'))  effectNote = " It had no effect!";
-    else if (desc.includes('super effective'))    effectNote = " It's super effective!";
-    else if (desc.includes('not very effective')) effectNote = " It's not very effective...";
   } catch {
     damage = Math.max(1, Math.floor(((powerOverride ?? moveData.power) * attacker.level) / 50));
     const atkAbilitySlug = attackerAbility?.name;
     if (atkAbilitySlug === 'protean' || atkAbilitySlug === 'libero') damage = Math.floor(damage * 1.5);
     else if (atkAbilitySlug && atkAbilitySlug in ILATE_MAP && moveData.type?.toLowerCase() === 'normal') damage = Math.floor(damage * 1.2);
+    damage = Math.floor(damage * typeEffectiveness);
   }
   damage = Math.max(0, damage);
+
+  const effectNote =
+    typeEffectiveness === 0 ? " It had no effect!"
+    : typeEffectiveness > 1 ? " It's super effective!"
+    : typeEffectiveness < 1 ? " It's not very effective..."
+    : '';
   return { damage, isCrit: isCrit && damage > 0, events: [...pinchEvents, `${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${isCrit && damage > 0 ? ' Critical hit!' : ''}`] };
 }
 

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { TYPE_BG } from '../lib/typeColors';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
@@ -160,7 +161,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 const STATUS_COLOURS: Record<string, string> = {
   waiting:  'bg-muted text-muted-foreground',
-  active:   'bg-green-100 text-green-800',
+  active:   'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
   complete: 'bg-secondary text-secondary-foreground',
 };
 
@@ -171,13 +172,13 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 const CONDITION_BADGES: Record<string, { label: string; cls: string }> = {
-  burn:      { label: 'BRN', cls: 'bg-orange-100 text-orange-800' },
-  paralysis: { label: 'PAR', cls: 'bg-yellow-100 text-yellow-800' },
-  sleep:     { label: 'SLP', cls: 'bg-blue-100   text-blue-800'   },
-  freeze:    { label: 'FRZ', cls: 'bg-cyan-100   text-cyan-800'   },
-  poison:    { label: 'PSN', cls: 'bg-purple-100 text-purple-800' },
-  toxic:     { label: 'TOX', cls: 'bg-fuchsia-100 text-fuchsia-800' },
-  confusion: { label: 'CNF', cls: 'bg-pink-100   text-pink-800'   },
+  burn:      { label: 'BRN', cls: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' },
+  paralysis: { label: 'PAR', cls: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' },
+  sleep:     { label: 'SLP', cls: 'bg-blue-100   text-blue-800 dark:bg-blue-900 dark:text-blue-200'   },
+  freeze:    { label: 'FRZ', cls: 'bg-cyan-100   text-cyan-800 dark:bg-cyan-900 dark:text-cyan-200'   },
+  poison:    { label: 'PSN', cls: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200' },
+  toxic:     { label: 'TOX', cls: 'bg-fuchsia-100 text-fuchsia-800 dark:bg-fuchsia-900 dark:text-fuchsia-200' },
+  confusion: { label: 'CNF', cls: 'bg-pink-100   text-pink-800 dark:bg-pink-900 dark:text-pink-200'   },
 };
 
 function StatusBadge({ info }: { info: ActivePokemonInfo }) {
@@ -211,8 +212,8 @@ function StatStageBadges({ stages }: { stages: StatStages | null }) {
         const val = stages[key];
         const positive = val > 0;
         const cls = positive
-          ? 'bg-green-100 text-green-800'
-          : 'bg-red-100 text-red-800';
+          ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+          : 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
         return (
           <span key={key} className={`text-xs font-bold px-1.5 py-0.5 rounded ${cls}`}>
             {label}{positive ? `+${val}` : val}
@@ -224,11 +225,11 @@ function StatStageBadges({ stages }: { stages: StatStages | null }) {
 }
 
 const WEATHER_CONFIG: Record<string, { label: string; cls: string }> = {
-  rain:      { label: 'Rain',      cls: 'bg-blue-100 text-blue-800'    },
-  sun:       { label: 'Harsh Sun', cls: 'bg-amber-100 text-amber-800'  },
-  sandstorm: { label: 'Sandstorm', cls: 'bg-orange-100 text-orange-800' },
-  hail:      { label: 'Hail',      cls: 'bg-cyan-100 text-cyan-800'    },
-  snow:      { label: 'Snow',      cls: 'bg-slate-100 text-slate-700'  },
+  rain:      { label: 'Rain',      cls: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'    },
+  sun:       { label: 'Harsh Sun', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200'  },
+  sandstorm: { label: 'Sandstorm', cls: 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' },
+  hail:      { label: 'Hail',      cls: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900 dark:text-cyan-200'    },
+  snow:      { label: 'Snow',      cls: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200'  },
 };
 
 function WeatherBadge({ battle }: { battle: BattleState }) {
@@ -265,18 +266,6 @@ function apiError(err: unknown, fallback: string): string {
 function formatMove(id: string): string {
   return id.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 }
-
-const TYPE_BG: Record<string, string> = {
-  normal:   'bg-stone-400',   fire:     'bg-orange-500',
-  water:    'bg-blue-500',    electric: 'bg-yellow-400',
-  grass:    'bg-green-500',   ice:      'bg-cyan-300',
-  fighting: 'bg-red-700',     poison:   'bg-purple-500',
-  ground:   'bg-yellow-600',  flying:   'bg-indigo-300',
-  psychic:  'bg-pink-500',    bug:      'bg-lime-500',
-  rock:     'bg-yellow-700',  ghost:    'bg-purple-700',
-  dragon:   'bg-indigo-600',  dark:     'bg-gray-700',
-  steel:    'bg-slate-400',   fairy:    'bg-pink-300',
-};
 
 function HpBar({ current, max }: { current: number; max: number | null }) {
   const pct = max && max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
@@ -909,7 +898,7 @@ export default function BattlePage() {
                 {STATUS_LABELS[battle.status] ?? battle.status}
               </span>
               {battle.status === 'active' && (
-                <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-800">
+                <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
                   {PHASE_LABELS[battle.phase] ?? battle.phase}
                 </span>
               )}
@@ -1814,7 +1803,9 @@ export default function BattlePage() {
                         <span className="text-sm font-medium">{entry.username}</span>
                         {battle.status === 'active' && battle.phase === 'move_submission' && (
                           <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                            submitted ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                            submitted
+                              ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                              : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
                           }`}>
                             {submitted ? 'Submitted' : 'Pending'}
                           </span>
@@ -1853,7 +1844,9 @@ export default function BattlePage() {
                         <span className="text-sm font-medium">{entry.username}</span>
                         {battle.status === 'active' && battle.phase === 'move_submission' && (
                           <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                            submitted ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'
+                            submitted
+                              ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                              : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
                           }`}>
                             {submitted ? 'Submitted' : 'Pending'}
                           </span>
