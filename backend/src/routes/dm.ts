@@ -5,6 +5,8 @@ import {
   givePlayerPokemon,
   givePlayerItem,
   giveCampaignItem,
+  givePlayerMoney,
+  giveCampaignMoney,
   getTmHmCatalog,
   getNpcs,
   createNpc,
@@ -56,6 +58,8 @@ router.delete('/badges/custom/:badgeId',      deleteCustomBadge);
 // --- Player items ---
 router.post('/items/give',                    givePlayerItem);
 router.post('/campaign/items/give',           giveCampaignItem);
+router.post('/money/give',                    givePlayerMoney);
+router.post('/campaign/money/give',           giveCampaignMoney);
 router.get('/tm-hm-moves',                    getTmHmCatalog);
 
 // --- NPCs ---

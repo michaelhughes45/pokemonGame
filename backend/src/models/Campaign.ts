@@ -16,6 +16,7 @@ type ICampaign = {
   levelCapEnabled: boolean;
   fieldModeEnabled: boolean;
   customBadges: CustomBadge[];
+  shopItemIds: string[];
 };
 
 const CampaignSchema = new Schema<ICampaign>(
@@ -45,6 +46,10 @@ const CampaignSchema = new Schema<ICampaign>(
         _id:       false,
       },
     ],
+    // Which SHOP_PRICES (lib/shopData.ts) itemIds the DM has put up for sale
+    // in this campaign's Pokémart. Empty until the DM curates it — nothing is
+    // for sale by default.
+    shopItemIds: [{ type: String }],
   },
   { timestamps: true }
 );

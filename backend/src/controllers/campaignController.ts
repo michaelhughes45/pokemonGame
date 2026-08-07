@@ -3,6 +3,8 @@ import mongoose from 'mongoose';
 import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
 import { getEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
+import { SHOP_PRICES, getSellPrice } from '../lib/shopData';
+import { getPocket } from '../lib/itemData';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -80,6 +82,7 @@ export async function getMine(req: Request, res: Response): Promise<void> {
     isActive:         campaign.isActive,
     levelCapEnabled:  campaign.levelCapEnabled,
     fieldModeEnabled: campaign.fieldModeEnabled,
+    shopItemIds:      campaign.shopItemIds,
   });
 }
 
@@ -335,4 +338,49 @@ export async function setFieldModeEnabled(req: Request, res: Response): Promise<
   await campaign.save();
 
   sendOk(res, { fieldModeEnabled: campaign.fieldModeEnabled });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/campaigns/shop-catalog
+// Any authenticated user. Returns every item that has a real Pokémart price
+// (lib/shopData.ts), with its pocket and buy/sell price — the DM uses it to
+// pick which ones are for sale (cross-referenced against Campaign.shopItemIds
+// client-side); players use the same data to show Pokémart prices. Not
+// campaign-specific — the priced catalog itself is global.
+// ---------------------------------------------------------------------------
+export async function getShopCatalog(_req: Request, res: Response): Promise<void> {
+  const catalog = Object.keys(SHOP_PRICES).map(itemId => ({
+    itemId,
+    pocket:    getPocket(itemId),
+    buyPrice:  SHOP_PRICES[itemId],
+    sellPrice: getSellPrice(itemId),
+  }));
+
+  sendOk(res, catalog);
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/campaigns/shop-items
+// DM sets which items are currently for sale in their campaign's Pokémart.
+// Body: { itemIds: string[] } — full replace, not incremental. Anything not
+// a real priced item (stale client state, typo, etc.) is silently dropped.
+// ---------------------------------------------------------------------------
+export async function setShopItems(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { itemIds } = req.body as { itemIds?: string[] };
+
+  if (!Array.isArray(itemIds)) {
+    return sendError(res, 400, 'itemIds must be an array');
+  }
+
+  const campaign = await findActiveCampaignByDm(userId);
+  if (!campaign) {
+    return sendError(res, 400, 'You do not have an active campaign');
+  }
+
+  const validItemIds = [...new Set(itemIds)].filter(id => id in SHOP_PRICES);
+  campaign.shopItemIds = validItemIds;
+  await campaign.save();
+
+  sendOk(res, { shopItemIds: campaign.shopItemIds });
 }

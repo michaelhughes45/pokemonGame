@@ -417,6 +417,56 @@ export async function giveCampaignItem(req: Request, res: Response): Promise<voi
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/dm/money/give
+// Give Pokédollars directly to one player. Deliberately separate from the
+// item system so it isn't bound by the 1–99 item quantity cap — money grants
+// are commonly in the thousands, matching Pokémart prices.
+// Body: { username, amount }
+// ---------------------------------------------------------------------------
+export async function givePlayerMoney(req: Request, res: Response): Promise<void> {
+  const { username, amount } = req.body as { username?: string; amount?: number };
+
+  if (!username?.trim()) {
+    return sendError(res, 400, 'username is required');
+  }
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 1) {
+    return sendError(res, 400, 'amount must be a positive integer');
+  }
+
+  const user = await assertCampaignPlayer(req.user!.userId, username.trim(), res);
+  if (!user) return;
+
+  const updated = await User.findByIdAndUpdate(user._id, { $inc: { money: amount } }, { new: true });
+
+  sendOk(res, { username: username.trim(), amount, money: updated!.money }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/dm/campaign/money/give
+// Give the same amount of Pokédollars to every player in the DM's active
+// campaign at once — mirrors giveCampaignItem's bulk pattern.
+// Body: { amount }
+// ---------------------------------------------------------------------------
+export async function giveCampaignMoney(req: Request, res: Response): Promise<void> {
+  const { amount } = req.body as { amount?: number };
+
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 1) {
+    return sendError(res, 400, 'amount must be a positive integer');
+  }
+
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  if (campaign.playerIds.length === 0) {
+    return sendError(res, 400, 'Your campaign has no players yet');
+  }
+
+  await User.updateMany({ _id: { $in: campaign.playerIds } }, { $inc: { money: amount } });
+
+  sendOk(res, { amount, playerCount: campaign.playerIds.length }, 201);
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/dm/tm-hm-moves
 // Returns the full static catalog of moves that have ever been a real TM/HM,
 // so the DM's give-item UI can search/pick one client-side. Static reference

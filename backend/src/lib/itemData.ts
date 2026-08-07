@@ -7,7 +7,7 @@ import { ItemPocket } from '../models/Item';
 // — the server works out the correct pocket automatically.
 // ---------------------------------------------------------------------------
 
-const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
+export const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
   // ── Medicine (healing) ────────────────────────────────────────────────────
   'potion':         'healing',
   'super-potion':   'healing',

@@ -11,6 +11,7 @@ import pokemonRouter from './routes/pokemon';
 import itemsRouter from './routes/items';
 import campaignsRouter from './routes/campaigns';
 import battlesRouter from './routes/battles';
+import shopRouter from './routes/shop';
 import { verifyToken, requireDm, requireAdmin } from './middleware/auth';
 
 const app = express();
@@ -30,6 +31,7 @@ app.use('/api/pokemon', verifyToken, pokemonRouter);
 app.use('/api/items', verifyToken, itemsRouter);
 app.use('/api/campaigns', verifyToken, campaignsRouter);
 app.use('/api/battles', verifyToken, battlesRouter);
+app.use('/api/shop', verifyToken, shopRouter);
 app.use('/api/dm', verifyToken, requireDm, dmRouter);
 app.use('/api/admin', verifyToken, requireAdmin, adminRouter);
 

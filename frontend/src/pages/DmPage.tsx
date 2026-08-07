@@ -504,6 +504,13 @@ function GiveItemCard({ token }: { token: string | null }) {
   const [result,   setResult]   = useState('');
   const [error,    setError]    = useState('');
 
+  // Pokédollars — separate from the item form above (no 1–99 cap, and giving
+  // money shouldn't require filling in an itemId/quantity too).
+  const [moneyAmount,  setMoneyAmount]  = useState('');
+  const [moneyLoading, setMoneyLoading] = useState(false);
+  const [moneyResult,  setMoneyResult]  = useState('');
+  const [moneyError,   setMoneyError]   = useState('');
+
   // TM/HM move picker — static catalog fetched once, filtered client-side as
   // the DM types (only ~360 entries, no need for a server-side search route).
   const [tmHmMoves, setTmHmMoves] = useState<string[]>([]);
@@ -558,6 +565,34 @@ function GiveItemCard({ token }: { token: string | null }) {
     }
   }
 
+  async function handleGiveMoney() {
+    setMoneyResult(''); setMoneyError(''); setMoneyLoading(true);
+    try {
+      if (giveToAll) {
+        const res = await axios.post(
+          `${API}/api/dm/campaign/money/give`,
+          { amount: Number(moneyAmount) },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const d = res.data.data;
+        setMoneyResult(`Gave ₽${d.amount} to all ${d.playerCount} player(s) in your campaign.`);
+      } else {
+        const res = await axios.post(
+          `${API}/api/dm/money/give`,
+          { username: username.trim(), amount: Number(moneyAmount) },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const d = res.data.data;
+        setMoneyResult(`Gave ₽${d.amount} to ${d.username}. They now have ₽${d.money.toLocaleString()}.`);
+      }
+      setMoneyAmount('');
+    } catch (err: unknown) {
+      setMoneyError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to give money') : 'Failed to give money');
+    } finally {
+      setMoneyLoading(false);
+    }
+  }
+
   return (
     <Card>
       <CardHeader><CardTitle>Give Item to Player</CardTitle></CardHeader>
@@ -586,6 +621,32 @@ function GiveItemCard({ token }: { token: string | null }) {
               />
             </div>
           )}
+
+          {/* Pokédollars — separate line, own button, no 1–99 item cap */}
+          <div className="flex items-end gap-2 rounded-md border p-3">
+            <div className="flex-1 flex flex-col gap-1.5">
+              <Label htmlFor="money-amount">Pokédollars</Label>
+              <Input
+                id="money-amount"
+                type="number"
+                min={1}
+                placeholder="e.g. 5000"
+                value={moneyAmount}
+                onChange={e => setMoneyAmount(e.target.value)}
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="min-h-11"
+              disabled={moneyLoading || !moneyAmount.trim() || (!giveToAll && !username.trim())}
+              onClick={handleGiveMoney}
+            >
+              {moneyLoading ? 'Giving…' : 'Give Money'}
+            </Button>
+          </div>
+          {moneyError  && <p className="text-sm text-destructive">{moneyError}</p>}
+          {moneyResult && <p className="text-sm text-muted-foreground">{moneyResult}</p>}
 
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="item-id">
@@ -654,6 +715,177 @@ function GiveItemCard({ token }: { token: string | null }) {
             {loading ? 'Giving…' : giveToAll ? 'Give to Whole Campaign' : 'Give Item'}
           </Button>
         </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Pokémart catalog card ──────────────────────────────────────────────────
+// Lets the DM pick which priced items are for sale in their campaign's
+// Pokémart — individually, or by whole pocket at once (e.g. "select all
+// Berries"). Only items with a real price (lib/shopData.ts) can appear here
+// at all — anything else stays DM-give-only via Give Item above.
+
+type ShopCatalogEntry = { itemId: string; pocket: string | null; buyPrice: number; sellPrice: number | null };
+
+function formatShopItemName(slug: string): string {
+  return slug
+    .split('-')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+const POCKET_LABELS: Record<string, string> = {
+  healing:      'Healing',
+  status_cure:  'Status Cures',
+  pp_recovery:  'PP Recovery',
+  stat_booster: 'Stat Boosters',
+  held_type:    'Held Items',
+  pokeballs:    'Poké Balls',
+  escape:       'Escape',
+  berry:        'Berries',
+  tm_hm:        'TMs/HMs',
+};
+
+function ShopCatalogCard({ token }: { token: string | null }) {
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const [catalog,   setCatalog]   = useState<ShopCatalogEntry[]>([]);
+  const [selected,  setSelected]  = useState<Set<string>>(new Set());
+  const [hasCampaign, setHasCampaign] = useState(true);
+  const [loading,   setLoading]   = useState(true);
+  const [saving,    setSaving]    = useState(false);
+  const [feedback,  setFeedback]  = useState('');
+  const [error,     setError]     = useState('');
+
+  useEffect(() => {
+    Promise.all([
+      axios.get(`${API}/api/campaigns/shop-catalog`, { headers }),
+      axios.get(`${API}/api/campaigns/mine`, { headers }),
+    ])
+      .then(([catalogRes, campaignRes]) => {
+        setCatalog(catalogRes.data.data ?? []);
+        const campaign = campaignRes.data.data;
+        if (!campaign) {
+          setHasCampaign(false);
+        } else {
+          setSelected(new Set<string>(campaign.shopItemIds ?? []));
+        }
+      })
+      .catch(() => setError('Failed to load shop catalog'))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  const grouped = catalog.reduce<Record<string, ShopCatalogEntry[]>>((acc, entry) => {
+    const key = entry.pocket ?? 'other';
+    (acc[key] ??= []).push(entry);
+    return acc;
+  }, {});
+
+  function toggleItem(itemId: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
+      return next;
+    });
+  }
+
+  function togglePocket(pocketItems: ShopCatalogEntry[]) {
+    const allSelected = pocketItems.every(e => selected.has(e.itemId));
+    setSelected(prev => {
+      const next = new Set(prev);
+      for (const e of pocketItems) {
+        if (allSelected) next.delete(e.itemId); else next.add(e.itemId);
+      }
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    setSaving(true); setFeedback(''); setError('');
+    try {
+      const res = await axios.patch(
+        `${API}/api/campaigns/shop-items`,
+        { itemIds: [...selected] },
+        { headers },
+      );
+      setSelected(new Set<string>(res.data.data.shopItemIds ?? []));
+      setFeedback(`Saved — ${res.data.data.shopItemIds.length} item(s) for sale.`);
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to save shop items') : 'Failed to save shop items');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Pokémart Catalog</CardTitle></CardHeader>
+        <CardContent><p className="text-sm text-muted-foreground">Loading…</p></CardContent>
+      </Card>
+    );
+  }
+
+  if (!hasCampaign) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Pokémart Catalog</CardTitle></CardHeader>
+        <CardContent><p className="text-sm text-muted-foreground">Create a campaign first.</p></CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Pokémart Catalog</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <p className="text-sm text-muted-foreground">
+          Choose which items your players can buy in the Pokémart. Nothing is for sale until you save a selection.
+        </p>
+
+        {Object.entries(grouped).map(([pocket, items]) => {
+          const allSelected = items.every(e => selected.has(e.itemId));
+          return (
+            <div key={pocket} className="flex flex-col gap-2">
+              <label className="flex items-center gap-2 text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={() => togglePocket(items)}
+                  className="h-4 w-4"
+                />
+                {POCKET_LABELS[pocket] ?? pocket} ({items.length})
+              </label>
+              <div className="flex flex-col gap-1 pl-6">
+                {items.map(entry => (
+                  <label key={entry.itemId} className="flex items-center justify-between gap-2 text-sm">
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(entry.itemId)}
+                        onChange={() => toggleItem(entry.itemId)}
+                        className="h-4 w-4"
+                      />
+                      {formatShopItemName(entry.itemId)}
+                    </span>
+                    <span className="text-xs text-muted-foreground font-mono">₽{entry.buyPrice}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        {error    && <p className="text-sm text-destructive">{error}</p>}
+        {feedback && <p className="text-sm text-muted-foreground">{feedback}</p>}
+
+        <Button onClick={handleSave} disabled={saving} className="min-h-11">
+          {saving ? 'Saving…' : 'Save Shop Selection'}
+        </Button>
       </CardContent>
     </Card>
   );
@@ -1514,6 +1746,7 @@ export default function DmPage() {
         <CreateBattleCard token={token} />
         <GivePokemonCard token={token} />
         <GiveItemCard token={token} />
+        <ShopCatalogCard token={token} />
         <ResetStarterCard token={token} />
       </div>
     </div>

@@ -10,6 +10,8 @@ import {
   removePlayer,
   setLevelCapEnabled,
   setFieldModeEnabled,
+  getShopCatalog,
+  setShopItems,
 } from '../controllers/campaignController';
 
 const router = Router();
@@ -40,5 +42,12 @@ router.patch('/level-cap', requireDm, setLevelCapEnabled);
 
 // PATCH /api/campaigns/field-mode       — DM toggles Town/Field mode
 router.patch('/field-mode', requireDm, setFieldModeEnabled);
+
+// GET  /api/campaigns/shop-catalog      — full priced item catalog (DM curates from
+//                                          it, players read it to show Pokémart prices)
+router.get('/shop-catalog', getShopCatalog);
+
+// PATCH /api/campaigns/shop-items       — DM sets which items are for sale
+router.patch('/shop-items', requireDm, setShopItems);
 
 export default router;

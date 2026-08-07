@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
@@ -70,20 +70,189 @@ export default function TownPage() {
         </Card>
 
         {/* ── Pokémart ── */}
-        <Card className="opacity-60">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Pokémart</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">Coming soon — shop for items.</p>
-          </CardContent>
-        </Card>
+        <PokemartCard token={token!} />
 
         {/* ── DM: heal NPC parties ── */}
         {isDm && <DmHealSection token={token!} />}
 
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pokémart — Buy lists whatever the DM has put up for sale in the campaign
+// (Campaign.shopItemIds); Sell lists the player's own bag items that have a
+// known sell price, sellable regardless of what's currently for sale.
+// ---------------------------------------------------------------------------
+
+type ShopCatalogEntry = { itemId: string; pocket: string | null; buyPrice: number; sellPrice: number | null };
+type BagItem = { itemId: string; quantity: number };
+type MartRow = { itemId: string; pocket: string | null; price: number; quantity?: number };
+
+function formatItemName(slug: string): string {
+  return slug
+    .split('-')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+const POCKET_LABELS: Record<string, string> = {
+  healing:      'Healing',
+  status_cure:  'Status Cures',
+  pp_recovery:  'PP Recovery',
+  stat_booster: 'Stat Boosters',
+  held_type:    'Held Items',
+  pokeballs:    'Poké Balls',
+  escape:       'Escape',
+  berry:        'Berries',
+};
+
+function PokemartCard({ token }: { token: string }) {
+  const { user, refreshUser } = useAuth();
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const [catalog,     setCatalog]     = useState<ShopCatalogEntry[]>([]);
+  const [shopItemIds, setShopItemIds] = useState<string[]>([]);
+  const [bag,         setBag]         = useState<BagItem[]>([]);
+  const [mode,        setMode]        = useState<'buy' | 'sell'>('buy');
+  const [loading,     setLoading]     = useState(true);
+  const [busy,        setBusy]        = useState<Record<string, boolean>>({});
+  const [msgs,        setMsgs]        = useState<Record<string, string>>({});
+
+  function loadAll() {
+    return Promise.all([
+      axios.get(`${API}/api/campaigns/shop-catalog`, { headers }),
+      axios.get(`${API}/api/campaigns/mine`, { headers }),
+      axios.get(`${API}/api/items`, { headers }),
+    ]).then(([catalogRes, campaignRes, bagRes]) => {
+      setCatalog(catalogRes.data.data ?? []);
+      setShopItemIds(campaignRes.data.data?.shopItemIds ?? []);
+      setBag(bagRes.data.data ?? []);
+    });
+  }
+
+  useEffect(() => {
+    setLoading(true);
+    loadAll().catch(() => {}).finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  const catalogById = new Map(catalog.map(c => [c.itemId, c]));
+
+  const buyList: MartRow[] = shopItemIds
+    .map(id => catalogById.get(id))
+    .filter((e): e is ShopCatalogEntry => Boolean(e))
+    .map(e => ({ itemId: e.itemId, pocket: e.pocket, price: e.buyPrice }));
+
+  const sellList: MartRow[] = bag
+    .map(item => {
+      const entry = catalogById.get(item.itemId);
+      if (entry?.sellPrice == null) return null;
+      return { itemId: item.itemId, pocket: entry.pocket, price: entry.sellPrice, quantity: item.quantity };
+    })
+    .filter((row): row is MartRow => row !== null);
+
+  const grouped = (mode === 'buy' ? buyList : sellList).reduce<Record<string, MartRow[]>>((acc, row) => {
+    const key = row.pocket ?? 'other';
+    (acc[key] ??= []).push(row);
+    return acc;
+  }, {});
+
+  async function handleTransaction(itemId: string, kind: 'buy' | 'sell') {
+    setBusy(b => ({ ...b, [itemId]: true }));
+    setMsgs(m => ({ ...m, [itemId]: '' }));
+    try {
+      const res = await axios.post(
+        `${API}/api/shop/${kind}`,
+        { itemId, quantity: 1 },
+        { headers },
+      );
+      setMsgs(m => ({
+        ...m,
+        [itemId]: kind === 'buy' ? `Bought — now have ×${res.data.data.quantity}.` : `Sold for ₽${res.data.data.proceeds}.`,
+      }));
+      await Promise.all([loadAll(), refreshUser()]);
+    } catch (err) {
+      const label = kind === 'buy' ? 'Failed to buy' : 'Failed to sell';
+      setMsgs(m => ({ ...m, [itemId]: axios.isAxiosError(err) ? (err.response?.data?.error ?? label) : label }));
+    } finally {
+      setBusy(b => ({ ...b, [itemId]: false }));
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center justify-between">
+          Pokémart
+          {user && <span className="text-sm font-normal text-muted-foreground">₽{user.money.toLocaleString()}</span>}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant={mode === 'buy' ? 'default' : 'outline'}
+            className="flex-1 min-h-9"
+            onClick={() => setMode('buy')}
+          >
+            Buy
+          </Button>
+          <Button
+            size="sm"
+            variant={mode === 'sell' ? 'default' : 'outline'}
+            className="flex-1 min-h-9"
+            onClick={() => setMode('sell')}
+          >
+            Sell
+          </Button>
+        </div>
+
+        {loading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : mode === 'buy' && buyList.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nothing for sale yet — ask your DM to stock the Mart.</p>
+        ) : mode === 'sell' && sellList.length === 0 ? (
+          <p className="text-sm text-muted-foreground">You don't have anything sellable.</p>
+        ) : (
+          Object.entries(grouped).map(([pocket, rows]) => (
+            <div key={pocket} className="flex flex-col gap-1.5">
+              <p className="text-xs font-semibold text-muted-foreground uppercase">
+                {POCKET_LABELS[pocket] ?? pocket}
+              </p>
+              {rows.map(row => (
+                <div key={row.itemId} className="flex flex-col gap-0.5">
+                  <div className="flex items-center justify-between gap-2 text-sm">
+                    <span>
+                      {formatItemName(row.itemId)}
+                      {row.quantity !== undefined && (
+                        <span className="text-xs text-muted-foreground"> ×{row.quantity}</span>
+                      )}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground font-mono">₽{row.price}</span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy[row.itemId]}
+                        onClick={() => handleTransaction(row.itemId, mode)}
+                        className="min-h-9"
+                      >
+                        {busy[row.itemId] ? '…' : mode === 'buy' ? 'Buy' : 'Sell'}
+                      </Button>
+                    </div>
+                  </div>
+                  {msgs[row.itemId] && (
+                    <p className="text-xs text-muted-foreground text-right">{msgs[row.itemId]}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
