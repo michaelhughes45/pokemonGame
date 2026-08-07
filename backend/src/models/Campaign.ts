@@ -14,6 +14,7 @@ type ICampaign = {
   pendingInvites: Array<{ userId: mongoose.Types.ObjectId; sentAt: Date }>;
   isActive: boolean;
   levelCapEnabled: boolean;
+  fieldModeEnabled: boolean;
   customBadges: CustomBadge[];
 };
 
@@ -30,6 +31,8 @@ const CampaignSchema = new Schema<ICampaign>(
     ],
     isActive:        { type: Boolean, default: true },
     levelCapEnabled: { type: Boolean, default: true },
+    // false = Town mode (default, /pc + /town accessible); true = Field mode (blocked)
+    fieldModeEnabled: { type: Boolean, default: false },
     // DM-defined badges for homebrew gyms, beyond the hardcoded catalog in
     // lib/badgeData.ts. badgeId is generated on creation (not user-chosen) so
     // it can never collide with a catalog badgeId or another custom one.

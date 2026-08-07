@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { useNavigate, Link } from 'react-router-dom';
+import { useLocation, useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
 import { TYPE_BG } from '../lib/typeColors';
 import { Button } from '../components/ui/button';
@@ -78,6 +78,8 @@ const TRAINER_STAT_OPTIONS: { key: string; label: string }[] = [
 export default function DashboardPage() {
   const { user, token, logout, refreshUser } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const blockedMessage = (location.state as { blockedMessage?: string } | null)?.blockedMessage;
 
   const [party, setParty]               = useState<PartyMember[]>([]);
   const [partyLoading, setPartyLoading] = useState(true);
@@ -179,6 +181,15 @@ export default function DashboardPage() {
             Log out
           </Button>
         </div>
+
+        {/* ── Blocked-route banner (e.g. bounced from /pc or /town in Field mode) ── */}
+        {blockedMessage && (
+          <Card className="border-amber-500 bg-amber-50 dark:border-amber-700 dark:bg-amber-950">
+            <CardContent className="pt-4">
+              <p className="text-sm text-amber-900 dark:text-amber-100">{blockedMessage}</p>
+            </CardContent>
+          </Card>
+        )}
 
         {/* ── Active battle banner (players only) ── */}
         {activeBattle && (

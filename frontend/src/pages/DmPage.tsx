@@ -21,6 +21,7 @@ type CampaignData = {
   players: CampaignPlayer[];
   pendingInvites: PendingInvite[];
   levelCapEnabled: boolean;
+  fieldModeEnabled: boolean;
 };
 
 function CampaignCard({ token }: { token: string | null }) {
@@ -33,6 +34,7 @@ function CampaignCard({ token }: { token: string | null }) {
   const [feedback,       setFeedback]       = useState('');
   const [error,          setError]          = useState('');
   const [levelCapLoading, setLevelCapLoading] = useState(false);
+  const [fieldModeLoading, setFieldModeLoading] = useState(false);
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -118,6 +120,24 @@ function CampaignCard({ token }: { token: string | null }) {
     }
   }
 
+  async function handleToggleFieldMode() {
+    if (!campaign) return;
+    clearMessages(); setFieldModeLoading(true);
+    try {
+      const res = await axios.patch(
+        `${API}/api/campaigns/field-mode`,
+        { enabled: !campaign.fieldModeEnabled },
+        { headers },
+      );
+      setCampaign({ ...campaign, fieldModeEnabled: res.data.data.fieldModeEnabled });
+      setFeedback(`${res.data.data.fieldModeEnabled ? 'Field' : 'Town'} mode enabled.`);
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to update field mode') : 'Failed to update field mode');
+    } finally {
+      setFieldModeLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <Card>
@@ -182,6 +202,25 @@ function CampaignCard({ token }: { token: string | null }) {
             onClick={handleToggleLevelCap}
           >
             {levelCapLoading ? 'Updating…' : campaign.levelCapEnabled ? 'On' : 'Off'}
+          </Button>
+        </div>
+
+        {/* Town / Field mode toggle */}
+        <div className="flex items-center justify-between rounded-md border p-3">
+          <div>
+            <p className="text-sm font-medium">Town / Field mode</p>
+            <p className="text-xs text-muted-foreground">
+              {campaign.fieldModeEnabled ? 'Field — /pc and /town blocked for players' : 'Town — /pc and /town accessible'}
+            </p>
+          </div>
+          <Button
+            variant={campaign.fieldModeEnabled ? 'default' : 'outline'}
+            size="sm"
+            className="min-h-9 shrink-0"
+            disabled={fieldModeLoading}
+            onClick={handleToggleFieldMode}
+          >
+            {fieldModeLoading ? 'Updating…' : campaign.fieldModeEnabled ? 'Field' : 'Town'}
           </Button>
         </div>
 

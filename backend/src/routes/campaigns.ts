@@ -9,6 +9,7 @@ import {
   leaveCampaign,
   removePlayer,
   setLevelCapEnabled,
+  setFieldModeEnabled,
 } from '../controllers/campaignController';
 
 const router = Router();
@@ -36,5 +37,8 @@ router.delete('/players/:username', requireDm, removePlayer);
 
 // PATCH /api/campaigns/level-cap        — DM toggles the campaign-wide level cap
 router.patch('/level-cap', requireDm, setLevelCapEnabled);
+
+// PATCH /api/campaigns/field-mode       — DM toggles Town/Field mode
+router.patch('/field-mode', requireDm, setFieldModeEnabled);
 
 export default router;

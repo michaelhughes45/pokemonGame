@@ -1,4 +1,6 @@
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import axios from 'axios';
 import { AuthProvider } from './context/AuthProvider';
 import { ThemeProvider } from './context/ThemeProvider';
 import { ThemeToggle } from './components/ThemeToggle';
@@ -19,6 +21,8 @@ import EncounterFormPage from './pages/EncounterFormPage';
 import DmPlayersPage from './pages/DmPlayersPage';
 import AdminPage from './pages/AdminPage';
 
+const API = import.meta.env.VITE_API_URL;
+
 function RequireDm({ children }: { children: React.ReactNode }) {
   const { token, user, loading } = useAuth();
   if (loading) return null;
@@ -32,6 +36,42 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   if (loading) return null;
   if (!token) return <Navigate to="/login" replace />;
   if (user?.role !== 'admin') return <Navigate to="/dashboard" replace />;
+  return <>{children}</>;
+}
+
+// Blocks /pc and /town for players whose campaign is currently in Field mode.
+// DMs/admins have no player character (see Key Decisions), so the check only
+// applies to the 'player' role — everyone else passes through untouched.
+function RequireTownMode({ children }: { children: React.ReactNode }) {
+  const { token, user, loading } = useAuth();
+  const [checking, setChecking] = useState(true);
+  const [blocked, setBlocked]   = useState(false);
+
+  useEffect(() => {
+    if (loading) return;
+    if (!token || user?.role !== 'player') {
+      setChecking(false);
+      return;
+    }
+    let cancelled = false;
+    axios
+      .get(`${API}/api/campaigns/mine`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(res => { if (!cancelled) setBlocked(Boolean(res.data.data?.fieldModeEnabled)); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setChecking(false); });
+    return () => { cancelled = true; };
+  }, [token, user, loading]);
+
+  if (loading || checking) return null;
+  if (blocked) {
+    return (
+      <Navigate
+        to="/dashboard"
+        replace
+        state={{ blockedMessage: 'This area is unavailable while your campaign is in Field mode.' }}
+      />
+    );
+  }
   return <>{children}</>;
 }
 
@@ -92,7 +132,9 @@ function AppRoutes() {
         path="/pc"
         element={
           <ProtectedRoute>
-            <PCPage />
+            <RequireTownMode>
+              <PCPage />
+            </RequireTownMode>
           </ProtectedRoute>
         }
       />
@@ -116,7 +158,9 @@ function AppRoutes() {
         path="/town"
         element={
           <ProtectedRoute>
-            <TownPage />
+            <RequireTownMode>
+              <TownPage />
+            </RequireTownMode>
           </ProtectedRoute>
         }
       />

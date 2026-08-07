@@ -77,8 +77,9 @@ export async function getMine(req: Request, res: Response): Promise<void> {
     dmId:            campaign.dmId,
     players,
     pendingInvites,
-    isActive:        campaign.isActive,
-    levelCapEnabled: campaign.levelCapEnabled,
+    isActive:         campaign.isActive,
+    levelCapEnabled:  campaign.levelCapEnabled,
+    fieldModeEnabled: campaign.fieldModeEnabled,
   });
 }
 
@@ -309,4 +310,29 @@ export async function setLevelCapEnabled(req: Request, res: Response): Promise<v
   }
 
   sendOk(res, { levelCapEnabled: campaign.levelCapEnabled, unlockedCount });
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/campaigns/field-mode
+// DM toggles the campaign between Town mode (accessible) and Field mode
+// (blocks players from /pc and /town — enforced client-side per route).
+// Body: { enabled: boolean }
+// ---------------------------------------------------------------------------
+export async function setFieldModeEnabled(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { enabled } = req.body as { enabled?: boolean };
+
+  if (typeof enabled !== 'boolean') {
+    return sendError(res, 400, 'enabled must be a boolean');
+  }
+
+  const campaign = await findActiveCampaignByDm(userId);
+  if (!campaign) {
+    return sendError(res, 400, 'You do not have an active campaign');
+  }
+
+  campaign.fieldModeEnabled = enabled;
+  await campaign.save();
+
+  sendOk(res, { fieldModeEnabled: campaign.fieldModeEnabled });
 }
