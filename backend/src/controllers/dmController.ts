@@ -8,7 +8,7 @@ import { Campaign } from '../models/Campaign';
 import { Npc } from '../models/Npc';
 import { Encounter } from '../models/Encounter';
 import { Battle } from '../models/Battle';
-import { getPocket, moveIdFromTmItem } from '../lib/itemData';
+import { getPocket, moveIdFromTmItem, natureFromMintItem, rollHeldItem } from '../lib/itemData';
 import { isTmHmMove, TM_HM_MOVES } from '../lib/tmHmData';
 import { fetchSpecies } from '../lib/pokeapi';
 import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
@@ -227,6 +227,7 @@ function deriveStartingMoves(
 // Resolves the pocket for an item slug; sends a 400 and returns null if unrecognised.
 // For TM/HM items ("tm-<moveId>"), also rejects moves that have never actually
 // been released as a real TM/HM in any game (checked against lib/tmHmData.ts).
+// For mint items ("mint-<nature>"), rejects anything that isn't one of the 25 real natures.
 function resolveItemPocket(itemId: string, res: Response): string | null {
   const pocket = getPocket(itemId);
   if (!pocket) {
@@ -241,6 +242,10 @@ function resolveItemPocket(itemId: string, res: Response): string | null {
       sendError(res, 400, `"${moveId ?? itemId}" has never been released as a TM/HM in any game.`);
       return null;
     }
+  }
+  if (pocket === 'mint' && !natureFromMintItem(itemId)) {
+    sendError(res, 400, `"${itemId}" is not a recognised mint. Expected "mint-<nature>", e.g. "mint-bold".`);
+    return null;
   }
   return pocket;
 }
@@ -718,7 +723,7 @@ export async function giveNpcPokemon(req: Request, res: Response): Promise<void>
     currentHp: maxHp,
     nature,
     gender:    resolvedGender,
-    heldItem:  null,
+    heldItem:  rollHeldItem(npc.type === 'wild'),
     moves,
     isInParty: true,
     partySlot: null,
@@ -747,7 +752,7 @@ export async function getNpcParty(req: Request, res: Response): Promise<void> {
 
   const pokemons = await Pokemon.find(
     { ownerId: npc._id, ownerType: 'npc' },
-    'speciesId nickname level currentHp nature moves',
+    'speciesId nickname level currentHp nature moves heldItem',
   ).lean();
 
   const speciesIds = [...new Set(pokemons.map(p => p.speciesId))];
@@ -764,6 +769,7 @@ export async function getNpcParty(req: Request, res: Response): Promise<void> {
     level:       p.level,
     currentHp:   p.currentHp,
     moves:       p.moves,
+    heldItem:    p.heldItem,
   })));
 }
 
@@ -1252,7 +1258,7 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
         currentHp:          stats.hp,
         nature,
         gender,
-        heldItem:           null,
+        heldItem:           rollHeldItem(true),
         moves,
         evs:                { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 },
         statusCondition:    null,

@@ -93,6 +93,10 @@ function statBarColor(base: number): string {
 
 // Capitalise and replace hyphens with spaces: "mr-mime" → "Mr Mime"
 function formatName(name: string): string {
+  if (name.startsWith('mint-')) {
+    const nature = name.slice(5);
+    return `${nature.charAt(0).toUpperCase() + nature.slice(1)} Mint`;
+  }
   return name
     .split('-')
     .map(w => w.charAt(0).toUpperCase() + w.slice(1))

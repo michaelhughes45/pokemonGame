@@ -10,7 +10,7 @@ import { Item } from '../models/Item';
 import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smogon/calc';
 import { canEvolve } from '../lib/evolution';
-import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier } from '../lib/itemData';
+import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem, getPocket } from '../lib/itemData';
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
 import { ivsFromSpread, getIvsForOwner } from '../lib/trainerIv';
@@ -250,7 +250,7 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
       speciesId: species.pokeApiId, ownerId: new mongoose.Types.ObjectId(req.user!.userId),
       ownerType: 'wild', nickname: null, level,
       exp: expForLevel(level, (species.expGroup as string) || 'medium-fast'),
-      currentHp: stats.hp, nature, gender, heldItem: null, moves,
+      currentHp: stats.hp, nature, gender, heldItem: rollHeldItem(true), moves,
       evs: { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 },
       statusCondition: null, statusCounter: null, volatileStatus: [],
       evolutionOverrides: [], isInParty: false, partySlot: null,
@@ -886,17 +886,55 @@ async function resolveMove(
   return { damage, isCrit: isCrit && damage > 0, events: [...pinchEvents, `${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${isCrit && damage > 0 ? ' Critical hit!' : ''}`] };
 }
 
-async function applyFaints(battle: HydratedDocument<IBattle>): Promise<string[]> {
+// attackerId/attackerType identify who dealt the fainting blow, if known — only
+// passed by the single-move resolution path (submitTarget). End-of-round faints
+// (status/weather/leech-seed DoT) have no single attacker, so loot never drops
+// there; those callers simply omit the two args.
+async function applyFaints(
+  battle: HydratedDocument<IBattle>,
+  attackerId?: mongoose.Types.ObjectId,
+  attackerType?: 'player' | 'npc',
+): Promise<string[]> {
   const events: string[] = [];
   const sides = [[battle.playerSide, 'playerSide'], [battle.enemySide, 'enemySide']] as const;
   for (const [entries, sideKey] of sides) {
     for (const entry of entries) {
       if (!entry.activePokemonId) continue;
-      const poke = await Pokemon.findById(entry.activePokemonId, 'currentHp nickname speciesId').lean();
+      const poke = await Pokemon.findById(
+        entry.activePokemonId,
+        'currentHp nickname speciesId heldItem ownerId ownerType',
+      ).lean();
       if (!poke || poke.currentHp > 0) continue;
       const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
       events.push(`${pokeDisplayName(poke, cache)} fainted!`);
-      await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { volatileStatus: [] } });
+
+      const clearedFields: Record<string, unknown> = { volatileStatus: [] };
+
+      // Loot drop — only for wild-owned Pokémon (standalone wild spawns, or an
+      // Npc.type:'wild' party member), only to a real attacking player, and
+      // only when it was actually holding something. Trainer NPCs' held items
+      // are flavor-only and never drop (see Key Decisions, milestone 5.12).
+      if (poke.heldItem && attackerType === 'player' && attackerId) {
+        let isWildSource = poke.ownerType === 'wild';
+        if (poke.ownerType === 'npc') {
+          const npc = await Npc.findById(poke.ownerId, 'type').lean();
+          isWildSource = npc?.type === 'wild';
+        }
+        if (isWildSource) {
+          const pocket = getPocket(poke.heldItem);
+          if (pocket) {
+            await Item.findOneAndUpdate(
+              { ownerId: attackerId, itemId: poke.heldItem },
+              { $inc: { quantity: 1 }, $setOnInsert: { pocket, ownerType: 'player' } },
+              { upsert: true },
+            );
+            clearedFields.heldItem = null;
+            events.push(`${pokeDisplayName(poke, cache)} dropped its ${slugToDisplayName(poke.heldItem)}!`);
+          }
+        }
+      }
+
+      await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: clearedFields });
       delete (battle.statStages as Record<string, StatStages>)[entry.activePokemonId.toString()];
       battle.markModified('statStages');
       delete (battle.consecutiveMoves as Record<string, unknown>)[entry.activePokemonId.toString()];
@@ -2153,7 +2191,7 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
   battle.turnQueue[idx].resolved = true;
   appendToLog(battle, ...moveEvents);
 
-  const faintEvents = await applyFaints(battle);
+  const faintEvents = await applyFaints(battle, currentEntry.actorId, currentEntry.actorType);
   const endEvents   = await checkBattleEnd(battle);
   appendToLog(battle, ...faintEvents, ...endEvents);
 

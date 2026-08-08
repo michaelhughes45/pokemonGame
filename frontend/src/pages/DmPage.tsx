@@ -692,6 +692,24 @@ function GiveItemCard({ token }: { token: string | null }) {
           </div>
 
           <div className="flex flex-col gap-1.5">
+            <Label htmlFor="mint-select">
+              Or pick a Mint{' '}
+              <span className="text-muted-foreground font-normal">(overwrites the target Pokémon's nature)</span>
+            </Label>
+            <select
+              id="mint-select"
+              className={selectClass}
+              value=""
+              onChange={e => {
+                if (e.target.value) setItemId(`mint-${e.target.value.toLowerCase()}`);
+              }}
+            >
+              <option value="">Select a nature…</option>
+              {NATURES.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
             <Label htmlFor="item-quantity">Quantity</Label>
             <Input
               id="item-quantity"
@@ -729,6 +747,10 @@ function GiveItemCard({ token }: { token: string | null }) {
 type ShopCatalogEntry = { itemId: string; pocket: string | null; buyPrice: number; sellPrice: number | null };
 
 function formatShopItemName(slug: string): string {
+  if (slug.startsWith('mint-')) {
+    const nature = slug.slice(5);
+    return `${nature.charAt(0).toUpperCase() + nature.slice(1)} Mint`;
+  }
   return slug
     .split('-')
     .map(w => w.charAt(0).toUpperCase() + w.slice(1))
@@ -745,6 +767,7 @@ const POCKET_LABELS: Record<string, string> = {
   escape:       'Escape',
   berry:        'Berries',
   tm_hm:        'TMs/HMs',
+  mint:         'Mints',
 };
 
 function ShopCatalogCard({ token }: { token: string | null }) {
@@ -1111,6 +1134,7 @@ type NpcPartyPokemon = {
   nickname: string | null;
   level: number;
   currentHp: number;
+  heldItem: string | null;
 };
 
 function NpcPartyManagerCard({ token }: { token: string | null }) {
@@ -1225,7 +1249,10 @@ function NpcPartyManagerCard({ token }: { token: string | null }) {
                                 ? `${poke.nickname} (${poke.speciesName})`
                                 : poke.speciesName}
                             </p>
-                            <p className="text-xs text-muted-foreground">Lv. {poke.level}</p>
+                            <p className="text-xs text-muted-foreground">
+                              Lv. {poke.level}
+                              {poke.heldItem && <> · Holding: {formatShopItemName(poke.heldItem)}</>}
+                            </p>
                           </div>
                         </div>
                         <span className="text-xs text-muted-foreground">

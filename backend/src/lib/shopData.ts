@@ -1,3 +1,6 @@
+import { NATURES } from './statCalc';
+import { mintItemId } from './itemData';
+
 // ---------------------------------------------------------------------------
 // Hardcoded Pokémart price catalog. Hand-sourced from Bulbapedia (not a
 // mechanical PokeAPI sweep — PokeAPI's `cost`/`prices` fields are effectively
@@ -25,7 +28,17 @@
 //
 // Sell price is never stored — it's always derived: half the buy price,
 // floored, minimum 1 (see getSellPrice below).
+//
+// Mints are a project addition (not a real held item), so there's no
+// Bulbapedia price to source — flat 1500 for all 25 per project decision.
+// Generated from NATURES/mintItemId rather than hand-typed, same reasoning
+// as mints being resolved by itemId pattern instead of an exhaustive table.
 // ---------------------------------------------------------------------------
+
+const MINT_PRICE = 1500;
+const MINT_PRICES: Record<string, number> = Object.fromEntries(
+  NATURES.map(nature => [mintItemId(nature), MINT_PRICE]),
+);
 
 export const SHOP_PRICES: Record<string, number> = {
   // ── Healing ──────────────────────────────────────────────────────────────
@@ -94,6 +107,9 @@ export const SHOP_PRICES: Record<string, number> = {
   'hondew-berry':   50,
   'grepa-berry':    50,
   'tamato-berry':   50,
+
+  // ── Mints ─────────────────────────────────────────────────────────────────
+  ...MINT_PRICES,
 };
 
 export function getBuyPrice(itemId: string): number | null {

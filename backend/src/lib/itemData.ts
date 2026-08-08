@@ -1,4 +1,5 @@
 import { ItemPocket } from '../models/Item';
+import { NATURES } from './statCalc';
 
 // ---------------------------------------------------------------------------
 // Canonical itemId → pocket mapping.
@@ -126,10 +127,12 @@ export const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
  * hundreds of possible moves, so any itemId of the form "tm-<moveId>" is
  * recognised by pattern instead of an exhaustive map entry. Whether the
  * move itself is a real TM/HM (not just any move) is validated separately
- * against the catalog in lib/tmHmData.ts.
+ * against the catalog in lib/tmHmData.ts. Mints follow the same pattern
+ * ("mint-<nature>") since the nature is already encoded in the itemId.
  */
 export function getPocket(itemId: string): ItemPocket | null {
   if (itemId.startsWith('tm-')) return 'tm_hm';
+  if (itemId.startsWith('mint-')) return 'mint';
   return ITEM_POCKET_MAP[itemId] ?? null;
 }
 
@@ -139,6 +142,55 @@ export function getPocket(itemId: string): ItemPocket | null {
  */
 export function moveIdFromTmItem(itemId: string): string | null {
   return itemId.startsWith('tm-') ? itemId.slice(3) : null;
+}
+
+/**
+ * Builds the itemId for a given nature's mint, e.g. "Bold" -> "mint-bold".
+ */
+export function mintItemId(nature: string): string {
+  return `mint-${nature.toLowerCase()}`;
+}
+
+/**
+ * Extracts and validates the nature from a mint itemId ("mint-bold" -> "Bold"),
+ * or null if itemId isn't a real mint for one of the 25 natures.
+ */
+export function natureFromMintItem(itemId: string): string | null {
+  if (!itemId.startsWith('mint-')) return null;
+  const slug = itemId.slice(5);
+  return NATURES.find(n => n.toLowerCase() === slug) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Random held item assignment (milestone 5.12)
+// Wild-owned Pokémon (Npc.type:'wild' parties and standalone wild-battle
+// spawns) can drop their held item to the player that faints them; trainer
+// NPCs' held items never drop and are flavor only. Mints only ever matter as
+// a drop (they have no passive effect while merely "held"), so they're only
+// in the pool for sources that can actually drop — never for trainer NPCs.
+// ---------------------------------------------------------------------------
+
+const HELD_TYPE_ITEMS: string[] = Object.entries(ITEM_POCKET_MAP)
+  .filter(([, pocket]) => pocket === 'held_type')
+  .map(([itemId]) => itemId);
+
+const MINT_ITEMS: string[] = NATURES.map(mintItemId);
+
+// Half the time a wild/NPC Pokémon holds nothing at all, matching the real
+// games' held-item rates loosely without needing a per-species table.
+const NO_ITEM_CHANCE = 0.5;
+
+/**
+ * Rolls a random held item for a newly-created NPC or wild Pokémon, or null
+ * for "holding nothing". `includeMints` should be true for anything that can
+ * actually drop its held item (wild-type NPCs, standalone wild spawns) and
+ * false for trainer-type NPCs, whose held items are flavor-only and never
+ * transfer to a player.
+ */
+export function rollHeldItem(includeMints: boolean): string | null {
+  if (Math.random() < NO_ITEM_CHANCE) return null;
+  const pool = includeMints ? [...HELD_TYPE_ITEMS, ...MINT_ITEMS] : HELD_TYPE_ITEMS;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 // ---------------------------------------------------------------------------

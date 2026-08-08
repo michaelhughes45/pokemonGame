@@ -15,7 +15,7 @@ const API = import.meta.env.VITE_API_URL;
 
 type ItemPocket =
   | 'healing' | 'status_cure' | 'pp_recovery'
-  | 'stat_booster' | 'held_type' | 'pokeballs' | 'escape' | 'berry' | 'tm_hm';
+  | 'stat_booster' | 'held_type' | 'pokeballs' | 'escape' | 'berry' | 'tm_hm' | 'mint';
 
 type BagItem = {
   _id: string;
@@ -50,11 +50,12 @@ const POCKET_LABEL: Record<ItemPocket, string> = {
   escape:       'Escape',
   berry:        'Berries',
   tm_hm:        'TMs & HMs',
+  mint:         'Mints',
 };
 
 // Canonical pocket display order, reused wherever pockets are sorted/matched.
 const POCKET_ORDER: ItemPocket[] = [
-  'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry', 'tm_hm',
+  'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry', 'tm_hm', 'mint',
 ];
 
 // Pockets that cannot be used outside of battle (show a notice, skip targeting flow)
@@ -75,6 +76,10 @@ const PP_UP_ITEMS = new Set(['pp-up', 'pp-max']);
 function formatItemName(slug: string): string {
   if (slug.startsWith('tm-')) {
     return `TM: ${formatItemName(slug.slice(3))}`;
+  }
+  if (slug.startsWith('mint-')) {
+    const nature = slug.slice(5);
+    return `${nature.charAt(0).toUpperCase() + nature.slice(1)} Mint`;
   }
   return slug
     .split('-')

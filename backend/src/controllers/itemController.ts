@@ -9,6 +9,7 @@ import { fetchSpecies } from '../lib/pokeapi';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 import { EV_STAT_DISPLAY_NAMES, applyEvGain } from '../lib/evData';
 import { getIvsForOwner } from '../lib/trainerIv';
+import { natureFromMintItem } from '../lib/itemData';
 
 // ---------------------------------------------------------------------------
 // Item effect table
@@ -31,6 +32,7 @@ type ItemEffect =
   | { kind: 'ev_reduce'; stat: keyof BaseStats; amount: number } // EV-reducing berries
   | { kind: 'pp_up';     amount: 1 | 3 } // PP Up (+1 use, cap 3) / PP Max (straight to 3)
   | { kind: 'held_item' }    // Equip as held item on a Pokémon
+  | { kind: 'nature_change'; nature: string } // Mints — overwrite nature outright
   | { kind: 'escape_rope' }  // Consumed immediately, no Pokémon target needed
   | { kind: 'battle_only' }; // Pokéballs only
 
@@ -201,7 +203,13 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     return sendError(res, 400, 'Poké Balls can only be used in battle.');
   }
 
-  const effect = ITEM_EFFECTS[itemId];
+  // Mints aren't hardcoded in ITEM_EFFECTS like every other item — the target
+  // nature is already encoded in the itemId ("mint-bold" -> "Bold"), same
+  // pattern-based approach as TM/HM itemIds encoding their move.
+  const mintNature = natureFromMintItem(itemId);
+  const effect: ItemEffect | undefined = mintNature
+    ? { kind: 'nature_change', nature: mintNature }
+    : ITEM_EFFECTS[itemId];
   if (!effect) {
     return sendError(res, 400, `No effect defined for item: ${itemId}`);
   }
@@ -414,6 +422,13 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     move.ppUps = newPpUps;
     pokemon.markModified('moves');
     message = `Raised the max PP of ${move.moveId}.`;
+
+  } else if (effect.kind === 'nature_change') {
+    if (pokemon.nature === effect.nature) {
+      return sendError(res, 400, `That Pokémon already has a ${effect.nature} nature.`);
+    }
+    pokemon.nature = effect.nature;
+    message = `Nature changed to ${effect.nature}.`;
 
   } else if (effect.kind === 'held_item') {
     if (pokemon.heldItem === itemId) {

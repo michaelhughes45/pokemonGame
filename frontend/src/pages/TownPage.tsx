@@ -91,6 +91,10 @@ type BagItem = { itemId: string; quantity: number };
 type MartRow = { itemId: string; pocket: string | null; price: number; quantity?: number };
 
 function formatItemName(slug: string): string {
+  if (slug.startsWith('mint-')) {
+    const nature = slug.slice(5);
+    return `${nature.charAt(0).toUpperCase() + nature.slice(1)} Mint`;
+  }
   return slug
     .split('-')
     .map(w => w.charAt(0).toUpperCase() + w.slice(1))
