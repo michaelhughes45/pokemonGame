@@ -34,7 +34,6 @@ export const STATUS_MOVES: Record<string, StatusMoveEffect> = {
   'sacred-fire':   { status: 'burn', chance: 0.5 },
   'scald':         { status: 'burn', chance: 0.3 },
   'lava-plume':    { status: 'burn', chance: 0.3 },
-  'magma-storm':   { status: 'burn', chance: 0.3 },
   // Toxic / Poison
   'toxic':         { status: 'toxic',  chance: 1 },
   'poison-powder': { status: 'poison', chance: 1 },
@@ -77,11 +76,13 @@ export const STATUS_MOVES: Record<string, StatusMoveEffect> = {
 
 // Non-zero move priority values. Only moves deviating from 0 are listed.
 export const MOVE_PRIORITY: Record<string, number> = {
+  // +5
+  'helping-hand': 5,
   // +3
   'detect': 3, 'endure': 3, 'fake-out': 3, 'protect': 3, 'kings-shield': 3, 'spiky-shield': 3,
   'baneful-bunker': 3, 'obstruct': 3, 'quick-guard': 3, 'wide-guard': 3,
   // +2
-  'extreme-speed': 2, 'feint': 2, 'first-impression': 2,
+  'extreme-speed': 2, 'feint': 2, 'first-impression': 2, 'follow-me': 2, 'rage-powder': 2,
   // +1
   'aqua-jet': 1, 'baby-doll-eyes': 1, 'bullet-punch': 1, 'ice-shard': 1,
   'mach-punch': 1, 'quick-attack': 1, 'shadow-sneak': 1, 'sucker-punch': 1,
@@ -93,9 +94,9 @@ export const MOVE_PRIORITY: Record<string, number> = {
   // -4
   'roar': -4, 'whirlwind': -4, 'dragon-tail': -4, 'circle-throw': -4,
   // -5
-  'trick-room': -5,
+  'trick-room': -5, 'magic-room': -5, 'wonder-room': -5,
   // -6
-  'counter': -6, 'mirror-coat': -6,
+  'counter': -6, 'mirror-coat': -6, 'metal-burst': -6,
 };
 
 // Moves that can cause the target to flinch. Value is flinch chance (0–1).
@@ -140,7 +141,26 @@ export const SELF_TARGETING_MOVES = new Set([
   'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
   // Protect family
   'protect', 'detect', 'kings-shield', 'spiky-shield', 'baneful-bunker', 'obstruct',
+  // Side-wide protect (blocks the whole side, not just the user — resolved via
+  // Battle.fieldConditions rather than a per-Pokémon volatileStatus)
+  'wide-guard', 'quick-guard',
+  // Room effects (field-wide, 5 turns, toggled off if used again while active —
+  // also resolved via Battle.fieldConditions, see ROOM_MOVES below)
+  'trick-room', 'magic-room', 'wonder-room',
+  // Redirect (self-buff; the redirect effect itself is checked when OTHER moves target)
+  'follow-me', 'rage-powder',
 ]);
+
+// Room effects — field-wide, last 5 turns, and uniquely among status moves in this
+// project, using one again while it's already active ENDS it early instead of
+// failing or refreshing the timer (matches the real games).
+export const ROOM_MOVES = new Set(['trick-room', 'magic-room', 'wonder-room']);
+
+export const ROOM_MESSAGES: Record<string, { start: string; end: string }> = {
+  'trick-room':  { start: 'twisted the dimensions! Slower Pokémon will now move first!', end: 'The twisted dimensions returned to normal!' },
+  'magic-room':  { start: "wrapped the battlefield in a bizarre room! Held items' effects are suppressed!", end: 'The bizarre room disappeared, and held items regained their effects!' },
+  'wonder-room': { start: 'twisted the dimensions! Defense and Sp. Def are swapped!', end: 'The twisted dimensions returned to normal, and stats are back to normal!' },
+};
 
 // Maps each protect-family move to the volatile condition it pushes.
 // The condition name encodes which variant was used so the hit loop can apply the correct contact side-effect.
@@ -172,6 +192,62 @@ export const CHARGE_MESSAGES: Record<string, string> = {
 
 // Moves that make the user semi-invulnerable during the charge turn.
 export const SEMI_INVULNERABLE_MOVES = new Set(['fly', 'dig', 'dive', 'bounce', 'sky-attack']);
+
+// Binding/trapping moves — on a successful hit they trap the target for 4-5 turns
+// (no switching/fleeing) and chip 1/8 max HP at the end of each of those rounds.
+// The trap ends immediately if the move's user (not the target) faints or switches out.
+export const BINDING_MOVES = new Set([
+  'wrap', 'bind', 'fire-spin', 'whirlpool', 'sand-tomb', 'magma-storm',
+  'clamp', 'infestation', 'thunder-cage', 'snap-trap',
+]);
+
+// Forced-switch moves — no player choice involved, a random other party member
+// comes in automatically, matching the real games. Roar/Whirlwind are pure status
+// (no damage, and bypass accuracy checks in modern gens); Dragon Tail/Circle Throw
+// deal real damage first, then force the switch only if the target survived.
+export const FORCE_SWITCH_STATUS_MOVES = new Set(['roar', 'whirlwind']);
+export const FORCE_SWITCH_DAMAGE_MOVES = new Set(['dragon-tail', 'circle-throw']);
+
+// Counter-attack moves — retaliate against whatever hit the user this turn, scaled
+// by category. Only fires if the user actually took matching-category damage THIS
+// turn (tracked on Battle.damageTakenThisTurn, cleared every round) AND the move is
+// used against that same attacker — this project doesn't auto-redirect the target
+// (real games do), so using one of these against the wrong opponent in a multi-battle
+// just fails, same outcome as "no valid retaliation target" in the 1v1 case that
+// covers the vast majority of use.
+export const COUNTER_MOVES: Record<string, { category: 'physical' | 'special' | 'both'; multiplier: number }> = {
+  'counter':      { category: 'physical', multiplier: 2 },
+  'mirror-coat':  { category: 'special',  multiplier: 2 },
+  'metal-burst':  { category: 'both',     multiplier: 1.5 },
+};
+
+// Ally-targeting moves — the first moves in this project to target a teammate's
+// active Pokémon rather than a foe or the user. Only meaningful in battles with
+// more than one active Pokémon per side (a real, already-supported battle shape —
+// e.g. multi-player pve, pvp team battles). Heal Pulse alone can target either an
+// ally or a foe; Helping Hand/Aromatic Mist are ally-only.
+export const ALLY_ONLY_MOVES = new Set(['helping-hand', 'aromatic-mist']);
+export const ALLY_OR_FOE_MOVES = new Set(['heal-pulse']);
+
+// Redirect moves — for the rest of this round, single-target foe moves that would
+// have hit anyone on the user's side instead hit the user. Only affects moves whose
+// PokeAPI target category resolves to 'single' (spread/auto moves ignore redirects,
+// same as the real games). Rage Powder additionally exempts Grass-type attackers and
+// the Overcoat ability; Follow Me has no such exemption.
+export const REDIRECT_MOVES = new Set(['follow-me', 'rage-powder']);
+
+// Metronome's random-move pool. Real Metronome can call almost any move in the
+// game; this project scopes it to a curated set of well-known, definitely
+// foe-targeting (never self/ally/weather/room) moves rather than the full
+// PokeAPI move list, matching the "close approximation, not exhaustive" approach
+// used for every other cut-list move so far. Whatever gets rolled runs through
+// the exact same resolution path as if the user had used it directly — including
+// binding, forced-switch, etc. tables if one of those happens to get picked.
+export const METRONOME_POOL = [
+  'tackle', 'ember', 'water-gun', 'thunderbolt', 'ice-beam', 'psychic', 'earthquake',
+  'rock-slide', 'shadow-ball', 'flamethrower', 'surf', 'hydro-pump', 'thunder-wave',
+  'toxic', 'will-o-wisp', 'sludge-bomb', 'dark-pulse', 'dragon-claw', 'close-combat', 'giga-drain',
+];
 
 export type StatEffect = { stat: keyof StatStages; stages: number; target: 'self' | 'foe'; chance?: number };
 

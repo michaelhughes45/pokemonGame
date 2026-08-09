@@ -105,6 +105,10 @@ export type IBattle = {
   // Keyed by pokemonId.toString(). Tracks Pokémon locked into a move for multiple turns
   // (Rollout, Thrash, Outrage, Petal Dance, etc.). Cleared on switch-out or faint.
   lockedMoves: Record<string, { moveId: string; turnsRemaining: number }>;
+  // Keyed by pokemonId.toString(). The most recent damaging hit each Pokémon has taken
+  // THIS round, for Counter/Mirror Coat/Metal Burst — overwritten (not accumulated) on
+  // every hit, cleared entirely at the end of every round in applyEndOfRound.
+  damageTakenThisTurn: Record<string, { amount: number; category: string; attackerId: string }>;
   expAwarded: boolean;
   moneyAwarded: boolean;
   // Set once the battle completes. For pve/wild this always mirrors "did the players win"
@@ -211,6 +215,7 @@ const BattleSchema = new Schema<IBattle>(
     statStages:         { type: Schema.Types.Mixed, default: {} },
     consecutiveMoves:   { type: Schema.Types.Mixed, default: {} },
     lockedMoves:        { type: Schema.Types.Mixed, default: {} },
+    damageTakenThisTurn: { type: Schema.Types.Mixed, default: {} },
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },

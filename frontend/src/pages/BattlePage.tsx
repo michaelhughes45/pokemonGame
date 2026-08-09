@@ -114,6 +114,8 @@ type BattleState = {
   weatherTurnsRemaining: number | null;
   noTargetMoveIds: string[];
   currentMoveTargetCategory: 'single' | 'auto' | null;
+  currentMoveAllyTarget: 'ally-only' | 'ally-or-foe' | null;
+  currentMoveAllyIds: string[];
   playerPokemonLimit: number | null;
   wildCatchable: boolean;
   turnLog: TurnLogEntry[];
@@ -354,6 +356,9 @@ export default function BattlePage() {
   const [bagItems,            setBagItems]            = useState<BagItem[]>([]);
   const [actionTab,           setActionTab]           = useState<'move' | 'item' | 'switch' | 'ball'>('move');
   const [selectedItemId,      setSelectedItemId]      = useState<string | null>(null);
+  // Baton Pass is the only move that needs a follow-up choice (who to send in) —
+  // set once the player clicks it, cleared on submit/cancel, same shape as the item flow.
+  const [pendingBatonPass,    setPendingBatonPass]     = useState(false);
   const [runConfirmPending,   setRunConfirmPending]   = useState(false);
   // Which wild Pokémon the player has chosen to throw a ball at.
   // null = nothing selected yet (only relevant in multi-wild battles).
@@ -543,6 +548,23 @@ export default function BattlePage() {
       .map(e => e.activePokemonInfo!);
   })();
 
+  // Teammate's active Pokémon — only meaningful in battles with more than one
+  // active Pokémon per side. Helping Hand/Aromatic Mist are ally-only; Heal Pulse
+  // can hit either, so its picker shows both lists together with an "Ally" tag.
+  const allyTargetIds = new Set(battle?.currentMoveAllyIds ?? []);
+  const allyTargets: ActivePokemonInfo[] = (() => {
+    if (!battle || allyTargetIds.size === 0) return [];
+    const allEntries = [...battle.playerSide, ...battle.enemySide];
+    return [...allyTargetIds]
+      .map(id => allEntries.find(e => e.activePokemonId === id)?.activePokemonInfo)
+      .filter((info): info is ActivePokemonInfo => !!info && info.currentHp > 0);
+  })();
+  const pickerTargets: ActivePokemonInfo[] = battle?.currentMoveAllyTarget === 'ally-only'
+    ? allyTargets
+    : battle?.currentMoveAllyTarget === 'ally-or-foe'
+      ? [...allyTargets, ...opposingTargets]
+      : opposingTargets;
+
   // ---------------------------------------------------------------------------
   // Handlers
   // ---------------------------------------------------------------------------
@@ -622,6 +644,27 @@ export default function BattlePage() {
       );
     } catch (err: unknown) {
       setActionError(apiError(err, 'Failed to submit switch.'));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Baton Pass — moveId and switchToPokemonId are submitted together in one
+  // request; the backend never puts this move through the interactive targeting
+  // phase (see submitMove), so there's no separate target-submission step.
+  async function handleSubmitBatonPass(switchToPokemonId: string) {
+    if (!id) return;
+    setSubmitting(true);
+    setActionError('');
+    try {
+      await axios.post(
+        `${API}/api/battles/${id}/submit-move`,
+        { moveId: 'baton-pass', switchToPokemonId },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      setPendingBatonPass(false);
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to submit Baton Pass.'));
     } finally {
       setSubmitting(false);
     }
@@ -1040,7 +1083,7 @@ export default function BattlePage() {
               ) : (
                 <>
                   {actionError && <p className="text-sm text-destructive">{actionError}</p>}
-                  <Tabs value={actionTab} onValueChange={v => { setActionTab(v as 'move' | 'item' | 'switch' | 'ball'); setSelectedItemId(null); }}>
+                  <Tabs value={actionTab} onValueChange={v => { setActionTab(v as 'move' | 'item' | 'switch' | 'ball'); setSelectedItemId(null); setPendingBatonPass(false); }}>
                     <TabsList>
                       <TabsTrigger value="move">Move</TabsTrigger>
                       <TabsTrigger value="item">Item</TabsTrigger>
@@ -1051,15 +1094,61 @@ export default function BattlePage() {
                     </TabsList>
 
                     <TabsContent value="move">
-                      {activePokemonDetail ? (
+                      {pendingBatonPass ? (
+                        <div className="flex flex-col gap-2 mt-2">
+                          <div className="flex items-center gap-2 mb-1">
+                            <button
+                              onClick={() => setPendingBatonPass(false)}
+                              className="text-xs text-muted-foreground hover:text-foreground min-h-11 pr-2"
+                            >
+                              ← Back
+                            </button>
+                            <span className="text-sm font-medium">Baton Pass to:</span>
+                          </div>
+                          {party.length === 0 ? (
+                            <p className="text-sm text-muted-foreground">No other Pokémon in your party.</p>
+                          ) : (
+                            party.map(p => {
+                              const isActive     = p._id === myEntry?.activePokemonId;
+                              const fainted      = p.currentHp <= 0;
+                              const alreadyUsed  = myEntry?.usedPokemonIds.includes(p._id) ?? false;
+                              const limitBlocked = !alreadyUsed && (myEntry?.pokemonLimitReached ?? false);
+                              const disabled     = isActive || fainted || limitBlocked || submitting;
+                              let subLabel: string;
+                              if (isActive) subLabel = 'Active';
+                              else if (fainted) subLabel = 'Fainted';
+                              else if (limitBlocked) subLabel = 'Limit reached';
+                              else subLabel = `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`;
+                              return (
+                                <button
+                                  key={p._id}
+                                  onClick={() => !disabled && handleSubmitBatonPass(p._id)}
+                                  disabled={disabled}
+                                  className={[
+                                    'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+                                    disabled ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                  ].join(' ')}
+                                >
+                                  <span className="font-medium">{pokemonLabel(p)}</span>
+                                  <span className="text-muted-foreground text-xs">{subLabel}</span>
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      ) : activePokemonDetail ? (
                         <div className="grid grid-cols-2 gap-2 mt-2">
                           {activePokemonDetail.moves.map(slot => {
                             const detail = moveDetailMap.get(slot.moveId);
                             const noPP   = slot.currentPP <= 0;
+                            const isBatonPass = slot.moveId === 'baton-pass';
                             return (
                               <button
                                 key={slot.moveId}
-                                onClick={() => !noPP && !submitting && handleSubmitMove(slot.moveId)}
+                                onClick={() =>
+                                  !noPP && !submitting &&
+                                  (isBatonPass ? setPendingBatonPass(true) : handleSubmitMove(slot.moveId))
+                                }
                                 disabled={noPP || submitting}
                                 className={[
                                   'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
@@ -1604,18 +1693,23 @@ export default function BattlePage() {
                       ? '.'
                       : isAutoTargetMove
                         ? ' — hits all active targets automatically.'
-                        : isSingleTargetMove
-                          ? ' — select one target below.'
-                          : ' — select one or more targets below.'}
+                        : battle.currentMoveAllyTarget === 'ally-only'
+                          ? ' — select an ally below.'
+                          : battle.currentMoveAllyTarget === 'ally-or-foe'
+                            ? ' — select an ally or an opponent below.'
+                            : isSingleTargetMove
+                              ? ' — select one target below.'
+                              : ' — select one or more targets below.'}
                   </p>
 
                   {!isNoTargetMove && !isAutoTargetMove && (
-                    opposingTargets.length === 0 ? (
+                    pickerTargets.length === 0 ? (
                       <p className="text-sm text-muted-foreground">No valid targets available.</p>
                     ) : (
                       <div className="flex flex-col gap-2">
-                        {opposingTargets.map(info => {
+                        {pickerTargets.map(info => {
                           const selected = selectedTargets.includes(info._id);
+                          const isAlly   = allyTargetIds.has(info._id);
                           return (
                             <button
                               key={info._id}
@@ -1635,7 +1729,14 @@ export default function BattlePage() {
                                   : 'hover:bg-accent cursor-pointer',
                               ].join(' ')}
                             >
-                              <span>{info.name}</span>
+                              <span className="flex items-center gap-2">
+                                {info.name}
+                                {isAlly && (
+                                  <span className="text-[10px] uppercase tracking-wide rounded bg-muted px-1.5 py-0.5 text-muted-foreground">
+                                    Ally
+                                  </span>
+                                )}
+                              </span>
                               <span className="flex flex-col items-end gap-0.5">
                                 <span className="text-muted-foreground text-xs">
                                   HP {info.currentHp}{info.maxHp != null ? `/${info.maxHp}` : ''}

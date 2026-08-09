@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose, { HydratedDocument } from 'mongoose';
-import { Battle, IBattle, StatStages, TurnQueueEntry } from '../models/Battle';
+import { Battle, IBattle, StatStages, TurnQueueEntry, PlayerSideEntry, EnemySideEntry } from '../models/Battle';
 import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
 import { Pokemon } from '../models/Pokemon';
@@ -35,6 +35,16 @@ import {
   PRANKSTER_MOVES,
   ESCALATING_POWER_MOVES,
   LOCK_MOVES,
+  BINDING_MOVES,
+  ROOM_MOVES,
+  ROOM_MESSAGES,
+  FORCE_SWITCH_STATUS_MOVES,
+  FORCE_SWITCH_DAMAGE_MOVES,
+  COUNTER_MOVES,
+  ALLY_ONLY_MOVES,
+  ALLY_OR_FOE_MOVES,
+  REDIRECT_MOVES,
+  METRONOME_POOL,
 } from '../lib/moveData';
 import {
   GEN9,
@@ -97,6 +107,20 @@ function findOwnSideEntry(
   if (playerEntry) return { side: 'playerSide', entry: playerEntry };
   const enemyEntry = battle.enemySide.find(e => e.userId?.toString() === userId);
   if (enemyEntry) return { side: 'enemySide', entry: enemyEntry };
+  return null;
+}
+
+// Which side a given active Pokémon belongs to — works for player, NPC, and wild
+// actors alike (unlike findOwnSideEntry, which needs a userId and can't resolve
+// NPC/wild actors). Used by side-wide effects (Wide Guard/Quick Guard) that need
+// to know which side to protect regardless of who's using the move.
+function resolveActingSide(
+  battle: HydratedDocument<IBattle>,
+  activePokemonId: mongoose.Types.ObjectId,
+): 'playerSide' | 'enemySide' | null {
+  const idStr = activePokemonId.toString();
+  if (battle.playerSide.some(e => e.activePokemonId?.toString() === idStr)) return 'playerSide';
+  if (battle.enemySide.some(e => e.activePokemonId?.toString() === idStr)) return 'enemySide';
   return null;
 }
 
@@ -539,6 +563,42 @@ async function applySwitchOutAbilities(
   return events;
 }
 
+// Two kinds of volatile encode a source Pokémon in their condition string —
+// binding moves ("bound:<moveId>:<sourcePokemonId>") and Attract ("infatuated:
+// <sourcePokemonId>"). Both end immediately when that source Pokémon leaves the
+// field (faints or switches out), regardless of how many turns were left. Scans
+// every OTHER currently-active Pokémon on either side (not sourceId's own side
+// specifically — both effects are always on an opponent, but this is cheap
+// enough to just check both).
+async function releaseBoundTargets(battle: HydratedDocument<IBattle>, sourceId: mongoose.Types.ObjectId): Promise<string[]> {
+  const activeIds = [
+    ...battle.playerSide.map(e => e.activePokemonId),
+    ...battle.enemySide.map(e => e.activePokemonId),
+  ].filter((id): id is mongoose.Types.ObjectId => id != null && id.toString() !== sourceId.toString());
+  if (activeIds.length === 0) return [];
+
+  const boundPattern      = new RegExp(`^bound:[^:]+:${sourceId.toString()}$`);
+  const infatuatedPattern = new RegExp(`^infatuated:${sourceId.toString()}$`);
+  const affected = await Pokemon.find(
+    { _id: { $in: activeIds }, $or: [{ 'volatileStatus.condition': boundPattern }, { 'volatileStatus.condition': infatuatedPattern }] },
+    'nickname speciesId volatileStatus',
+  ).lean();
+
+  const events: string[] = [];
+  for (const poke of affected) {
+    const vol = (poke.volatileStatus as Array<{ condition: string }>) ?? [];
+    const boundEntry      = vol.find(v => boundPattern.test(v.condition));
+    const infatuatedEntry = vol.find(v => infatuatedPattern.test(v.condition));
+    if (!boundEntry && !infatuatedEntry) continue;
+    const toClear = [boundEntry?.condition, infatuatedEntry?.condition].filter((c): c is string => !!c);
+    await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: { $in: toClear } } } });
+    const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
+    if (boundEntry) events.push(`${pokeDisplayName(poke, cache)} was freed from the bind!`);
+    if (infatuatedEntry) events.push(`${pokeDisplayName(poke, cache)} got over its infatuation!`);
+  }
+  return events;
+}
+
 async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mongoose.Types.ObjectId): Promise<string[]> {
   await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
   delete (battle.statStages as Record<string, StatStages>)[outgoingId.toString()];
@@ -551,8 +611,115 @@ async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mong
   const outCache = outgoing ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name abilities baseStats').lean() : null;
   const outName = pokeDisplayName(outgoing, outCache);
   const events = [`${outName} was recalled!`];
+  events.push(...await releaseBoundTargets(battle, outgoingId));
   events.push(...await applySwitchOutAbilities(outgoingId.toString(), outgoing, outCache, outName));
   return events;
+}
+
+// Roar/Whirlwind/Dragon Tail/Circle Throw — forces targetId to switch to a random
+// OTHER non-fainted party member, with no player input (matches the real games,
+// where the incoming Pokémon is randomly chosen, not picked by the defending
+// trainer). Standalone wild targets have no roster to draw from and always fail;
+// player/pvp entries respect Battle.playerPokemonLimit exactly like a voluntary
+// switch would (a not-yet-used replacement only counts as a valid candidate if the
+// limit isn't already reached); true NPC trainers have no such limit.
+async function forceOpponentSwitch(
+  battle: HydratedDocument<IBattle>, targetId: string, moveEvents: string[],
+): Promise<void> {
+  const playerEntry = battle.playerSide.find(e => e.activePokemonId?.toString() === targetId);
+  const enemyEntry  = !playerEntry ? battle.enemySide.find(e => e.activePokemonId?.toString() === targetId) : undefined;
+  if (!playerEntry && !enemyEntry) return;
+
+  const outgoingDoc   = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+  const outgoingCache = outgoingDoc ? await PokedexCache.findOne({ pokeApiId: outgoingDoc.speciesId }, 'name').lean() : null;
+  const outgoingName  = pokeDisplayName(outgoingDoc, outgoingCache);
+
+  let candidates: mongoose.Types.ObjectId[] = [];
+  let usedPokemonIds: mongoose.Types.ObjectId[] | null = null; // non-null => pokemon-limit tracking applies
+
+  if (playerEntry) {
+    const party = await Pokemon.find(
+      { ownerId: playerEntry.userId, ownerType: 'player', isInParty: true, currentHp: { $gt: 0 } }, '_id',
+    ).lean();
+    candidates = party.map(p => p._id).filter(id => id.toString() !== targetId);
+    usedPokemonIds = playerEntry.usedPokemonIds;
+  } else if (enemyEntry?.userId) {
+    // pvp opponent — real trainer, same rules as playerSide
+    const party = await Pokemon.find(
+      { ownerId: enemyEntry.userId, ownerType: 'player', isInParty: true, currentHp: { $gt: 0 } }, '_id',
+    ).lean();
+    candidates = party.map(p => p._id).filter(id => id.toString() !== targetId);
+    usedPokemonIds = enemyEntry.usedPokemonIds;
+  } else if (enemyEntry?.npcId) {
+    const npc = await Npc.findById(enemyEntry.npcId, 'party').lean();
+    const partyIds = (npc?.party ?? []) as mongoose.Types.ObjectId[];
+    const party = partyIds.length > 0
+      ? await Pokemon.find({ _id: { $in: partyIds }, currentHp: { $gt: 0 } }, '_id').lean()
+      : [];
+    candidates = party.map(p => p._id).filter(id => id.toString() !== targetId);
+  }
+  // standalone wild (no npcId, no userId) — candidates stays [], no roster to draw from
+
+  if (usedPokemonIds !== null && battle.playerPokemonLimit !== null) {
+    const usedSet = new Set(usedPokemonIds.map(id => id.toString()));
+    const atLimit = usedPokemonIds.length >= battle.playerPokemonLimit;
+    candidates = candidates.filter(id => usedSet.has(id.toString()) || !atLimit);
+  }
+
+  if (candidates.length === 0) {
+    moveEvents.push(`${outgoingName} couldn't be forced out — there's nowhere to send it!`);
+    return;
+  }
+
+  const chosenId = candidates[Math.floor(Math.random() * candidates.length)];
+  moveEvents.push(...await recallPokemon(battle, new mongoose.Types.ObjectId(targetId)));
+
+  const targetEntry = (playerEntry ?? enemyEntry)!;
+  targetEntry.activePokemonId = chosenId;
+  targetEntry.activeSentOutOnTurn = battle.turnNumber;
+  if (usedPokemonIds !== null && !usedPokemonIds.some(id => id.toString() === chosenId.toString())) {
+    usedPokemonIds.push(chosenId);
+  }
+  battle.markModified(playerEntry ? 'playerSide' : 'enemySide');
+
+  const incoming      = await Pokemon.findById(chosenId, 'nickname speciesId').lean();
+  const incomingCache = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
+  moveEvents.push(`${outgoingName} was dragged out! ${pokeDisplayName(incoming, incomingCache)} was sent out!`);
+  moveEvents.push(...await applyEntryAbilities(battle, chosenId, playerEntry ? 'player' : 'enemy'));
+}
+
+// Follow Me / Rage Powder — if the defending side has an active Pokémon with either
+// volatile up, single-target foe moves redirect to them regardless of who was
+// clicked. Only affects moves whose real target category is 'single' (spread moves
+// ignore redirects). Rage Powder additionally exempts Grass-type attackers and the
+// Overcoat ability; Follow Me has no such exemption. Returns null if no redirect applies.
+async function resolveRedirectTarget(
+  battle: HydratedDocument<IBattle>, entry: { activePokemonId: mongoose.Types.ObjectId; moveId: string },
+  actingSide: 'playerSide' | 'enemySide',
+): Promise<string | null> {
+  const atkPoke = await Pokemon.findById(entry.activePokemonId, 'speciesId hasHiddenAbility').lean();
+  if (!atkPoke) return null;
+  const moveMeta = await fetchMoveMeta(atkPoke.speciesId, entry.moveId);
+  if (getMoveTargetCategory(moveMeta?.target ?? '') !== 'single') return null;
+
+  const defendingEntries = actingSide === 'playerSide' ? battle.enemySide : battle.playerSide;
+  const candidateIds = defendingEntries.filter(e => e.activePokemonId != null).map(e => e.activePokemonId!.toString());
+  if (candidateIds.length === 0) return null;
+
+  const candidates = await Pokemon.find({ _id: { $in: candidateIds }, currentHp: { $gt: 0 } }, 'volatileStatus').lean();
+  const redirector = candidates.find(p => ((p.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'follow-me' || v.condition === 'rage-powder'));
+  if (!redirector) return null;
+
+  const redirectorVol = (redirector.volatileStatus as Array<{ condition: string }>) ?? [];
+  const isRagePowderOnly = redirectorVol.some(v => v.condition === 'rage-powder') && !redirectorVol.some(v => v.condition === 'follow-me');
+  if (isRagePowderOnly) {
+    const atkCache = await PokedexCache.findOne({ pokeApiId: atkPoke.speciesId }, 'types abilities').lean();
+    const isGrass  = ((atkCache?.types as string[]) ?? []).includes('grass');
+    const abilitySlug = atkCache ? resolveAbilitySlug((atkCache.abilities as CachedAbility[]) ?? [], atkPoke.hasHiddenAbility as boolean) : null;
+    if (isGrass || abilitySlug === 'overcoat') return null;
+  }
+
+  return redirector._id.toString();
 }
 
 async function resolveSwitch(battle: HydratedDocument<IBattle>, entry: TurnQueueEntry): Promise<string[]> {
@@ -598,6 +765,76 @@ async function resolveSwitch(battle: HydratedDocument<IBattle>, entry: TurnQueue
   const incoming = await Pokemon.findById(incomingId, 'nickname speciesId').lean();
   const inCache = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
   events.push(`${pokeDisplayName(incoming, inCache)} was sent out!`);
+  events.push(...await applyEntryAbilities(battle, incomingId, sideLabel));
+  return events;
+}
+
+// Baton Pass — like resolveSwitch, but the outgoing Pokémon's stat stages and a
+// subset of its volatile statuses carry over to whoever comes in, instead of being
+// wiped. switchToPokemonId is chosen by the player/DM at move-submission time (see
+// submitMove/dmSubmitMove), not through the normal targeting phase, since the move
+// doesn't target a foe at all.
+const BATON_PASSABLE_VOLATILES = new Set(['leech-seed', 'ingrain', 'aqua-ring', 'cursed', 'focus-energy']);
+
+async function resolveBatonPass(battle: HydratedDocument<IBattle>, entry: TurnQueueEntry): Promise<string[]> {
+  if (!entry.switchToPokemonId) return [];
+  const incomingId = entry.switchToPokemonId;
+  const outgoingId = entry.activePokemonId;
+  const events: string[] = [];
+  let sideLabel: 'player' | 'enemy';
+  let ownEntry: PlayerSideEntry | EnemySideEntry;
+  let sideKey: 'playerSide' | 'enemySide';
+
+  if (entry.actorType === 'npc') {
+    const npcEntry = battle.enemySide.find(
+      e => e.npcId?.toString() === entry.actorId.toString() && e.activePokemonId?.toString() === outgoingId.toString(),
+    );
+    if (!npcEntry) return [];
+    ownEntry = npcEntry; sideKey = 'enemySide'; sideLabel = 'enemy';
+  } else {
+    const own = findOwnSideEntry(battle, entry.actorId.toString());
+    if (!own) return [];
+    ownEntry = own.entry; sideKey = own.side; sideLabel = own.side === 'playerSide' ? 'player' : 'enemy';
+  }
+
+  // Snapshot what gets passed BEFORE any clearing happens.
+  const outIdStr = outgoingId.toString();
+  const stageMap = battle.statStages as Record<string, StatStages>;
+  const passedStages = stageMap[outIdStr];
+  const outgoingDoc = await Pokemon.findById(outgoingId, 'ownerId ownerType nickname speciesId hasHiddenAbility statusCondition currentHp nature level evs volatileStatus').lean();
+  const passableVolatiles = ((outgoingDoc?.volatileStatus as Array<{ condition: string; turnsRemaining: number }>) ?? [])
+    .filter(v => BATON_PASSABLE_VOLATILES.has(v.condition) || v.condition.startsWith('bound:'));
+
+  // Same cleanup as a normal recall, EXCEPT stat stages — those get moved, not deleted.
+  await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
+  delete (battle.consecutiveMoves as Record<string, unknown>)[outIdStr];
+  battle.markModified('consecutiveMoves');
+  delete (battle.lockedMoves as Record<string, unknown>)[outIdStr];
+  battle.markModified('lockedMoves');
+  const outCache = outgoingDoc ? await PokedexCache.findOne({ pokeApiId: outgoingDoc.speciesId }, 'name abilities baseStats').lean() : null;
+  const outName  = pokeDisplayName(outgoingDoc, outCache);
+  events.push(`${outName} went back, passing it on!`);
+  events.push(...await releaseBoundTargets(battle, outgoingId));
+  events.push(...await applySwitchOutAbilities(outIdStr, outgoingDoc, outCache, outName));
+
+  delete stageMap[outIdStr];
+  const incIdStr = incomingId.toString();
+  if (passedStages) stageMap[incIdStr] = passedStages;
+  battle.markModified('statStages');
+  if (passableVolatiles.length > 0) {
+    await Pokemon.updateOne({ _id: incomingId }, { $push: { volatileStatus: { $each: passableVolatiles } } });
+  }
+
+  ownEntry.activePokemonId = incomingId;
+  ownEntry.activeSentOutOnTurn = battle.turnNumber;
+  battle.markModified(sideKey);
+  if (sideKey === 'playerSide' && !(ownEntry as PlayerSideEntry).usedPokemonIds.some(id => id.toString() === incIdStr)) {
+    (ownEntry as PlayerSideEntry).usedPokemonIds.push(incomingId);
+  }
+
+  const incoming = await Pokemon.findById(incomingId, 'nickname speciesId').lean();
+  const inCache  = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
+  events.push(`${pokeDisplayName(incoming, inCache)} was sent out, inheriting the stat changes!`);
   events.push(...await applyEntryAbilities(battle, incomingId, sideLabel));
   return events;
 }
@@ -703,7 +940,19 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
       continue;
     }
 
-    const poke = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId statusCondition statusCounter currentHp').lean();
+    if (entry.actionType === 'move' && entry.moveId === 'baton-pass') {
+      const bpEvents = await resolveBatonPass(battle, entry as unknown as TurnQueueEntry);
+      appendToLog(battle, ...bpEvents);
+      await Pokemon.updateOne(
+        { _id: entry.activePokemonId, moves: { $elemMatch: { moveId: 'baton-pass', currentPP: { $gt: 0 } } } },
+        { $inc: { 'moves.$.currentPP': -1 } },
+      );
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      continue;
+    }
+
+    const poke = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId statusCondition statusCounter currentHp volatileStatus').lean();
     if (!poke || poke.currentHp <= 0) {
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
@@ -716,6 +965,22 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
       continue;
+    }
+
+    // Infatuation (Attract) is a volatile, not the primary statusCondition, so it's
+    // gated independently — a Pokémon can be both infatuated AND paralyzed/asleep/etc.
+    // and needs to pass both checks to act.
+    const isInfatuated = ((poke.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('infatuated:'));
+    if (isInfatuated) {
+      const infatCache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
+      const infatName  = pokeDisplayName(poke, infatCache);
+      if (Math.random() < 0.5) {
+        appendToLog(battle, `${infatName} is immobilized by love!`);
+        battle.turnQueue[battle.currentTargetIndex].resolved = true;
+        battle.currentTargetIndex++;
+        continue;
+      }
+      appendToLog(battle, `${infatName} is in love!`);
     }
 
     if (!poke.statusCondition) break;
@@ -813,12 +1078,12 @@ async function applyStatusEffect(targetId: mongoose.Types.ObjectId, effect: Stat
 async function resolveMove(
   attackerPokemonId: mongoose.Types.ObjectId, targetPokemonId: mongoose.Types.ObjectId,
   moveId: string, weather: IBattle['weather'], stages: { attacker?: StatStages; target?: StatStages } = {},
-  powerOverride?: number,
-): Promise<{ damage: number; isCrit: boolean; events: string[] }> {
+  powerOverride?: number, wonderRoomActive = false, magicRoomActive = false,
+): Promise<{ damage: number; isCrit: boolean; events: string[]; category: string | null }> {
   const [attacker, target] = await Promise.all([Pokemon.findById(attackerPokemonId).lean(), Pokemon.findById(targetPokemonId).lean()]);
-  if (!attacker || !target) return { damage: 0, isCrit: false, events: ['(Pokémon not found during move resolution)'] };
+  if (!attacker || !target) return { damage: 0, isCrit: false, events: ['(Pokémon not found during move resolution)'], category: null };
   const [attackerCache, targetCache] = await Promise.all([PokedexCache.findOne({ pokeApiId: attacker.speciesId }).lean(), PokedexCache.findOne({ pokeApiId: target.speciesId }).lean()]);
-  if (!attackerCache || !targetCache) return { damage: 0, isCrit: false, events: ['(Species cache missing during move resolution)'] };
+  if (!attackerCache || !targetCache) return { damage: 0, isCrit: false, events: ['(Species cache missing during move resolution)'], category: null };
   const [attackerIvs, targetIvs] = await Promise.all([
     getIvsForOwner(attacker.ownerId, attacker.ownerType),
     getIvsForOwner(target.ownerId, target.ownerType),
@@ -827,15 +1092,27 @@ async function resolveMove(
   const attackerName = pokeDisplayName(attacker, attackerCache);
   const targetName   = pokeDisplayName(target, targetCache);
   const moveName     = slugToDisplayName(moveId);
-  const moveData = (attackerCache.moves as Array<{ name: string; type: string; category: string; power: number | null; implemented: boolean }>).find(m => m.name === moveId);
+  type CachedMoveData = { name: string; type: string; category: string; power: number | null; implemented: boolean };
+  let moveData = (attackerCache.moves as CachedMoveData[]).find(m => m.name === moveId);
+  if (!moveData) {
+    // Move data (power/type/category) is inherent to the move, not the attacker's
+    // species — the attacker's own cache only has detail for moves it can actually
+    // learn, so this is only ever null for a move outside that learnset (chiefly
+    // Metronome rolling into something the user doesn't know). Fall back to any
+    // other cached species that happens to have it, rather than treating it as
+    // "not implemented".
+    const anyCache = await PokedexCache.findOne({ 'moves.name': moveId }, { 'moves.$': 1 }).lean();
+    moveData = (anyCache?.moves as CachedMoveData[] | undefined)?.[0];
+  }
 
   if (!moveData || !moveData.power) {
     const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) && !(moveId in WEATHER_MOVES) && !SELF_TARGETING_MOVES.has(moveId) && !(moveId in STAT_STAGE_MOVES) ? ' (effect not yet implemented)' : '';
-    return { damage: 0, isCrit: false, events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`] };
+    return { damage: 0, isCrit: false, events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`], category: moveData?.category ?? null };
   }
 
   const hasFocusEnergy = ((attacker.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'focus-energy');
   const isCrit = Math.random() < (hasFocusEnergy ? 1 / 6 : 1 / 24);
+  const hasHelpingHand = ((attacker.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'helping-hand');
 
   const attackerAbilities = (attackerCache.abilities as CachedAbility[]) ?? [];
   const targetAbilities   = (targetCache.abilities   as CachedAbility[]) ?? [];
@@ -864,7 +1141,11 @@ async function resolveMove(
     const toBoosts = (s?: StatStages) => s ? { atk: s.atk, def: s.def, spa: s.spa, spd: s.spd, spe: s.spe } : undefined;
     const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any });
     const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: toCalcIvs(targetIvs), curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any });
-    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName, powerOverride ? { overrides: { basePower: powerOverride } } as any : undefined), new Field({ weather: toCalcWeather(weather) as any }));
+    // @smogon/calc has native Wonder Room (Def/SpDef swap) and Magic Room (held-item
+    // suppression) support via Field flags — no need to hand-roll either. Magic Room's
+    // flag is inert today since no held item is ever passed to CalcPokemon yet (5.16),
+    // but it'll suppress that for free once one is.
+    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName, powerOverride ? { overrides: { basePower: powerOverride } } as any : undefined), new Field({ weather: toCalcWeather(weather) as any, isWonderRoom: wonderRoomActive, isMagicRoom: magicRoomActive } as any));
     const rolls  = Array.isArray(result.damage) ? result.damage : [result.damage];
     const picked = rolls[Math.floor(Math.random() * rolls.length)];
     damage = Array.isArray(picked) ? picked[Math.floor(Math.random() * picked.length)] : (picked as number);
@@ -876,6 +1157,7 @@ async function resolveMove(
     else if (atkAbilitySlug && atkAbilitySlug in ILATE_MAP && moveData.type?.toLowerCase() === 'normal') damage = Math.floor(damage * 1.2);
     damage = Math.floor(damage * typeEffectiveness);
   }
+  if (hasHelpingHand && damage > 0) damage = Math.floor(damage * 1.5);
   damage = Math.max(0, damage);
 
   const effectNote =
@@ -883,7 +1165,7 @@ async function resolveMove(
     : typeEffectiveness > 1 ? " It's super effective!"
     : typeEffectiveness < 1 ? " It's not very effective..."
     : '';
-  return { damage, isCrit: isCrit && damage > 0, events: [...pinchEvents, `${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${isCrit && damage > 0 ? ' Critical hit!' : ''}`] };
+  return { damage, isCrit: isCrit && damage > 0, events: [...pinchEvents, `${attackerName} used ${moveName} on ${targetName} for ${damage} damage!${effectNote}${isCrit && damage > 0 ? ' Critical hit!' : ''}`], category: moveData.category ?? null };
 }
 
 // attackerId/attackerType identify who dealt the fainting blow, if known — only
@@ -907,6 +1189,7 @@ async function applyFaints(
       if (!poke || poke.currentHp > 0) continue;
       const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
       events.push(`${pokeDisplayName(poke, cache)} fainted!`);
+      events.push(...await releaseBoundTargets(battle, entry.activePokemonId));
 
       const clearedFields: Record<string, unknown> = { volatileStatus: [] };
 
@@ -1207,8 +1490,37 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
     }
 
     for (const poke of activePokemons) {
-      const toClear = ((poke.volatileStatus as Array<{ condition: string }>) ?? []).filter(v => v.condition === 'roosting' || v.condition === 'enduring' || v.condition.startsWith('protecting')).map(v => v.condition);
+      const toClear = ((poke.volatileStatus as Array<{ condition: string }>) ?? []).filter(v => v.condition === 'roosting' || v.condition === 'enduring' || v.condition.startsWith('protecting') || v.condition === 'follow-me' || v.condition === 'rage-powder' || v.condition === 'helping-hand').map(v => v.condition);
       if (toClear.length > 0) await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: { $in: toClear } } } });
+    }
+
+    // Wide Guard/Quick Guard are single-round side effects, same lifetime as the
+    // per-Pokémon Protect family cleared just above — just stored on the battle
+    // itself (Battle.fieldConditions) since they apply to a whole side, not one
+    // Pokémon. Room effects (Trick Room/Magic Room/Wonder Room) are also stored
+    // there but are multi-turn — decrement and expire with a message, same pattern
+    // as the per-Pokémon "bound" countdown.
+    if ((battle.fieldConditions ?? []).length > 0) {
+      const remaining: typeof battle.fieldConditions = [];
+      for (const fc of battle.fieldConditions) {
+        if (fc.condition.startsWith('wide-guard:') || fc.condition.startsWith('quick-guard:')) continue;
+        if (ROOM_MOVES.has(fc.condition)) {
+          const turnsLeft = fc.turnsRemaining - 1;
+          if (turnsLeft <= 0) { allEvents.push(ROOM_MESSAGES[fc.condition].end); continue; }
+          remaining.push({ condition: fc.condition, turnsRemaining: turnsLeft });
+          continue;
+        }
+        remaining.push(fc);
+      }
+      battle.fieldConditions = remaining;
+      battle.markModified('fieldConditions');
+    }
+
+    // Counter/Mirror Coat/Metal Burst only care about damage taken THIS round —
+    // wipe it every round so a Pokémon can't retaliate against a hit from two rounds ago.
+    if (Object.keys(battle.damageTakenThisTurn ?? {}).length > 0) {
+      battle.damageTakenThisTurn = {};
+      battle.markModified('damageTakenThisTurn');
     }
 
     const stageMap = battle.statStages as Record<string, StatStages>;
@@ -1245,7 +1557,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       const maxHp   = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).hp;
       const pokeName = pokeDisplayName(poke, cache);
       const pokeId   = poke._id.toString();
-      const volStatus = (poke.volatileStatus as Array<{ condition: string }>) ?? [];
+      const volStatus = (poke.volatileStatus as Array<{ condition: string; turnsRemaining: number }>) ?? [];
 
       if (volStatus.some(v => v.condition === 'ingrain'))    { await applyFractionHeal(pokeId, poke._id, maxHp, 1/16, runningHp, `${pokeName}'s Ingrain`,    allEvents); }
       if (volStatus.some(v => v.condition === 'aqua-ring'))  { await applyFractionHeal(pokeId, poke._id, maxHp, 1/16, runningHp, `${pokeName}'s Aqua Ring`,  allEvents); }
@@ -1277,6 +1589,29 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
         const newHp  = Math.max(0, curHp - damage);
         runningHp.set(pokeId, newHp); await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
         allEvents.push(`${pokeName} is afflicted by the curse! (${damage} damage, ${newHp} HP remaining)`);
+      }
+
+      const boundEntry = volStatus.find(v => v.condition.startsWith('bound:'));
+      if (boundEntry) {
+        const curHp = runningHp.get(pokeId) ?? poke.currentHp;
+        if (curHp > 0) {
+          const trapMoveId = boundEntry.condition.split(':')[1];
+          const damage = Math.max(1, Math.floor(maxHp / 8));
+          const newHp  = Math.max(0, curHp - damage);
+          runningHp.set(pokeId, newHp); await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+          allEvents.push(`${pokeName} is hurt by ${slugToDisplayName(trapMoveId)}! (${damage} damage, ${newHp} HP remaining)`);
+
+          const turnsLeft = (boundEntry.turnsRemaining ?? 1) - 1;
+          if (turnsLeft <= 0) {
+            await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: boundEntry.condition } } });
+            allEvents.push(`${pokeName} was freed from the bind!`);
+          } else {
+            await Pokemon.updateOne(
+              { _id: poke._id, 'volatileStatus.condition': boundEntry.condition },
+              { $set: { 'volatileStatus.$.turnsRemaining': turnsLeft } },
+            );
+          }
+        }
       }
     }
 
@@ -1335,13 +1670,17 @@ export async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promis
     return { entry, speed, movePriority };
   });
 
+  // Trick Room only reverses the final speed tiebreak within a priority bracket —
+  // item/switch-vs-move and priority-move ordering are unaffected, same as the real games.
+  const trickRoomActive = (battle.fieldConditions ?? []).some(f => f.condition === 'trick-room');
+
   const actionPriority = (t: string) => (t === 'item' || t === 'catch' ? 2 : t === 'switch' ? 1 : 0);
   withSpeed.sort((a, b) => {
     const actionDiff = actionPriority(b.entry.actionType) - actionPriority(a.entry.actionType);
     if (actionDiff !== 0) return actionDiff;
     const movePriorityDiff = b.movePriority - a.movePriority;
     if (movePriorityDiff !== 0) return movePriorityDiff;
-    return b.speed - a.speed;
+    return trickRoomActive ? a.speed - b.speed : b.speed - a.speed;
   });
 
   battle.set('turnQueue', withSpeed.map(x => x.entry));
@@ -1357,7 +1696,7 @@ type ActiveEntry = {
 };
 
 // Looks up a single cached move's type + accuracy for one species without loading the full moves array.
-type MoveMeta = { type: string; accuracy: number | null };
+type MoveMeta = { type: string; accuracy: number | null; target?: string };
 async function fetchMoveMeta(speciesId: number, moveId: string): Promise<MoveMeta | undefined> {
   const doc = await PokedexCache.findOne({ pokeApiId: speciesId, 'moves.name': moveId }, { 'moves.$': 1 }).lean();
   return (doc?.moves as MoveMeta[] | undefined)?.[0];
@@ -1514,6 +1853,93 @@ async function resolveSelfTargetMove(
       else { await Pokemon.updateOne({ _id: entry.activePokemonId }, { $push: { volatileStatus: { condition: protectVolatile, turnsRemaining: 0 } } }); moveEvents.push(`${attackerName} protected itself!`); }
     }
 
+    if ((entry.moveId === 'wide-guard' || entry.moveId === 'quick-guard')) {
+      const side = resolveActingSide(battle, entry.activePokemonId);
+      if (side) {
+        const condition = `${entry.moveId}:${side}`;
+        const alreadyGuarded = (battle.fieldConditions ?? []).some(f => f.condition === condition);
+        if (alreadyGuarded) {
+          moveEvents.push(`${attackerName}'s side is already protected!`);
+        } else {
+          battle.fieldConditions.push({ condition, turnsRemaining: 0 });
+          battle.markModified('fieldConditions');
+          const flavor = entry.moveId === 'wide-guard' ? 'a barrage of attacks' : 'a sneak attack';
+          moveEvents.push(`${attackerName}'s side braced itself against ${flavor}!`);
+        }
+      }
+    }
+
+    if (ROOM_MOVES.has(entry.moveId)) {
+      const already = (battle.fieldConditions ?? []).some(f => f.condition === entry.moveId);
+      const messages = ROOM_MESSAGES[entry.moveId];
+      if (already) {
+        battle.fieldConditions = battle.fieldConditions.filter(f => f.condition !== entry.moveId);
+        battle.markModified('fieldConditions');
+        moveEvents.push(messages.end);
+      } else {
+        battle.fieldConditions.push({ condition: entry.moveId, turnsRemaining: 5 });
+        battle.markModified('fieldConditions');
+        moveEvents.push(`${attackerName} ${messages.start}`);
+      }
+    }
+
+    const redirectVolatile = REDIRECT_MOVES.has(entry.moveId) ? entry.moveId : null;
+    if (redirectVolatile && attacker) {
+      const vol = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+      if (vol.some(v => v.condition === 'follow-me' || v.condition === 'rage-powder')) {
+        moveEvents.push(`${attackerName} is already drawing attention!`);
+      } else {
+        await Pokemon.updateOne({ _id: entry.activePokemonId }, { $push: { volatileStatus: { condition: redirectVolatile, turnsRemaining: 0 } } });
+        moveEvents.push(`${attackerName} became the center of attention!`);
+      }
+    }
+
+  }
+}
+
+// Helping Hand / Heal Pulse / Aromatic Mist — the first moves in this project that
+// target an ally rather than a foe or the user. Callers (submitTarget) are
+// responsible for validating the target is a legal ally/foe for the move.
+async function resolveAllyTargetMove(
+  battle: HydratedDocument<IBattle>, entry: ActiveEntry, targetId: string, moveEvents: string[],
+): Promise<void> {
+  const attacker = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
+  const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name').lean() : null;
+  const attackerName = pokeDisplayName(attacker, atkCache);
+
+  const target = await Pokemon.findById(
+    targetId, 'ownerId ownerType nickname speciesId currentHp nature level evs hasHiddenAbility volatileStatus',
+  ).lean();
+  const targetCache = target ? await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name baseStats abilities').lean() : null;
+  const targetName  = pokeDisplayName(target, targetCache);
+
+  if (entry.moveId === 'helping-hand') {
+    const already = ((target?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'helping-hand');
+    if (already) { moveEvents.push(`${attackerName} used Helping Hand, but it failed!`); return; }
+    await Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition: 'helping-hand', turnsRemaining: 0 } } });
+    moveEvents.push(`${attackerName} used Helping Hand! ${targetName}'s next move will hit harder!`);
+    return;
+  }
+
+  if (entry.moveId === 'heal-pulse') {
+    if (!target || !targetCache?.baseStats) { moveEvents.push(`${attackerName} used Heal Pulse, but it failed!`); return; }
+    const targetIvs = await getIvsForOwner(target.ownerId, target.ownerType);
+    const maxHp = computeStats(targetCache.baseStats as BaseStats, target.level, target.nature, target.evs as BaseStats, targetIvs).hp;
+    if (target.currentHp >= maxHp) { moveEvents.push(`${attackerName} used Heal Pulse! ${targetName}'s HP is full!`); return; }
+    const healed = Math.min(maxHp - target.currentHp, Math.floor(maxHp / 2));
+    await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: target.currentHp + healed } });
+    moveEvents.push(`${attackerName} used Heal Pulse! ${targetName} restored ${healed} HP!`);
+    return;
+  }
+
+  if (entry.moveId === 'aromatic-mist') {
+    const stageMap = battle.statStages as Record<string, StatStages>;
+    const targetAbilitySlug = target && targetCache
+      ? resolveAbilitySlug((targetCache.abilities as CachedAbility[]) ?? [], target.hasHiddenAbility as boolean)
+      : null;
+    moveEvents.push(`${attackerName} used Aromatic Mist!`);
+    moveEvents.push(...applyStatStageEffects(stageMap, targetId, [{ stat: 'spd', stages: 1, target: 'self' }], targetName, targetAbilitySlug));
+    battle.markModified('statStages');
   }
 }
 
@@ -1521,7 +1947,24 @@ async function resolveDamagingMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, targets: string[],
   targetHpMap: Map<string, number>, enduringTargets: Set<string>,
   protectingTargets: Map<string, string | null>, moveEvents: string[],
+  sideGuard: { wideGuard: boolean; quickGuard: boolean } = { wideGuard: false, quickGuard: false },
 ): Promise<void> {
+  if (entry.moveId === 'metronome') {
+    // Reroll BEFORE anything else reads entry.moveId, and reassign the local `entry`
+    // reference (a plain object, not the live turnQueue subdocument) rather than
+    // mutating it — the PP-deduction call after this function returns still needs to
+    // see the original 'metronome' to decrement the right move's PP.
+    const rolledMoveId = METRONOME_POOL[Math.floor(Math.random() * METRONOME_POOL.length)];
+    const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
+    const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
+    moveEvents.push(`${pokeDisplayName(atkDoc, atkCache)} waggled a finger... it became ${slugToDisplayName(rolledMoveId)}!`);
+    // entry is actually a live Mongoose subdocument at the call site (cast to the
+    // plain ActiveEntry type) — {...entry} does NOT reliably copy its fields, since
+    // they're accessor properties rather than own-enumerable data properties. Build
+    // the replacement explicitly instead of spreading.
+    entry = { activePokemonId: entry.activePokemonId, actorType: entry.actorType, moveId: rolledMoveId };
+  }
+
   if (entry.moveId === 'fake-out') {
     // A live Pokémon's activePokemonId is unique across both sides, so match on that
     // directly rather than branching on actorType (which doesn't tell us the side in pvp).
@@ -1578,8 +2021,8 @@ async function resolveDamagingMove(
   const drainEffect     = DRAIN_MOVES[entry.moveId];
   const selfStatEffects = (STAT_STAGE_MOVES[entry.moveId] ?? []).filter(e => e.target === 'self');
 
-  type AtkSnapshot = { ownerId: mongoose.Types.ObjectId; ownerType: string; currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats };
-  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs').lean() as AtkSnapshot | null;
+  type AtkSnapshot = { ownerId: mongoose.Types.ObjectId; ownerType: string; currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats; gender?: string | null };
+  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs gender').lean() as AtkSnapshot | null;
   const atkSnapCache = atkSnap ? await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'name baseStats abilities').lean() : null;
   const atkIvs       = atkSnap ? await getIvsForOwner(atkSnap.ownerId, atkSnap.ownerType) : ZERO_IVS;
 
@@ -1612,6 +2055,10 @@ async function resolveDamagingMove(
 
   const moveMeta = atkSnap ? await fetchMoveMeta(atkSnap.speciesId, entry.moveId) : undefined;
   const moveAccuracy = moveMeta?.accuracy ?? null;
+  const moveTargetCategory = getMoveTargetCategory(moveMeta?.target ?? '');
+  const moveIsPriority = (MOVE_PRIORITY[entry.moveId] ?? 0) > 0;
+  const wonderRoomActive = (battle.fieldConditions ?? []).some(f => f.condition === 'wonder-room');
+  const magicRoomActive  = (battle.fieldConditions ?? []).some(f => f.condition === 'magic-room');
 
   let typeChangeMoveType: string | null = null;
   const isTypeChanging = attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero' || (attackerAbilitySlug != null && attackerAbilitySlug in ILATE_MAP);
@@ -1637,6 +2084,46 @@ async function resolveDamagingMove(
   }
 
   for (const targetId of targets) {
+    if (FORCE_SWITCH_STATUS_MOVES.has(entry.moveId)) {
+      // Roar/Whirlwind bypass accuracy checks entirely (modern-gen rule) and deal no damage.
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}!`);
+      await forceOpponentSwitch(battle, targetId, moveEvents);
+      continue;
+    }
+
+    const counterEffect = COUNTER_MOVES[entry.moveId];
+    if (counterEffect) {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const stored  = (battle.damageTakenThisTurn as Record<string, { amount: number; category: string; attackerId: string }>)[entry.activePokemonId.toString()];
+      const categoryMatches = stored && (counterEffect.category === 'both' || stored.category === counterEffect.category);
+      const targetMatches   = stored && stored.attackerId === targetId;
+      if (!categoryMatches || !targetMatches) {
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+        continue;
+      }
+      const protectCondition = protectingTargets.get(targetId);
+      if (protectCondition) {
+        const tgtDoc = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+        const tgtC   = tgtDoc ? await PokedexCache.findOne({ pokeApiId: (tgtDoc as any).speciesId }, 'name').lean() : null;
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}!`);
+        moveEvents.push(`${pokeDisplayName(tgtDoc, tgtC)} protected itself!`);
+        continue;
+      }
+      const retaliation = Math.max(1, Math.floor(stored.amount * counterEffect.multiplier));
+      const currentHp    = targetHpMap.get(targetId) ?? 0;
+      const isEnduring   = enduringTargets.has(targetId);
+      const rawNewHp     = currentHp - retaliation;
+      const newHp        = isEnduring && rawNewHp <= 0 ? 1 : Math.max(0, rawNewHp);
+      await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+      targetHpMap.set(targetId, newHp);
+      const damageMap = battle.damageTakenThisTurn as Record<string, { amount: number; category: string; attackerId: string }>;
+      damageMap[targetId] = { amount: retaliation, category: counterEffect.category === 'both' ? stored.category : counterEffect.category, attackerId: entry.activePokemonId.toString() };
+      battle.markModified('damageTakenThisTurn');
+      moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}! It hit back for ${retaliation} damage!${isEnduring && rawNewHp <= 0 ? ' It endured the hit!' : ''}`);
+      continue;
+    }
+
     if (moveAccuracy !== null) {
       const attackerAccStage = stageMap[entry.activePokemonId.toString()]?.acc ?? 0;
       const targetEvaStage   = stageMap[targetId]?.eva ?? 0;
@@ -1692,6 +2179,33 @@ async function resolveDamagingMove(
       continue;
     }
 
+    if (entry.moveId === 'attract') {
+      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId gender volatileStatus hasHiddenAbility').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name abilities').lean() : null;
+      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const oppositeGenders = !!tgt && !!atkSnap
+        && tgt.gender !== 'none' && tgt.gender != null
+        && atkSnap.gender !== 'none' && atkSnap.gender != null
+        && tgt.gender !== atkSnap.gender;
+      if (!oppositeGenders) {
+        moveEvents.push(`${atkName} used Attract! It doesn't affect ${tgtName}!`);
+        continue;
+      }
+      const tgtAbilitySlug = tgt && tgtCache ? resolveAbilitySlug((tgtCache.abilities as CachedAbility[]) ?? [], tgt.hasHiddenAbility as boolean) : null;
+      if (tgtAbilitySlug === 'oblivious') {
+        moveEvents.push(`${atkName} used Attract! ${tgtName}'s Oblivious prevents infatuation!`);
+        continue;
+      }
+      if (((tgt?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('infatuated:'))) {
+        moveEvents.push(`${atkName} used Attract, but it failed!`);
+        continue;
+      }
+      await Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition: `infatuated:${entry.activePokemonId.toString()}`, turnsRemaining: 99 } } });
+      moveEvents.push(`${atkName} used Attract! ${tgtName} fell in love!`);
+      continue;
+    }
+
     if (typeChangeMoveType && atkSnap && atkSnapCache) {
       const atkName = pokeDisplayName(atkSnap, atkSnapCache);
       if (attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero') {
@@ -1706,6 +2220,15 @@ async function resolveDamagingMove(
 
     for (let hit = 1; hit <= hitCount; hit++) {
       if ((targetHpMap.get(targetId) ?? 0) <= 0) break;
+
+      if (sideGuard.wideGuard && moveTargetCategory === 'auto') {
+        moveEvents.push(`${slugToDisplayName(entry.moveId)} was blocked by Wide Guard!`);
+        break;
+      }
+      if (sideGuard.quickGuard && moveIsPriority) {
+        moveEvents.push(`${slugToDisplayName(entry.moveId)} was blocked by Quick Guard!`);
+        break;
+      }
 
       const protectCondition = protectingTargets.get(targetId);
       if (protectCondition) {
@@ -1735,10 +2258,10 @@ async function resolveDamagingMove(
         break;
       }
 
-      const { damage, isCrit, events } = await resolveMove(
+      const { damage, isCrit, events, category } = await resolveMove(
         entry.activePokemonId, new mongoose.Types.ObjectId(targetId), entry.moveId, battle.weather,
         { attacker: stageMap[entry.activePokemonId.toString()], target: stageMap[targetId] },
-        escalatedPower,
+        escalatedPower, wonderRoomActive, magicRoomActive,
       );
       if (isCrit) anyCrit = true;
       if (hitCount > 1) { moveEvents.push(`(Hit ${hit}) ${events[0]}`); } else { moveEvents.push(...events); }
@@ -1752,6 +2275,11 @@ async function resolveDamagingMove(
         targetHpMap.set(targetId, newHp);
         totalDamage += damage;
         if (isEnduring && rawNewHp <= 0) moveEvents.push('It endured the hit!');
+        if (category === 'physical' || category === 'special') {
+          const damageMap = battle.damageTakenThisTurn as Record<string, { amount: number; category: string; attackerId: string }>;
+          damageMap[targetId] = { amount: damage, category, attackerId: entry.activePokemonId.toString() };
+          battle.markModified('damageTakenThisTurn');
+        }
       }
       actualHits++;
     }
@@ -1864,6 +2392,22 @@ async function resolveDamagingMove(
           }
         }
       }
+    }
+
+    if (BINDING_MOVES.has(entry.moveId) && totalDamage > 0 && (targetHpMap.get(targetId) ?? 0) > 0) {
+      const tgt = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
+      const alreadyBound = ((tgt?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
+      if (tgt && !alreadyBound) {
+        const tgtCache  = await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name').lean();
+        const duration  = 4 + Math.floor(Math.random() * 2); // 4-5 turns, matches Gen 6+
+        const condition = `bound:${entry.moveId}:${entry.activePokemonId.toString()}`;
+        await Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition, turnsRemaining: duration } } });
+        moveEvents.push(`${pokeDisplayName(tgt, tgtCache)} was trapped by ${slugToDisplayName(entry.moveId)}!`);
+      }
+    }
+
+    if (FORCE_SWITCH_DAMAGE_MOVES.has(entry.moveId) && totalDamage > 0 && (targetHpMap.get(targetId) ?? 0) > 0) {
+      await forceOpponentSwitch(battle, targetId, moveEvents);
     }
   }
 
@@ -2013,6 +2557,12 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  if ((actionType === 'switch' || actionType === 'run') && playerEntry.activePokemonId) {
+    const boundCheck = await Pokemon.findById(playerEntry.activePokemonId, 'volatileStatus').lean();
+    const isBound = ((boundCheck?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
+    if (isBound) { res.status(400).json({ data: null, error: 'Your Pokémon is trapped and cannot switch out or flee!' }); return; }
+  }
+
   if (actionType === 'item') {
     if (!itemId || !targetPokemonId) { res.status(400).json({ data: null, error: 'itemId and targetPokemonId are required for item actions' }); return; }
     if (!mongoose.Types.ObjectId.isValid(targetPokemonId)) { res.status(400).json({ data: null, error: 'Invalid targetPokemonId' }); return; }
@@ -2099,6 +2649,36 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
   if (!moveSlot)               { res.status(400).json({ data: null, error: 'That move is not on your active Pokémon' }); return; }
   if (moveSlot.currentPP <= 0) { res.status(400).json({ data: null, error: 'That move has no PP remaining' }); return; }
 
+  // Baton Pass needs its incoming Pokémon chosen up front, same as a real switch —
+  // unlike every other move, it never enters the interactive targeting phase; it
+  // auto-resolves in autoSkipBlockedActors exactly like item/switch actions do.
+  if (moveId === 'baton-pass') {
+    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) {
+      res.status(400).json({ data: null, error: 'Baton Pass requires a valid switchToPokemonId (who to pass to)' }); return;
+    }
+    const switchToId = new mongoose.Types.ObjectId(switchToPokemonId);
+    if (playerEntry.activePokemonId?.toString() === switchToPokemonId) {
+      res.status(400).json({ data: null, error: 'That Pokémon is already active' }); return;
+    }
+    const switchTarget = await Pokemon.findOne({ _id: switchToId, ownerId: userId, ownerType: 'player', isInParty: true }).lean();
+    if (!switchTarget)               { res.status(404).json({ data: null, error: 'Pokémon not found in your party' }); return; }
+    if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'That Pokémon has fainted' }); return; }
+
+    const alreadyUsedBP = playerEntry.usedPokemonIds.some(id => id.toString() === switchToPokemonId);
+    if (!alreadyUsedBP && battle.playerPokemonLimit !== null) {
+      if (playerEntry.usedPokemonIds.length >= battle.playerPokemonLimit) {
+        res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' }); return;
+      }
+    }
+
+    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'move', moveId, switchToPokemonId: switchToId, targets: [], resolved: false });
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    return;
+  }
+
   battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'move', moveId, targets: [], resolved: false });
   await checkAndAdvance(battle);
   battle.lastUpdatedAt = new Date();
@@ -2140,14 +2720,32 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
   const actingSide: 'playerSide' | 'enemySide' = currentEntry.actorType === 'npc'
     ? 'enemySide'
     : (findOwnSideEntry(battle, currentEntry.actorId.toString())?.side ?? 'playerSide');
-  const validTargetIds = actingSide === 'playerSide'
-    ? battle.enemySide.filter(e => e.activePokemonId != null).map(e => e.activePokemonId!.toString())
-    : battle.playerSide.filter(e => e.activePokemonId != null).map(e => e.activePokemonId!.toString());
+  const ownEntries = actingSide === 'playerSide' ? battle.playerSide : battle.enemySide;
+  const foeEntries  = actingSide === 'playerSide' ? battle.enemySide : battle.playerSide;
+  const allyIds = ownEntries
+    .filter(e => e.activePokemonId != null && e.activePokemonId.toString() !== currentEntry.activePokemonId.toString())
+    .map(e => e.activePokemonId!.toString());
+  const foeIds = foeEntries.filter(e => e.activePokemonId != null).map(e => e.activePokemonId!.toString());
+
+  const validTargetIds = ALLY_ONLY_MOVES.has(currentEntry.moveId)
+    ? allyIds
+    : ALLY_OR_FOE_MOVES.has(currentEntry.moveId)
+    ? [...allyIds, ...foeIds]
+    : foeIds;
 
   const invalidTargets = targets.filter(t => !validTargetIds.includes(t));
-  if (invalidTargets.length > 0) { res.status(400).json({ data: null, error: 'One or more targets are not valid active opposing Pokémon' }); return; }
+  if (invalidTargets.length > 0) { res.status(400).json({ data: null, error: 'One or more targets are not valid for this move' }); return; }
 
-  const targetPokemons = await Pokemon.find({ _id: { $in: targets } }, 'currentHp volatileStatus').lean();
+  // Follow Me / Rage Powder — redirect single-target foe moves to the redirector,
+  // regardless of what was clicked. Never applies to ally-targeting or self-targeting
+  // moves (those never had a foe target to begin with).
+  let effectiveTargets = targets;
+  if (targets.length === 1 && !ALLY_ONLY_MOVES.has(currentEntry.moveId) && !ALLY_OR_FOE_MOVES.has(currentEntry.moveId) && !SELF_TARGETING_MOVES.has(currentEntry.moveId)) {
+    const redirected = await resolveRedirectTarget(battle, { activePokemonId: currentEntry.activePokemonId, moveId: currentEntry.moveId }, actingSide);
+    if (redirected) effectiveTargets = [redirected];
+  }
+
+  const targetPokemons = await Pokemon.find({ _id: { $in: effectiveTargets } }, 'currentHp volatileStatus').lean();
   const fainted = targetPokemons.filter(p => p.currentHp <= 0);
   if (fainted.length > 0) { res.status(400).json({ data: null, error: 'Cannot target a fainted Pokémon' }); return; }
 
@@ -2167,7 +2765,7 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
     }),
   );
 
-  battle.turnQueue[idx].targets = targets.map(t => new mongoose.Types.ObjectId(t));
+  battle.turnQueue[idx].targets = effectiveTargets.map(t => new mongoose.Types.ObjectId(t));
 
   const { hitSelf, events: confusionEvents } = await checkConfusion(currentEntry.activePokemonId);
   const moveEvents: string[] = [...confusionEvents];
@@ -2178,8 +2776,16 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
       await resolveWeatherMove(battle, currentEntry as unknown as ActiveEntry, weatherEffect, moveEvents);
     } else if (SELF_TARGETING_MOVES.has(currentEntry.moveId)) {
       await resolveSelfTargetMove(battle, currentEntry as unknown as ActiveEntry, moveEvents);
+    } else if (ALLY_ONLY_MOVES.has(currentEntry.moveId) || ALLY_OR_FOE_MOVES.has(currentEntry.moveId)) {
+      await resolveAllyTargetMove(battle, currentEntry as unknown as ActiveEntry, effectiveTargets[0], moveEvents);
     } else {
-      await resolveDamagingMove(battle, currentEntry as unknown as ActiveEntry, targets, targetHpMap, enduringTargets, protectingTargets, moveEvents);
+      const defendingSide = actingSide === 'playerSide' ? 'enemySide' : 'playerSide';
+      const fieldConds = (battle.fieldConditions ?? []) as Array<{ condition: string; turnsRemaining: number }>;
+      const sideGuard = {
+        wideGuard:  fieldConds.some(f => f.condition === `wide-guard:${defendingSide}`),
+        quickGuard: fieldConds.some(f => f.condition === `quick-guard:${defendingSide}`),
+      };
+      await resolveDamagingMove(battle, currentEntry as unknown as ActiveEntry, effectiveTargets, targetHpMap, enduringTargets, protectingTargets, moveEvents, sideGuard);
     }
 
     await Pokemon.updateOne(
@@ -2309,6 +2915,8 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
   }));
 
   let currentMoveTargetCategory: 'single' | 'auto' | null = null;
+  let currentMoveAllyTarget: 'ally-only' | 'ally-or-foe' | null = null;
+  let currentMoveAllyIds: string[] = [];
   if (battle.phase === 'targeting' && battle.currentTargetIndex < battle.turnQueue.length) {
     const currentEntry = battle.turnQueue[battle.currentTargetIndex];
     if (currentEntry.moveId && currentEntry.activePokemonId) {
@@ -2321,6 +2929,19 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
         const moveTarget = (moveCache?.moves?.[0] as any)?.target ?? '';
         if (moveTarget) currentMoveTargetCategory = getMoveTargetCategory(moveTarget);
       }
+
+      if (ALLY_ONLY_MOVES.has(currentEntry.moveId) || ALLY_OR_FOE_MOVES.has(currentEntry.moveId)) {
+        currentMoveAllyTarget = ALLY_ONLY_MOVES.has(currentEntry.moveId) ? 'ally-only' : 'ally-or-foe';
+        // battle here is a .lean() read, not a HydratedDocument, so findOwnSideEntry
+        // (which expects the latter) can't be reused — inline the same side lookup.
+        const actingSideForAlly: 'playerSide' | 'enemySide' = currentEntry.actorType === 'npc'
+          ? 'enemySide'
+          : (battle.playerSide.some(e => e.userId?.toString() === currentEntry.actorId.toString()) ? 'playerSide' : 'enemySide');
+        const ownEntriesForAlly = actingSideForAlly === 'playerSide' ? battle.playerSide : battle.enemySide;
+        currentMoveAllyIds = ownEntriesForAlly
+          .filter(e => e.activePokemonId != null && e.activePokemonId.toString() !== currentEntry.activePokemonId!.toString())
+          .map(e => e.activePokemonId!.toString());
+      }
     }
   }
 
@@ -2331,6 +2952,8 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
       enemySide:                 enemySideWithInfo,
       noTargetMoveIds:           [...NO_TARGET_MOVE_IDS],
       currentMoveTargetCategory,
+      currentMoveAllyTarget,
+      currentMoveAllyIds,
       wildCatchable:             battle.wildCatchable,
     },
     error: null,
@@ -2433,6 +3056,12 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
     return;
   }
 
+  if (actionType === 'switch' && npcEntry.activePokemonId) {
+    const boundCheck = await Pokemon.findById(npcEntry.activePokemonId, 'volatileStatus').lean();
+    const isBound = ((boundCheck?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
+    if (isBound) { res.status(400).json({ data: null, error: 'This Pokémon is trapped and cannot switch out!' }); return; }
+  }
+
   if (battle.type === 'wild' && actionType === 'switch') { res.status(400).json({ data: null, error: 'Wild Pokémon cannot switch' }); return; }
 
   if (actionType === 'item') {
@@ -2481,6 +3110,28 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
   const moveSlot = pokemon.moves.find(m => m.moveId === moveId);
   if (!moveSlot)               { res.status(400).json({ data: null, error: "That move is not on the NPC's active Pokémon" }); return; }
   if (moveSlot.currentPP <= 0) { res.status(400).json({ data: null, error: 'That move has no PP remaining' }); return; }
+
+  // See submitMove — Baton Pass needs its incoming Pokémon chosen up front and
+  // auto-resolves like a switch, never entering the interactive targeting phase.
+  if (moveId === 'baton-pass') {
+    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) { res.status(400).json({ data: null, error: 'Baton Pass requires a valid switchToPokemonId (who to pass to)' }); return; }
+    if (npcEntry.activePokemonId?.toString() === switchToPokemonId)                { res.status(400).json({ data: null, error: 'That Pokémon is already active' }); return; }
+
+    const npc = await Npc.findById(npcId, 'party').lean();
+    if (!npc || !npc.party.some((id: mongoose.Types.ObjectId) => id.toString() === switchToPokemonId)) {
+      res.status(400).json({ data: null, error: "That Pokémon is not in this NPC's party" }); return;
+    }
+    const switchTarget = await Pokemon.findById(switchToPokemonId, 'currentHp').lean();
+    if (!switchTarget)               { res.status(404).json({ data: null, error: 'Switch target Pokémon not found' }); return; }
+    if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'Cannot switch to a fainted Pokémon' }); return; }
+
+    battle.turnQueue.push({ actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId, switchToPokemonId: new mongoose.Types.ObjectId(switchToPokemonId), targets: [], resolved: false });
+    await checkAndAdvance(battle);
+    battle.lastUpdatedAt = new Date();
+    await battle.save();
+    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    return;
+  }
 
   battle.turnQueue.push({ actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId, targets: [], resolved: false });
   await checkAndAdvance(battle);
