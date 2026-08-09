@@ -109,6 +109,14 @@ export type IBattle = {
   // THIS round, for Counter/Mirror Coat/Metal Burst — overwritten (not accumulated) on
   // every hit, cleared entirely at the end of every round in applyEndOfRound.
   damageTakenThisTurn: Record<string, { amount: number; category: string; attackerId: string }>;
+  // Keyed by pokemonId.toString(). The most recent move each Pokémon actually executed
+  // this battle, for Sketch (reads the TARGET's entry). Recorded under the resolved
+  // moveId, not a wrapper name — e.g. a Metronome/Copycat use is recorded under whatever
+  // it rolled/copied into. Never cleared on switch-out; a stale read is a harmless edge case.
+  lastMoveByPokemon: Record<string, string>;
+  // The most recent move ANY Pokémon executed this battle, for Copycat. Same
+  // resolved-moveId convention as lastMoveByPokemon.
+  globalLastMoveUsed: string | null;
   expAwarded: boolean;
   moneyAwarded: boolean;
   // Set once the battle completes. For pve/wild this always mirrors "did the players win"
@@ -216,6 +224,8 @@ const BattleSchema = new Schema<IBattle>(
     consecutiveMoves:   { type: Schema.Types.Mixed, default: {} },
     lockedMoves:        { type: Schema.Types.Mixed, default: {} },
     damageTakenThisTurn: { type: Schema.Types.Mixed, default: {} },
+    lastMoveByPokemon:   { type: Schema.Types.Mixed, default: {} },
+    globalLastMoveUsed:  { type: String, default: null },
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },

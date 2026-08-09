@@ -1834,6 +1834,29 @@ async function resolveSelfTargetMove(
       }
     }
 
+    if (entry.moveId === 'substitute' && attacker && atkCache?.baseStats) {
+      // The substitute's own remaining HP is encoded in the volatile condition string
+      // (substitute:<hp>), same convention as bound:/infatuated: — rewritten in place by
+      // resolveDamagingMove's substitute-absorption check whenever it takes a hit.
+      const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
+      if (volStatus.some(v => v.condition.startsWith('substitute:'))) {
+        moveEvents.push(`${attackerName} already has a substitute!`);
+      } else {
+        const maxHp  = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats, attackerIvs).hp;
+        const curHp  = attacker.currentHp as number;
+        const costHp = Math.max(1, Math.floor(maxHp / 4));
+        if (curHp <= costHp) {
+          moveEvents.push(`${attackerName} doesn't have enough HP to make a substitute!`);
+        } else {
+          await Pokemon.updateOne(
+            { _id: entry.activePokemonId },
+            { $set: { currentHp: curHp - costHp }, $push: { volatileStatus: { condition: `substitute:${costHp}`, turnsRemaining: 99 } } },
+          );
+          moveEvents.push(`${attackerName} put in a substitute!`);
+        }
+      }
+    }
+
     if (entry.moveId === 'ingrain' && attacker) {
       const volStatus = (attacker.volatileStatus as Array<{ condition: string }>) ?? [];
       if (volStatus.some(v => v.condition === 'ingrain')) { moveEvents.push(`${attackerName} is already rooted!`); }
@@ -1948,7 +1971,19 @@ async function resolveDamagingMove(
   targetHpMap: Map<string, number>, enduringTargets: Set<string>,
   protectingTargets: Map<string, string | null>, moveEvents: string[],
   sideGuard: { wideGuard: boolean; quickGuard: boolean } = { wideGuard: false, quickGuard: false },
+  // Keyed by pokemonId, value is the substitute's current remaining HP (absent/0 = no
+  // substitute). Mutated in place as hits land so a multi-hit move sees the updated value.
+  substituteTargets: Map<string, number> = new Map(),
+  // Written to whenever entry.moveId is reassigned (Metronome's reroll, Copycat's
+  // copy) so the caller can record the move that ACTUALLY executed for Sketch/Copycat
+  // tracking, instead of the wrapper name — defaults to entry.moveId, so callers that
+  // never reassign don't need to read anything special out of it.
+  resolvedMoveId: { value: string } = { value: entry.moveId },
 ): Promise<void> {
+  // Set only by the Me First block below — merged with escalatedPower (which wins if
+  // somehow both apply) at the resolveMove call site further down.
+  let meFirstPowerOverride: number | undefined;
+
   if (entry.moveId === 'metronome') {
     // Reroll BEFORE anything else reads entry.moveId, and reassign the local `entry`
     // reference (a plain object, not the live turnQueue subdocument) rather than
@@ -1963,6 +1998,57 @@ async function resolveDamagingMove(
     // they're accessor properties rather than own-enumerable data properties. Build
     // the replacement explicitly instead of spreading.
     entry = { activePokemonId: entry.activePokemonId, actorType: entry.actorType, moveId: rolledMoveId };
+    resolvedMoveId.value = entry.moveId;
+  }
+
+  if (entry.moveId === 'copycat') {
+    // Copies whatever move was last used by ANY Pokémon this battle (battle.globalLastMoveUsed,
+    // recorded by submitTarget under the resolved moveId — so a Copycat chain, or copying a
+    // Metronome roll, picks up the real move, not the wrapper name). Fails with nothing to
+    // copy yet, or a self-referential/nonsensical source.
+    const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
+    const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
+    const atkName  = pokeDisplayName(atkDoc, atkCache);
+    const lastMove = battle.globalLastMoveUsed;
+    if (!lastMove || lastMove === 'copycat' || lastMove === 'sketch' || lastMove === 'struggle') {
+      moveEvents.push(`${atkName} used Copycat, but it failed!`);
+      return;
+    }
+    moveEvents.push(`${atkName} used Copycat! It mimicked ${slugToDisplayName(lastMove)}!`);
+    entry = { activePokemonId: entry.activePokemonId, actorType: entry.actorType, moveId: lastMove };
+    resolvedMoveId.value = entry.moveId;
+  }
+
+  if (entry.moveId === 'me-first') {
+    // Steals the target's already-queued-but-unresolved move for this round and uses it
+    // immediately at 1.5x power — the target's own turn later this round is untouched
+    // (still resolves normally off their own PP). Single-target only, so targets[0] is
+    // the one legal target picked in the targeting phase. Fails against a target who has
+    // already acted (turnQueue entry resolved, or not found — e.g. a standalone wild
+    // target with no queue entry to peek at), a non-move action, or a non-damaging move
+    // (no cached base power) — matches the real restriction that Me First only works on
+    // an opponent's about-to-be-used damaging move.
+    const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
+    const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
+    const atkName  = pokeDisplayName(atkDoc, atkCache);
+    const targetId = targets[0];
+    const targetQueueEntry = targetId
+      ? battle.turnQueue.find(e => e.activePokemonId?.toString() === targetId && e.actionType === 'move' && !e.resolved && e.moveId)
+      : undefined;
+    const stolenMoveId = targetQueueEntry?.moveId ?? '';
+    let stolenPower: number | undefined;
+    if (stolenMoveId) {
+      const anyCache = await PokedexCache.findOne({ 'moves.name': stolenMoveId }, { 'moves.$': 1 }).lean();
+      stolenPower = ((anyCache?.moves as Array<{ name: string; power: number | null }> | undefined)?.[0]?.power) ?? undefined;
+    }
+    if (!stolenMoveId || !stolenPower) {
+      moveEvents.push(`${atkName} used Me First, but it failed!`);
+      return;
+    }
+    moveEvents.push(`${atkName} used Me First! It's about to use ${slugToDisplayName(stolenMoveId)}!`);
+    meFirstPowerOverride = Math.floor(stolenPower * 1.5);
+    entry = { activePokemonId: entry.activePokemonId, actorType: entry.actorType, moveId: stolenMoveId };
+    resolvedMoveId.value = entry.moveId;
   }
 
   if (entry.moveId === 'fake-out') {
@@ -2206,6 +2292,34 @@ async function resolveDamagingMove(
       continue;
     }
 
+    if (entry.moveId === 'sketch') {
+      // Targets an opponent, but the effect writes to the USER's own moveset — permanently
+      // replaces Sketch's own slot with whatever move the target last used (battle.lastMoveByPokemon,
+      // same tracking Copycat reads globally). Never consumes the copied move's PP; the normal
+      // PP-deduction call after this function returns finds no 'sketch' slot left to decrement
+      // once the swap below has happened, which is exactly the desired no-op.
+      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
+      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const lastMoveMap  = (battle.lastMoveByPokemon ?? {}) as Record<string, string>;
+      const copiedMoveId = lastMoveMap[targetId];
+      const atkMoves = ((await Pokemon.findById(entry.activePokemonId, 'moves').lean())?.moves ?? []) as Array<{ moveId: string; currentPP: number; maxPP: number; ppUps: number }>;
+      const sketchSlot = atkMoves.findIndex(m => m.moveId === 'sketch');
+      if (!copiedMoveId || copiedMoveId === 'sketch' || copiedMoveId === 'struggle' || sketchSlot === -1) {
+        moveEvents.push(`${atkName} used Sketch, but it failed!`);
+      } else if (atkMoves.some(m => m.moveId === copiedMoveId)) {
+        moveEvents.push(`${atkName} used Sketch on ${tgtName}, but it already knows ${slugToDisplayName(copiedMoveId)}!`);
+      } else {
+        const anyCache = await PokedexCache.findOne({ 'moves.name': copiedMoveId }, { 'moves.$': 1 }).lean();
+        const pp = ((anyCache?.moves as Array<{ name: string; pp: number | null }> | undefined)?.[0]?.pp) ?? 5;
+        const newMoves = atkMoves.map((m, i) => i === sketchSlot ? { moveId: copiedMoveId, currentPP: pp, maxPP: pp, ppUps: 0 } : m);
+        await Pokemon.updateOne({ _id: entry.activePokemonId }, { moves: newMoves });
+        moveEvents.push(`${atkName} used Sketch on ${tgtName}! Sketch permanently became ${slugToDisplayName(copiedMoveId)}!`);
+      }
+      continue;
+    }
+
     if (typeChangeMoveType && atkSnap && atkSnapCache) {
       const atkName = pokeDisplayName(atkSnap, atkSnapCache);
       if (attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero') {
@@ -2261,10 +2375,36 @@ async function resolveDamagingMove(
       const { damage, isCrit, events, category } = await resolveMove(
         entry.activePokemonId, new mongoose.Types.ObjectId(targetId), entry.moveId, battle.weather,
         { attacker: stageMap[entry.activePokemonId.toString()], target: stageMap[targetId] },
-        escalatedPower, wonderRoomActive, magicRoomActive,
+        escalatedPower ?? meFirstPowerOverride, wonderRoomActive, magicRoomActive,
       );
       if (isCrit) anyCrit = true;
       if (hitCount > 1) { moveEvents.push(`(Hit ${hit}) ${events[0]}`); } else { moveEvents.push(...events); }
+
+      // A Substitute absorbs damage in place of the real Pokémon: no HP lost, no
+      // damageTakenThisTurn recorded (so Counter/Mirror Coat/Metal Burst can't trigger off
+      // an absorbed hit), and a multi-hit move stops the instant the substitute breaks —
+      // the remaining hits don't carry over to the real Pokémon (matches the real games).
+      // Secondary effects (status/stat-drops/flinch/recoil/drain) below aren't specially
+      // blocked by a substitute — same simplification this project already accepts for
+      // Protect (see the block above), kept consistent rather than fixed for one and not
+      // the other.
+      const subHp = substituteTargets.get(targetId);
+      if (subHp != null && subHp > 0 && damage > 0) {
+        totalDamage += damage;
+        const newSubHp = subHp - damage;
+        if (newSubHp <= 0) {
+          await Pokemon.updateOne({ _id: targetId }, { $pull: { volatileStatus: { condition: { $regex: '^substitute:' } } } });
+          substituteTargets.set(targetId, 0);
+          moveEvents.push('The substitute broke!');
+          break;
+        }
+        await Pokemon.updateOne(
+          { _id: targetId, 'volatileStatus.condition': { $regex: '^substitute:' } },
+          { $set: { 'volatileStatus.$.condition': `substitute:${newSubHp}` } },
+        );
+        substituteTargets.set(targetId, newSubHp);
+        continue;
+      }
 
       if (damage > 0) {
         const currentHp  = targetHpMap.get(targetId) ?? 0;
@@ -2765,10 +2905,22 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
     }),
   );
 
+  const substituteTargets = new Map(
+    targetPokemons.map(p => {
+      const vol    = (p.volatileStatus as Array<{ condition: string }>) ?? [];
+      const subVol = vol.find(v => v.condition.startsWith('substitute:'));
+      return [p._id.toString(), subVol ? Number(subVol.condition.split(':')[1]) || 0 : 0];
+    }),
+  );
+
   battle.turnQueue[idx].targets = effectiveTargets.map(t => new mongoose.Types.ObjectId(t));
 
   const { hitSelf, events: confusionEvents } = await checkConfusion(currentEntry.activePokemonId);
   const moveEvents: string[] = [...confusionEvents];
+
+  // Written to by resolveDamagingMove whenever it reassigns the acting move (Metronome's
+  // reroll, Copycat's copy) — defaults to the submitted moveId for every other path.
+  const resolvedMoveId = { value: currentEntry.moveId };
 
   if (!hitSelf) {
     const weatherEffect = WEATHER_MOVES[currentEntry.moveId];
@@ -2785,8 +2937,16 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
         wideGuard:  fieldConds.some(f => f.condition === `wide-guard:${defendingSide}`),
         quickGuard: fieldConds.some(f => f.condition === `quick-guard:${defendingSide}`),
       };
-      await resolveDamagingMove(battle, currentEntry as unknown as ActiveEntry, effectiveTargets, targetHpMap, enduringTargets, protectingTargets, moveEvents, sideGuard);
+      await resolveDamagingMove(battle, currentEntry as unknown as ActiveEntry, effectiveTargets, targetHpMap, enduringTargets, protectingTargets, moveEvents, sideGuard, substituteTargets, resolvedMoveId);
     }
+
+    // Sketch/Copycat tracking — recorded under the move that ACTUALLY executed
+    // (resolvedMoveId.value), not the submitted wrapper name.
+    const lastMoveMap = (battle.lastMoveByPokemon ?? {}) as Record<string, string>;
+    lastMoveMap[currentEntry.activePokemonId.toString()] = resolvedMoveId.value;
+    battle.lastMoveByPokemon = lastMoveMap;
+    battle.markModified('lastMoveByPokemon');
+    battle.globalLastMoveUsed = resolvedMoveId.value;
 
     await Pokemon.updateOne(
       { _id: currentEntry.activePokemonId, moves: { $elemMatch: { moveId: currentEntry.moveId, currentPP: { $gt: 0 } } } },
