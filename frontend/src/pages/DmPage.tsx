@@ -22,6 +22,7 @@ type CampaignData = {
   pendingInvites: PendingInvite[];
   levelCapEnabled: boolean;
   fieldModeEnabled: boolean;
+  hiddenAbilitiesEnabled: boolean;
 };
 
 function CampaignCard({ token }: { token: string | null }) {
@@ -35,6 +36,7 @@ function CampaignCard({ token }: { token: string | null }) {
   const [error,          setError]          = useState('');
   const [levelCapLoading, setLevelCapLoading] = useState(false);
   const [fieldModeLoading, setFieldModeLoading] = useState(false);
+  const [hiddenAbilitiesLoading, setHiddenAbilitiesLoading] = useState(false);
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -138,6 +140,24 @@ function CampaignCard({ token }: { token: string | null }) {
     }
   }
 
+  async function handleToggleHiddenAbilities() {
+    if (!campaign) return;
+    clearMessages(); setHiddenAbilitiesLoading(true);
+    try {
+      const res = await axios.patch(
+        `${API}/api/campaigns/hidden-abilities`,
+        { enabled: !campaign.hiddenAbilitiesEnabled },
+        { headers },
+      );
+      setCampaign({ ...campaign, hiddenAbilitiesEnabled: res.data.data.hiddenAbilitiesEnabled });
+      setFeedback(`Hidden abilities ${res.data.data.hiddenAbilitiesEnabled ? 'enabled' : 'disabled'} — applies to battles launched from now on.`);
+    } catch (err: unknown) {
+      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to update hidden abilities') : 'Failed to update hidden abilities');
+    } finally {
+      setHiddenAbilitiesLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <Card>
@@ -221,6 +241,25 @@ function CampaignCard({ token }: { token: string | null }) {
             onClick={handleToggleFieldMode}
           >
             {fieldModeLoading ? 'Updating…' : campaign.fieldModeEnabled ? 'Field' : 'Town'}
+          </Button>
+        </div>
+
+        {/* Hidden abilities toggle */}
+        <div className="flex items-center justify-between rounded-md border p-3">
+          <div>
+            <p className="text-sm font-medium">Hidden abilities</p>
+            <p className="text-xs text-muted-foreground">
+              {campaign.hiddenAbilitiesEnabled ? 'On — applies to battles launched from now on' : 'Off — battles launched from now on ignore hidden abilities'}
+            </p>
+          </div>
+          <Button
+            variant={campaign.hiddenAbilitiesEnabled ? 'default' : 'outline'}
+            size="sm"
+            className="min-h-9 shrink-0"
+            disabled={hiddenAbilitiesLoading}
+            onClick={handleToggleHiddenAbilities}
+          >
+            {hiddenAbilitiesLoading ? 'Updating…' : campaign.hiddenAbilitiesEnabled ? 'On' : 'Off'}
           </Button>
         </div>
 

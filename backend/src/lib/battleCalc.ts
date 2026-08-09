@@ -65,16 +65,41 @@ export function toCalcStatus(status: string | null | undefined): string | undefi
   return map[status];
 }
 
-// Resolves which ability slug is active given a species' ability list and the
-// hidden-ability toggle. Returns null if no abilities are cached.
-export function resolveAbilitySlug(
+// Homebrew departure from the real games: EVERY non-hidden ability a species has is
+// active simultaneously on that Pokémon (not just one slot), plus the hidden ability
+// when hasHiddenAbility is set AND the campaign hasn't disabled hidden abilities. The
+// first entry is treated as "primary" by callers that can only apply one ability's
+// effect at a time (mainly @smogon/calc's single ability field) — everything else
+// (status immunity, entry/end-of-round/contact triggers, Contrary/Simple, etc.) checks
+// the whole array, since this project controls that logic directly.
+export function resolveActiveAbilitySlugs(
   abilities: CachedAbility[],
   hasHiddenAbility: boolean,
-): string | null {
-  const ability = hasHiddenAbility
-    ? (abilities.find(a => a.isHidden) ?? abilities.find(a => !a.isHidden))
-    : abilities.find(a => !a.isHidden);
-  return ability?.name ?? null;
+  hiddenAbilitiesEnabled: boolean,
+): string[] {
+  const nonHidden = abilities.filter(a => !a.isHidden).map(a => a.name);
+  if (hasHiddenAbility && hiddenAbilitiesEnabled) {
+    const hidden = abilities.find(a => a.isHidden);
+    if (hidden) return [hidden.name, ...nonHidden];
+  }
+  return nonHidden;
+}
+
+// Same as resolveActiveAbilitySlugs, but also appends a Trace-copied ability (if any) —
+// the single place every ability lookup should go through once Trace can add to the set.
+// A traced ability ADDS to the Pokémon's active abilities rather than replacing them,
+// matching this project's "abilities stack" model — real Trace fully replaces the
+// user's ability, but that doesn't map cleanly onto a Pokémon that already has more
+// than one ability active at once.
+export function getEffectiveAbilitySlugs(
+  battle: HydratedDocument<IBattle>,
+  pokemonId: string,
+  abilities: CachedAbility[],
+  hasHiddenAbility: boolean,
+): string[] {
+  const active = resolveActiveAbilitySlugs(abilities, hasHiddenAbility, battle.hiddenAbilitiesEnabled);
+  const traced = (battle.tracedAbility as Record<string, string> | undefined)?.[pokemonId];
+  return traced ? [...active, traced] : active;
 }
 
 // Combines an attacker's accuracy stage and a target's evasion stage into a single
@@ -87,11 +112,11 @@ export function accuracyStageMultiplier(attackerAccStage: number, targetEvaStage
 // Applies stat stage effects to a Pokémon in the battle's stage map and returns
 // turn-log narration strings. Call battle.markModified('statStages') after.
 export function applyStatStageEffects(
-  stageMap:     Record<string, StatStages>,
-  pokemonId:    string,
-  effects:      StatEffect[],
-  name:         string,
-  abilitySlug?: string | null,
+  stageMap:      Record<string, StatStages>,
+  pokemonId:     string,
+  effects:       StatEffect[],
+  name:          string,
+  abilitySlugs?: string[] | null,
 ): string[] {
   if (!stageMap[pokemonId]) {
     stageMap[pokemonId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
@@ -101,8 +126,10 @@ export function applyStatStageEffects(
 
   for (const effect of effects) {
     let stageChange = effect.stages;
-    if (abilitySlug === 'contrary') stageChange = -stageChange;
-    if (abilitySlug === 'simple')   stageChange *= 2;
+    // Both can genuinely stack — Contrary flips the sign, then Simple doubles whatever
+    // sign/magnitude results, same as if a single Pokémon really had both at once.
+    if (abilitySlugs?.includes('contrary')) stageChange = -stageChange;
+    if (abilitySlugs?.includes('simple'))   stageChange *= 2;
 
     const current = stages[effect.stat];
     const clamped = Math.max(-6, Math.min(6, current + stageChange));

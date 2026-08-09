@@ -15,6 +15,7 @@ type ICampaign = {
   isActive: boolean;
   levelCapEnabled: boolean;
   fieldModeEnabled: boolean;
+  hiddenAbilitiesEnabled: boolean;
   customBadges: CustomBadge[];
   shopItemIds: string[];
 };
@@ -34,6 +35,10 @@ const CampaignSchema = new Schema<ICampaign>(
     levelCapEnabled: { type: Boolean, default: true },
     // false = Town mode (default, /pc + /town accessible); true = Field mode (blocked)
     fieldModeEnabled: { type: Boolean, default: false },
+    // Master switch for hidden abilities campaign-wide. Snapshotted onto each Battle at
+    // creation (Battle.hiddenAbilitiesEnabled) — toggling mid-battle doesn't retroactively
+    // change an in-progress fight, only battles launched afterward.
+    hiddenAbilitiesEnabled: { type: Boolean, default: true },
     // DM-defined badges for homebrew gyms, beyond the hardcoded catalog in
     // lib/badgeData.ts. badgeId is generated on creation (not user-chosen) so
     // it can never collide with a catalog badgeId or another custom one.

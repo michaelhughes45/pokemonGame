@@ -10,6 +10,7 @@ import {
   removePlayer,
   setLevelCapEnabled,
   setFieldModeEnabled,
+  setHiddenAbilitiesEnabled,
   getShopCatalog,
   setShopItems,
 } from '../controllers/campaignController';
@@ -42,6 +43,9 @@ router.patch('/level-cap', requireDm, setLevelCapEnabled);
 
 // PATCH /api/campaigns/field-mode       — DM toggles Town/Field mode
 router.patch('/field-mode', requireDm, setFieldModeEnabled);
+
+// PATCH /api/campaigns/hidden-abilities — DM toggles hidden abilities campaign-wide
+router.patch('/hidden-abilities', requireDm, setHiddenAbilitiesEnabled);
 
 // GET  /api/campaigns/shop-catalog      — full priced item catalog (DM curates from
 //                                          it, players read it to show Pokémart prices)

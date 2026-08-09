@@ -95,6 +95,10 @@ export type IBattle = {
   // Set by the DM at creation, or copied from Encounter.moneyReward at launch. Always
   // 0 for wild/pvp battles (wild has no trainer to pay it out, pvp deliberately excluded).
   moneyReward: number;
+  // Snapshotted from Campaign.hiddenAbilitiesEnabled at battle creation. Toggling the
+  // campaign setting mid-battle doesn't retroactively change an in-progress fight —
+  // only battles launched after the toggle pick up the new value.
+  hiddenAbilitiesEnabled: boolean;
   // Keyed by pokemonId.toString(). Entries are added on first stage change and
   // deleted when a Pokémon switches out or faints. Schema.Types.Mixed so the
   // map is flexible; call battle.markModified('statStages') after mutations.
@@ -117,6 +121,10 @@ export type IBattle = {
   // The most recent move ANY Pokémon executed this battle, for Copycat. Same
   // resolved-moveId convention as lastMoveByPokemon.
   globalLastMoveUsed: string | null;
+  // Keyed by pokemonId.toString(). Set on entry when the Pokémon's real ability is Trace
+  // and a valid opposing ability was copied — the effective ability slug for every
+  // ability-slug lookup afterward. Cleared on switch-out or faint, same as statStages.
+  tracedAbility: Record<string, string>;
   expAwarded: boolean;
   moneyAwarded: boolean;
   // Set once the battle completes. For pve/wild this always mirrors "did the players win"
@@ -226,10 +234,12 @@ const BattleSchema = new Schema<IBattle>(
     damageTakenThisTurn: { type: Schema.Types.Mixed, default: {} },
     lastMoveByPokemon:   { type: Schema.Types.Mixed, default: {} },
     globalLastMoveUsed:  { type: String, default: null },
+    tracedAbility:       { type: Schema.Types.Mixed, default: {} },
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },
     moneyReward:        { type: Number, default: 0 },
+    hiddenAbilitiesEnabled: { type: Boolean, default: true },
     expAwarded:         { type: Boolean, default: false },
     moneyAwarded:       { type: Boolean, default: false },
     winningSide:        { type: String, enum: ['playerSide', 'enemySide', null], default: null },
