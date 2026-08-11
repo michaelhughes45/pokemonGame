@@ -33,6 +33,10 @@ type IPokemon = {
   nature: string;
   gender: 'male' | 'female' | 'none';
   heldItem: string | null;
+  // The most recent held item this Pokémon lost — knocked off, stolen (Thief/Covet),
+  // or flung (Fling) — so Recycle (milestone 5.14 Wave 12) has something to restore.
+  // Never touched by the normal equip flow in itemController.ts, only by these moves.
+  consumedHeldItem: string | null;
   moves: PokemonMove[];
   evs: StatSpread;
   statusCondition: 'burn' | 'paralysis' | 'sleep' | 'freeze' | 'poison' | 'toxic' | null;
@@ -63,6 +67,7 @@ const PokemonSchema = new Schema<IPokemon>(
     nature:        { type: String, required: true },
     gender:        { type: String, enum: ['male', 'female', 'none'], required: true },
     heldItem:      { type: String, default: null },
+    consumedHeldItem: { type: String, default: null },
     moves: [
       {
         moveId:    { type: String, required: true },

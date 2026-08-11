@@ -10,7 +10,7 @@ import { Item } from '../models/Item';
 import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smogon/calc';
 import { canEvolve } from '../lib/evolution';
-import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem, getPocket } from '../lib/itemData';
+import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem, getPocket, getFlingPower } from '../lib/itemData';
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
 import { ivsFromSpread, getIvsForOwner } from '../lib/trainerIv';
@@ -68,7 +68,7 @@ import {
   SELF_KO_MOVES,
   HEALING_WISH_MOVES,
 } from '../lib/moveData';
-import { PendingAttack, PendingWish } from '../models/Battle';
+import { PendingAttack, PendingWish, MimicState } from '../models/Battle';
 import {
   GEN9,
   type CachedAbility,
@@ -85,6 +85,8 @@ import {
   toCalcIvs,
   appendToLog,
   getTypeEffectiveness,
+  getEffectiveTypes,
+  ALL_TYPES,
 } from '../lib/battleCalc';
 import {
   StatusCondition,
@@ -763,6 +765,26 @@ async function releaseBoundTargets(battle: HydratedDocument<IBattle>, sourceId: 
   return events;
 }
 
+// Reverts a Mimic-copied move back to the original Mimic slot (milestone 5.14 Wave 13)
+// — called from every switch-out/faint cleanup site, same lifetime as tracedAbility/
+// typeOverride. A no-op if this Pokémon has no active mimicState entry.
+async function revertMimic(battle: HydratedDocument<IBattle>, pokemonId: mongoose.Types.ObjectId): Promise<void> {
+  const mimicMap = battle.mimicState as Record<string, MimicState>;
+  const idStr = pokemonId.toString();
+  const state = mimicMap[idStr];
+  if (!state) return;
+  const poke = await Pokemon.findById(pokemonId, 'moves').lean();
+  const moves = (poke?.moves ?? []) as Array<{ moveId: string; currentPP: number; maxPP: number; ppUps: number }>;
+  if (moves[state.slotIndex]) {
+    const newMoves = moves.map((m, i) => i === state.slotIndex
+      ? { moveId: state.originalMoveId, currentPP: state.originalCurrentPP, maxPP: state.originalMaxPP, ppUps: state.originalPpUps }
+      : m);
+    await Pokemon.updateOne({ _id: pokemonId }, { moves: newMoves });
+  }
+  delete mimicMap[idStr];
+  battle.markModified('mimicState');
+}
+
 async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mongoose.Types.ObjectId): Promise<string[]> {
   await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
   delete (battle.statStages as Record<string, StatStages>)[outgoingId.toString()];
@@ -779,6 +801,11 @@ async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mong
   events.push(...await applySwitchOutAbilities(battle, outgoingId.toString(), outgoing, outCache, outName));
   delete (battle.tracedAbility as Record<string, string>)[outgoingId.toString()];
   battle.markModified('tracedAbility');
+  delete (battle.typeOverride as Record<string, string[]>)[outgoingId.toString()];
+  battle.markModified('typeOverride');
+  delete (battle.lastHitMoveType as Record<string, string>)[outgoingId.toString()];
+  battle.markModified('lastHitMoveType');
+  await revertMimic(battle, outgoingId);
   return events;
 }
 
@@ -997,6 +1024,14 @@ async function resolveBatonPass(battle: HydratedDocument<IBattle>, entry: TurnQu
   // the incoming Pokémon keeps its own ability, same as consecutiveMoves/lockedMoves.
   delete (battle.tracedAbility as Record<string, string>)[outIdStr];
   battle.markModified('tracedAbility');
+  // Type changes (Soak/Conversion/etc.) and the last-hit-type memory aren't Baton
+  // Pass-portable either — same treatment as tracedAbility.
+  delete (battle.typeOverride as Record<string, string[]>)[outIdStr];
+  battle.markModified('typeOverride');
+  delete (battle.lastHitMoveType as Record<string, string>)[outIdStr];
+  battle.markModified('lastHitMoveType');
+  // Mimic's temporary swap isn't Baton Pass-portable either — same treatment.
+  await revertMimic(battle, outgoingId);
 
   delete stageMap[outIdStr];
   const incIdStr = incomingId.toString();
@@ -1315,8 +1350,11 @@ async function resolveMove(
 
   // Fixed-damage moves (Seismic Toss, Endeavor, etc.) are cached with power:null since
   // their damage doesn't come from the power/stat formula at all — they'd otherwise
-  // trip this guard and silently deal 0 (milestone 5.14 Wave 2 finding).
-  if (!moveData || (!moveData.power && !FIXED_DAMAGE_MOVES.has(moveId))) {
+  // trip this guard and silently deal 0 (milestone 5.14 Wave 2 finding). Fling is cached
+  // with power:null for the same underlying reason (its real power is item-dependent,
+  // not a fixed PokeAPI value) — powerOverride supplies the real number in that case
+  // (milestone 5.14 Wave 12), so a truthy override also bypasses this guard.
+  if (!moveData || (!moveData.power && !powerOverride && !FIXED_DAMAGE_MOVES.has(moveId))) {
     const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) && !(moveId in WEATHER_MOVES) && !SELF_TARGETING_MOVES.has(moveId) && !(moveId in STAT_STAGE_MOVES) ? ' (effect not yet implemented)' : '';
     return { damage: 0, isCrit: false, events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`], category: moveData?.category ?? null };
   }
@@ -1357,8 +1395,13 @@ async function resolveMove(
   // @smogon/calc's result.desc() never actually contains the words "super effective" /
   // "not very effective" (checked the library source), so effectiveness has to be computed
   // directly from the move's type vs the target's type(s) rather than string-matched.
+  // getEffectiveTypes consults Battle.typeOverride first (Soak/Conversion/Camouflage/
+  // Reflect Type/Conversion 2, milestone 5.14 Wave 11), falling back to the cached
+  // species types when no override is set.
+  const attackerEffectiveTypes = getEffectiveTypes(battle, attackerPokemonId.toString(), (attackerCache.types as string[]) ?? []);
+  const targetEffectiveTypes   = getEffectiveTypes(battle, targetPokemonId.toString(),   (targetCache.types   as string[]) ?? []);
   const moveType = moveData.type?.toLowerCase();
-  const typeEffectiveness = moveType ? getTypeEffectiveness(moveType, (targetCache.types as string[]) ?? []) : 1;
+  const typeEffectiveness = moveType ? getTypeEffectiveness(moveType, targetEffectiveTypes) : 1;
 
   // Type-immunity/type-interaction abilities (Levitate, Water Absorb, Flash Fire, etc.)
   // are checked directly against the FULL target ability array before the move ever
@@ -1412,8 +1455,13 @@ async function resolveMove(
     }
   } else try {
     const toBoosts = (s?: StatStages) => s ? { atk: s.atk, def: s.def, spa: s.spa, spd: s.spd, spe: s.spe } : undefined;
-    const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any });
-    const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: toCalcIvs(targetIvs), curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any });
+    // overrides.types feeds a changed type (Soak/Conversion/etc.) into @smogon/calc's
+    // OWN internal STAB/type-chart math, which otherwise derives types purely from its
+    // built-in species dex by name and would silently ignore any override this project
+    // applies elsewhere (milestone 5.14 Wave 11) — same overrides mechanism already used
+    // one line below for Metronome's power override.
+    const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any, overrides: { types: attackerEffectiveTypes.map(cap) } as any });
+    const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: toCalcIvs(targetIvs), curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any, overrides: { types: targetEffectiveTypes.map(cap) } as any });
     // @smogon/calc has native Wonder Room (Def/SpDef swap) and Magic Room (held-item
     // suppression) support via Field flags — no need to hand-roll either. Magic Room's
     // flag is inert today since no held item is ever passed to CalcPokemon yet (5.16),
@@ -1422,7 +1470,18 @@ async function resolveMove(
     // (handleFixedDamageMoves + a dedicated Final Gambit branch in its own gen789
     // mechanics) — no hand-rolling needed for those, they just flow through here now
     // that the power:null guard above no longer blocks them (milestone 5.14 Wave 2).
-    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName, powerOverride ? { overrides: { basePower: powerOverride } } as any : undefined), new Field({ weather: toCalcWeather(weather) as any, isWonderRoom: wonderRoomActive, isMagicRoom: magicRoomActive, defenderSide: { isReflect: screens.reflect, isLightScreen: screens.lightScreen, isAuroraVeil: screens.auroraVeil } } as any));
+    // Fling (milestone 5.14 Wave 12) needs a special dodge: @smogon/calc has its OWN
+    // native `case 'Fling':` handling that recomputes basePower from attacker.item —
+    // completely ignoring overrides.basePower — and this project doesn't pass held
+    // items into CalcPokemon at all (deferred to 5.16), so that path would silently
+    // compute 0. Passing a neutral stand-in move name sidesteps the name-keyed special
+    // case entirely, while overrides.type/category still make sure Fling's own real
+    // type/category (not the stand-in's) are what the formula actually uses.
+    const calcMoveName = moveId === 'fling' ? 'Tackle' : moveName;
+    const moveOverrides: Record<string, unknown> = {};
+    if (powerOverride) moveOverrides.basePower = powerOverride;
+    if (moveId === 'fling') { moveOverrides.type = cap(moveType ?? 'dark'); moveOverrides.category = 'Physical'; }
+    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, calcMoveName, Object.keys(moveOverrides).length > 0 ? { overrides: moveOverrides } as any : undefined), new Field({ weather: toCalcWeather(weather) as any, isWonderRoom: wonderRoomActive, isMagicRoom: magicRoomActive, defenderSide: { isReflect: screens.reflect, isLightScreen: screens.lightScreen, isAuroraVeil: screens.auroraVeil } } as any));
     const rolls  = Array.isArray(result.damage) ? result.damage : [result.damage];
     const picked = rolls[Math.floor(Math.random() * rolls.length)];
     damage = Array.isArray(picked) ? picked[Math.floor(Math.random() * picked.length)] : (picked as number);
@@ -1449,7 +1508,7 @@ async function resolveMove(
   // fixed-damage moves — their damage is set, not scaled by anything (milestone 5.14
   // Wave 2), so the whole block is skipped for them.
   if (damage > 0 && !FIXED_DAMAGE_MOVES.has(moveId)) {
-    const isStab = moveType != null && ((attackerCache.types as string[]) ?? []).includes(moveType);
+    const isStab = moveType != null && attackerEffectiveTypes.includes(moveType);
     for (const slug of attackerAbilitySlugs.slice(1)) {
       if (slug === 'guts' && attacker.statusCondition && moveData.category === 'physical') damage = Math.floor(damage * 1.5);
       else if ((slug === 'huge-power' || slug === 'pure-power') && moveData.category === 'physical') damage = Math.floor(damage * 2);
@@ -1461,6 +1520,9 @@ async function resolveMove(
       if ((slug === 'solid-rock' || slug === 'filter') && typeEffectiveness > 1) damage = Math.floor(damage * 0.75);
       else if (slug === 'multiscale' && target.currentHp >= computeStats(targetCache.baseStats as BaseStats, target.level, target.nature, target.evs as BaseStats, targetIvs).hp) damage = Math.floor(damage * 0.5);
     }
+    // Knock Off (milestone 5.14 Wave 12) — 1.5x when the target holds a removable item;
+    // the actual removal happens after the hit lands, back in resolveDamagingMove.
+    if (moveId === 'knock-off' && target.heldItem) damage = Math.floor(damage * 1.5);
     damage = Math.max(1, damage);
   }
 
@@ -1533,6 +1595,11 @@ async function applyFaints(
       battle.markModified('lockedMoves');
       delete (battle.tracedAbility as Record<string, string>)[entry.activePokemonId.toString()];
       battle.markModified('tracedAbility');
+      delete (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()];
+      battle.markModified('typeOverride');
+      delete (battle.lastHitMoveType as Record<string, string>)[entry.activePokemonId.toString()];
+      battle.markModified('lastHitMoveType');
+      await revertMimic(battle, entry.activePokemonId);
       entry.fainted.push(entry.activePokemonId);
       entry.activePokemonId = null;
       battle.markModified(sideKey);
@@ -2132,7 +2199,7 @@ async function resolveWeatherMove(
 async function resolveSelfTargetMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, moveEvents: string[],
 ): Promise<void> {
-  const attacker = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs').lean();
+  const attacker = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs moves heldItem consumedHeldItem').lean();
   const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats abilities types').lean() : null;
   const attackerName = pokeDisplayName(attacker, atkCache);
   const attackerIvs = attacker ? await getIvsForOwner(attacker.ownerId, attacker.ownerType) : ZERO_IVS;
@@ -2449,6 +2516,55 @@ async function resolveSelfTargetMove(
       }
     }
 
+    // Self type-change moves (milestone 5.14 Wave 11) — all three write directly to
+    // Battle.typeOverride via getEffectiveTypes' backing map, keyed by pokemonId.
+    if (entry.moveId === 'conversion' && attacker) {
+      const firstMove = (attacker.moves as Array<{ moveId: string }> | undefined)?.[0];
+      const firstMoveMeta = firstMove ? await fetchMoveMeta(attacker.speciesId, firstMove.moveId) : undefined;
+      const newType = firstMoveMeta?.type?.toLowerCase();
+      if (!newType) {
+        moveEvents.push(`${attackerName} used Conversion, but it failed!`);
+      } else {
+        (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()] = [newType];
+        battle.markModified('typeOverride');
+        moveEvents.push(`${attackerName} transformed into the ${slugToDisplayName(newType)} type!`);
+      }
+    }
+
+    if (entry.moveId === 'camouflage') {
+      // This project has no terrain/location system — Camouflage always resolves to
+      // its real "no special terrain" outcome, pure Normal type.
+      (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()] = ['normal'];
+      battle.markModified('typeOverride');
+      moveEvents.push(`${attackerName} transformed into the Normal type!`);
+    }
+
+    if (entry.moveId === 'conversion-2') {
+      const lastHitType = (battle.lastHitMoveType as Record<string, string>)[entry.activePokemonId.toString()];
+      if (!lastHitType) {
+        moveEvents.push(`${attackerName} used Conversion 2, but it failed!`);
+      } else {
+        const resistantTypes = ALL_TYPES.filter(t => getTypeEffectiveness(lastHitType, [t]) < 1);
+        if (resistantTypes.length === 0) {
+          moveEvents.push(`${attackerName} used Conversion 2, but it failed!`);
+        } else {
+          const newType = resistantTypes[Math.floor(Math.random() * resistantTypes.length)];
+          (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()] = [newType];
+          battle.markModified('typeOverride');
+          moveEvents.push(`${attackerName} transformed into the ${slugToDisplayName(newType)} type!`);
+        }
+      }
+    }
+
+    if (entry.moveId === 'recycle' && attacker) {
+      if (attacker.heldItem || !attacker.consumedHeldItem) {
+        moveEvents.push(`${attackerName} used Recycle, but it failed!`);
+      } else {
+        await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { heldItem: attacker.consumedHeldItem, consumedHeldItem: null } });
+        moveEvents.push(`${attackerName} recycled its ${slugToDisplayName(attacker.consumedHeldItem)}!`);
+      }
+    }
+
   }
 }
 
@@ -2639,8 +2755,8 @@ async function resolveDamagingMove(
   const drainEffect     = DRAIN_MOVES[entry.moveId];
   const selfStatEffects = (STAT_STAGE_MOVES[entry.moveId] ?? []).filter(e => e.target === 'self');
 
-  type AtkSnapshot = { ownerId: mongoose.Types.ObjectId; ownerType: string; currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats; gender?: string | null };
-  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs gender').lean() as AtkSnapshot | null;
+  type AtkSnapshot = { ownerId: mongoose.Types.ObjectId; ownerType: string; currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats; gender?: string | null; heldItem?: string | null; consumedHeldItem?: string | null };
+  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs gender heldItem consumedHeldItem').lean() as AtkSnapshot | null;
   const atkSnapCache = atkSnap ? await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'name baseStats abilities').lean() : null;
   const atkIvs       = atkSnap ? await getIvsForOwner(atkSnap.ownerId, atkSnap.ownerType) : ZERO_IVS;
 
@@ -2699,6 +2815,27 @@ async function resolveDamagingMove(
     delete consMoves[entry.activePokemonId.toString()];
     battle.consecutiveMoves = consMoves;
     battle.markModified('consecutiveMoves');
+  }
+
+  // Fling (milestone 5.14 Wave 12) — power comes from the user's own held item, not a
+  // fixed base power from PokedexCache; fails outright with no item or one with no
+  // known Fling value. The item is thrown regardless of whether the hit lands (matches
+  // the real games), so it's consumed here, once, before the target loop.
+  let flingPowerOverride: number | undefined;
+  let flingItemUsed: string | undefined;
+  if (entry.moveId === 'fling') {
+    const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+    const flingItem = atkSnap?.heldItem ?? null;
+    const flingPower = flingItem ? getFlingPower(flingItem) : null;
+    if (!flingItem || flingPower == null) {
+      moveEvents.push(`${atkName} used Fling, but it has nothing to fling!`);
+      return;
+    }
+    flingPowerOverride = flingPower;
+    flingItemUsed = flingItem;
+    await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { heldItem: null, consumedHeldItem: flingItem } });
+    if (atkSnap) atkSnap.heldItem = null;
+    moveEvents.push(`${atkName} flung its ${slugToDisplayName(flingItem)}!`);
   }
 
   for (const targetId of targets) {
@@ -2787,6 +2924,83 @@ async function resolveDamagingMove(
         moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)} on ${pokeDisplayName(tgtDoc, tgtCache)}, but it missed!`);
         continue;
       }
+    }
+
+    // Opponent-directed type-change moves (milestone 5.14 Wave 11) — Soak overwrites
+    // the TARGET's type, Reflect Type copies the TARGET's type onto the USER. Neither
+    // deals damage, same "custom branch + continue" shape as leech-seed/pain-split above.
+    if (entry.moveId === 'soak') {
+      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types').lean() : null;
+      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const currentTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
+      if (currentTypes.length === 1 && currentTypes[0] === 'water') {
+        moveEvents.push(`${atkName} used Soak, but it failed!`);
+      } else {
+        (battle.typeOverride as Record<string, string[]>)[targetId] = ['water'];
+        battle.markModified('typeOverride');
+        moveEvents.push(`${atkName} used Soak! ${tgtName} transformed into the Water type!`);
+      }
+      continue;
+    }
+
+    if (entry.moveId === 'reflect-type') {
+      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types').lean() : null;
+      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const targetTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
+      (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()] = targetTypes;
+      battle.markModified('typeOverride');
+      moveEvents.push(`${atkName} used Reflect Type! ${atkName} took on ${tgtName}'s type!`);
+      continue;
+    }
+
+    // Item-swap moves (milestone 5.14 Wave 12) — Trick and Switcheroo are mechanically
+    // identical (Normal vs Dark flavor only): swap held items outright, failing only
+    // when NEITHER side has one. Bestow is one-directional (give only, never fails on
+    // an empty-handed user — it just has nothing to give) and fails if the target
+    // already holds something, since Bestow can never overwrite an existing item.
+    if ((entry.moveId === 'trick' || entry.moveId === 'switcheroo') && atkSnap) {
+      const tgt = await Pokemon.findById(targetId, 'nickname speciesId heldItem').lean();
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
+      const tgtName = pokeDisplayName(tgt, tgtCache);
+      if (!atkSnap.heldItem && !tgt?.heldItem) {
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+      } else {
+        const atkItem = atkSnap.heldItem ?? null;
+        const tgtItem = tgt?.heldItem ?? null;
+        await Promise.all([
+          Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { heldItem: tgtItem } }),
+          Pokemon.updateOne({ _id: targetId }, { $set: { heldItem: atkItem } }),
+        ]);
+        atkSnap.heldItem = tgtItem;
+        moveEvents.push(`${atkName} switched items with ${tgtName} using ${slugToDisplayName(entry.moveId)}!`);
+      }
+      continue;
+    }
+
+    if (entry.moveId === 'bestow' && atkSnap) {
+      const tgt = await Pokemon.findById(targetId, 'nickname speciesId heldItem').lean();
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
+      const tgtName = pokeDisplayName(tgt, tgtCache);
+      if (!atkSnap.heldItem) {
+        moveEvents.push(`${atkName} used Bestow, but it has no item to give!`);
+      } else if (tgt?.heldItem) {
+        moveEvents.push(`${atkName} used Bestow, but ${tgtName} is already holding an item!`);
+      } else {
+        const givenItem = atkSnap.heldItem;
+        await Promise.all([
+          Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { heldItem: null } }),
+          Pokemon.updateOne({ _id: targetId }, { $set: { heldItem: givenItem } }),
+        ]);
+        atkSnap.heldItem = null;
+        moveEvents.push(`${atkName} gave its ${slugToDisplayName(givenItem)} to ${tgtName}!`);
+      }
+      continue;
     }
 
     if (entry.moveId === 'dream-eater') {
@@ -2960,6 +3174,40 @@ async function resolveDamagingMove(
       continue;
     }
 
+    if (entry.moveId === 'mimic') {
+      // Same target's-last-move lookup as Sketch, but TEMPORARY (fixed 5 PP, always —
+      // real Mimic ignores PP Ups entirely) and reverted on switch-out/faint instead of
+      // permanent. battle.mimicState snapshots the ORIGINAL Mimic slot's own data
+      // (moveId/PP/ppUps) so it can be restored later, keyed by slotIndex since the
+      // copied move's PP will drift independently while it's active.
+      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
+      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const lastMoveMap  = (battle.lastMoveByPokemon ?? {}) as Record<string, string>;
+      const copiedMoveId = lastMoveMap[targetId];
+      const atkPoke  = await Pokemon.findById(entry.activePokemonId, 'moves').lean();
+      const atkMoves = (atkPoke?.moves ?? []) as Array<{ moveId: string; currentPP: number; maxPP: number; ppUps: number }>;
+      const mimicSlot = atkMoves.findIndex(m => m.moveId === 'mimic');
+      if (!copiedMoveId || copiedMoveId === 'mimic' || copiedMoveId === 'sketch' || copiedMoveId === 'struggle' || mimicSlot === -1) {
+        moveEvents.push(`${atkName} used Mimic, but it failed!`);
+      } else if (atkMoves.some(m => m.moveId === copiedMoveId)) {
+        moveEvents.push(`${atkName} used Mimic on ${tgtName}, but it already knows ${slugToDisplayName(copiedMoveId)}!`);
+      } else {
+        const original = atkMoves[mimicSlot];
+        const newMoves = atkMoves.map((m, i) => i === mimicSlot ? { moveId: copiedMoveId, currentPP: 5, maxPP: 5, ppUps: 0 } : m);
+        await Pokemon.updateOne({ _id: entry.activePokemonId }, { moves: newMoves });
+        const mimicMap = battle.mimicState as Record<string, MimicState>;
+        mimicMap[entry.activePokemonId.toString()] = {
+          slotIndex: mimicSlot, originalMoveId: original.moveId,
+          originalCurrentPP: original.currentPP, originalMaxPP: original.maxPP, originalPpUps: original.ppUps,
+        };
+        battle.markModified('mimicState');
+        moveEvents.push(`${atkName} used Mimic on ${tgtName}! ${atkName} temporarily learned ${slugToDisplayName(copiedMoveId)}!`);
+      }
+      continue;
+    }
+
     if (typeChangeMoveType && atkSnap && atkSnapCache) {
       const atkName = pokeDisplayName(atkSnap, atkSnapCache);
       const proteanSlug = attackerAbilitySlugs.find(s => s === 'protean' || s === 'libero');
@@ -3023,7 +3271,7 @@ async function resolveDamagingMove(
       const { damage, isCrit, events, category } = await resolveMove(
         battle, entry.activePokemonId, new mongoose.Types.ObjectId(targetId), entry.moveId, battle.weather,
         { attacker: stageMap[entry.activePokemonId.toString()], target: stageMap[targetId] },
-        escalatedPower ?? meFirstPowerOverride, wonderRoomActive, magicRoomActive,
+        escalatedPower ?? meFirstPowerOverride ?? flingPowerOverride, wonderRoomActive, magicRoomActive,
         { reflect: !!sideGuard.reflect, lightScreen: !!sideGuard.lightScreen, auroraVeil: !!sideGuard.auroraVeil },
       );
       if (isCrit) anyCrit = true;
@@ -3068,6 +3316,14 @@ async function resolveDamagingMove(
           const damageMap = battle.damageTakenThisTurn as Record<string, { amount: number; category: string; attackerId: string }>;
           damageMap[targetId] = { amount: damage, category, attackerId: entry.activePokemonId.toString() };
           battle.markModified('damageTakenThisTurn');
+          // For Conversion 2 (milestone 5.14 Wave 11) — unlike damageTakenThisTurn this
+          // persists across rounds, since Conversion 2 reacts to "the last move that hit
+          // me" regardless of which round that was.
+          const hitMoveType = moveMeta?.type?.toLowerCase();
+          if (hitMoveType) {
+            (battle.lastHitMoveType as Record<string, string>)[targetId] = hitMoveType;
+            battle.markModified('lastHitMoveType');
+          }
         }
       }
       actualHits++;
@@ -3177,6 +3433,42 @@ async function resolveDamagingMove(
     if (flinchChance && totalDamage > 0 && Math.random() < flinchChance) {
       const targetEntry = battle.turnQueue.find(e => e.activePokemonId.toString() === targetId && !e.resolved);
       if (targetEntry) targetEntry.flinched = true;
+    }
+
+    // Knock Off (milestone 5.14 Wave 12) — the +50% bonus for a target holding an item
+    // is applied inside resolveMove itself (needs the pre-multiplier damage number), so
+    // this block only handles the post-hit removal: the item is lost, not transferred to
+    // the attacker (matches the real games), and remembered on the target for Recycle.
+    if (entry.moveId === 'knock-off' && totalDamage > 0) {
+      const tgt = await Pokemon.findById(targetId, 'nickname speciesId heldItem').lean();
+      if (tgt?.heldItem) {
+        const tgtCache = await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean();
+        await Pokemon.updateOne({ _id: targetId }, { $set: { heldItem: null, consumedHeldItem: tgt.heldItem } });
+        moveEvents.push(`${pokeDisplayName(tgt, tgtCache)}'s ${slugToDisplayName(tgt.heldItem)} was knocked off!`);
+      }
+    }
+
+    // Thief / Covet (milestone 5.14 Wave 12) — steals the target's held item only when
+    // the user is currently empty-handed (matches the real games; Thief never overwrites
+    // an item the user already has).
+    if ((entry.moveId === 'thief' || entry.moveId === 'covet') && totalDamage > 0 && atkSnap && !atkSnap.heldItem) {
+      const tgt = await Pokemon.findById(targetId, 'nickname speciesId heldItem').lean();
+      if (tgt?.heldItem) {
+        const tgtCache = await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean();
+        const stolenItem = tgt.heldItem;
+        await Promise.all([
+          Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { heldItem: stolenItem } }),
+          Pokemon.updateOne({ _id: targetId }, { $set: { heldItem: null, consumedHeldItem: stolenItem } }),
+        ]);
+        atkSnap.heldItem = stolenItem;
+        moveEvents.push(`${pokeDisplayName(atkSnap, atkSnapCache)} stole ${pokeDisplayName(tgt, tgtCache)}'s ${slugToDisplayName(stolenItem)}!`);
+      }
+    }
+
+    // Poison Barb is the one item among the 17 this project supports with a real Fling
+    // secondary effect — everything else in FLING_POWER is a plain damage-only throw.
+    if (entry.moveId === 'fling' && flingItemUsed === 'poison-barb' && totalDamage > 0) {
+      moveEvents.push(...await applyStatusEffect(battle, new mongoose.Types.ObjectId(targetId), { status: 'poison', chance: 1 }));
     }
 
     if (CONTACT_MOVES.has(entry.moveId) && totalDamage > 0) {
@@ -3750,7 +4042,7 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
       speciesName,
       speciesId:       poke.speciesId,
       level:           poke.level,
-      types:           (cache?.types as string[] | undefined) ?? [],
+      types:           getEffectiveTypes(battle, pokemonId.toString(), (cache?.types as string[] | undefined) ?? []),
       currentHp:       poke.currentHp,
       maxHp,
       statusCondition: poke.statusCondition ?? null,

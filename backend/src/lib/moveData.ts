@@ -224,6 +224,15 @@ export const SELF_TARGETING_MOVES = new Set([
   'trick-room', 'magic-room', 'wonder-room',
   // Redirect (self-buff; the redirect effect itself is checked when OTHER moves target)
   'follow-me', 'rage-powder',
+  // Self type-change (milestone 5.14 Wave 11) — Conversion/Camouflage/Conversion 2 change
+  // the USER's own type, no target needed. Soak and Reflect Type are NOT here — both are
+  // opponent-directed (Soak changes the TARGET's type, Reflect Type copies the TARGET's
+  // type onto the user) and go through the normal foe-targeting path instead.
+  'conversion', 'camouflage', 'conversion-2',
+  // Recycle (milestone 5.14 Wave 12) — restores the user's own last-lost held item, no
+  // target needed. Trick/Switcheroo/Knock Off/Thief/Covet/Bestow/Fling are NOT here —
+  // all seven act on/steal from/give to a foe and go through the normal foe-targeting path.
+  'recycle',
 ]);
 
 // Room effects — field-wide, last 5 turns, and uniquely among status moves in this
@@ -592,6 +601,9 @@ export const CONTACT_MOVES = new Set([
   // Dark
   'crunch', 'bite', 'night-slash', 'sucker-punch', 'foul-play', 'assurance',
   'payback', 'revenge', 'spirit-break',
+  // Milestone 5.14 Wave 12 bug fix — found during the Wave 8/9 audit but not fixed
+  // until Knock Off/Thief were actually implemented: both are real contact moves.
+  'knock-off', 'thief',
   // Dragon
   'dragon-claw', 'dragon-rush', 'outrage', 'dragon-tail', 'dual-chop', 'scale-shot',
   // Grass

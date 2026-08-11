@@ -194,6 +194,46 @@ export function rollHeldItem(includeMints: boolean): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Fling base power (milestone 5.14 Wave 12) — real values sourced from
+// Bulbapedia/Serebii's Fling item-power tables, verified per-item (never
+// guessed) same as every other real-item value in this project. Only the 17
+// held_type items are covered, since heldItem is only ever populated with one
+// of those (or a mint) by this project's item system. Poison Barb additionally
+// poisons the target on a successful Fling hit — the one real Fling secondary
+// effect among the items this project supports.
+// ---------------------------------------------------------------------------
+
+export const FLING_POWER: Record<string, number> = {
+  'charcoal':       30,
+  'mystic-water':   30,
+  'magnet':         30,
+  'miracle-seed':   30,
+  'never-melt-ice': 30,
+  'spell-tag':      30,
+  'twisted-spoon':  30,
+  'black-belt':     30,
+  'black-glasses':  30,
+  'metal-coat':     30,
+  'silk-scarf':     10,
+  'silver-powder':  10,
+  'soft-sand':      10,
+  'sharp-beak':     50,
+  'dragon-fang':    70,
+  'poison-barb':    70,
+  'hard-stone':     100,
+};
+
+// Mints are a project-invented item type (Key Decision, milestone 5.12) with no
+// real Fling value to source — flat low fallback, same "no real equivalent, flat
+// project decision" treatment as their Pokémart price.
+const MINT_FLING_POWER = 10;
+
+export function getFlingPower(itemId: string): number | null {
+  if (itemId.startsWith('mint-')) return MINT_FLING_POWER;
+  return FLING_POWER[itemId] ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // Battle item effects
 // Mirrors the relevant entries in items.ts ITEM_EFFECTS.
 // ---------------------------------------------------------------------------

@@ -76,6 +76,19 @@ export type PendingAttack = {
   attackerAbilitySlug: string | null;
 };
 
+// Mimic (milestone 5.14 Wave 13) — unlike Sketch's permanent overwrite, Mimic's move-
+// slot swap is temporary: it reverts the moment the user switches out or faints. This
+// snapshots exactly what needs restoring — the ORIGINAL Mimic slot's data — keyed by
+// slotIndex since the copied move's PP is decremented independently while it's active
+// and can no longer be matched back to "the Mimic slot" by moveId alone.
+export type MimicState = {
+  slotIndex: number;
+  originalMoveId: string;
+  originalCurrentPP: number;
+  originalMaxPP: number;
+  originalPpUps: number;
+};
+
 // Healing Wish / Lunar Dance (milestone 5.14 Wave 10) — the user faints immediately
 // on use, and whichever Pokémon is sent into that same slot NEXT (no delay, unlike
 // PendingAttack) is fully healed. restorePP distinguishes Lunar Dance (also restores
@@ -156,6 +169,21 @@ export type IBattle = {
   // and a valid opposing ability was copied — the effective ability slug for every
   // ability-slug lookup afterward. Cleared on switch-out or faint, same as statStages.
   tracedAbility: Record<string, string>;
+  // Keyed by pokemonId.toString(). Set by Soak/Conversion/Camouflage/Reflect Type/
+  // Conversion 2 (milestone 5.14 Wave 11) — this Pokémon's real type array is
+  // overridden with this value everywhere types matter (damage effectiveness, STAB,
+  // @smogon/calc's own internal type calc, frontend type badges). Cleared on
+  // switch-out or faint, same as statStages/tracedAbility.
+  typeOverride: Record<string, string[]>;
+  // Keyed by pokemonId.toString(). The TYPE of the most recent damaging hit this
+  // Pokémon has taken, for Conversion 2 — unlike damageTakenThisTurn this persists
+  // across rounds (only cleared on switch-out or faint), since Conversion 2 needs to
+  // react to "the last move that hit me" regardless of which round that was.
+  lastHitMoveType: Record<string, string>;
+  // Keyed by pokemonId.toString(). Present only while a Mimic-copied move is currently
+  // occupying the user's Mimic slot — see MimicState above. Reverted (and the entry
+  // removed) on switch-out or faint, same lifetime as typeOverride/tracedAbility.
+  mimicState: Record<string, MimicState>;
   // Future Sight / Doom Desire (milestone 5.14 Wave 9) — see the PendingAttack type
   // above for the full explanation. Resolved (and removed) in applyEndOfRound once
   // turnsRemaining hits 0.
@@ -273,6 +301,9 @@ const BattleSchema = new Schema<IBattle>(
     lastMoveByPokemon:   { type: Schema.Types.Mixed, default: {} },
     globalLastMoveUsed:  { type: String, default: null },
     tracedAbility:       { type: Schema.Types.Mixed, default: {} },
+    typeOverride:        { type: Schema.Types.Mixed, default: {} },
+    lastHitMoveType:     { type: Schema.Types.Mixed, default: {} },
+    mimicState:          { type: Schema.Types.Mixed, default: {} },
     pendingAttacks: [
       {
         moveId:              { type: String, required: true },

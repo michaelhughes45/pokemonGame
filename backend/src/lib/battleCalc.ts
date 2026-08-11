@@ -6,6 +6,15 @@ import { BaseStats } from './statCalc';
 
 export const GEN9 = Generations.get(9);
 
+// The 18 canonical Pokémon types, lowercase PokeAPI-slug form (matches how types are
+// stored everywhere in this project — PokedexCache.types, moveData.ts, etc.). Used by
+// Conversion 2 (milestone 5.14 Wave 11) to find a type that resists a given move type.
+export const ALL_TYPES = [
+  'normal', 'fire', 'water', 'electric', 'grass', 'ice', 'fighting', 'poison',
+  'ground', 'flying', 'psychic', 'bug', 'rock', 'ghost', 'dragon', 'dark',
+  'steel', 'fairy',
+];
+
 export type CachedAbility = { name: string; isHidden: boolean };
 
 // Capitalize the first character of a string. Used to format names for @smogon/calc.
@@ -19,6 +28,22 @@ export function getTypeEffectiveness(moveType: string, defenderTypes: string[]):
   const type = GEN9.types.get(moveType.toLowerCase() as any);
   if (!type) return 1;
   return defenderTypes.reduce((mult, t) => mult * ((type.effectiveness as any)[cap(t)] ?? 1), 1);
+}
+
+// Soak/Conversion/Camouflage/Reflect Type/Conversion 2 (milestone 5.14 Wave 11) can
+// override a Pokémon's real (PokedexCache-derived) types for the rest of its time on
+// the field. This is the single place every type-dependent call site should read a
+// Pokémon's types from instead of trusting cache.types directly — same pattern as
+// getEffectiveAbilitySlugs for tracedAbility. Cleared on switch-out/faint (see
+// battleController.ts's recallPokemon/resolveBatonPass/applyFaints). Accepts a plain
+// { typeOverride } shape (not the full HydratedDocument) so read-only call sites like
+// the state endpoint's .lean() battle also work without a mutation-capable document.
+export function getEffectiveTypes(
+  battle:        { typeOverride?: Record<string, string[]> },
+  pokemonId:     string,
+  fallbackTypes: string[],
+): string[] {
+  return battle.typeOverride?.[pokemonId] ?? fallbackTypes;
 }
 
 // Convert our stored EV spread (spatk/spdef/speed) to @smogon/calc's stat key
