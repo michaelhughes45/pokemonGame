@@ -10,30 +10,52 @@ export type StatusMoveEffect = {
 // or as a secondary effect on damage moves. Keyed by PokeAPI move slug.
 export const STATUS_MOVES: Record<string, StatusMoveEffect> = {
   // Paralysis
-  'thunder-wave':  { status: 'paralysis', chance: 1 },
-  'glare':         { status: 'paralysis', chance: 1 },
-  'stun-spore':    { status: 'paralysis', chance: 1 },
-  'nuzzle':        { status: 'paralysis', chance: 1 },
-  'zap-cannon':    { status: 'paralysis', chance: 1 },
-  'body-slam':     { status: 'paralysis', chance: 0.3 },
-  'thunder':       { status: 'paralysis', chance: 0.3 },
-  'thunderbolt':   { status: 'paralysis', chance: 0.1 },
-  'discharge':     { status: 'paralysis', chance: 0.3 },
-  'spark':         { status: 'paralysis', chance: 0.3 },
-  'volt-tackle':   { status: 'paralysis', chance: 0.1 },
-  'bounce':        { status: 'paralysis', chance: 0.3 },
+  'thunder-wave':       { status: 'paralysis', chance: 1 },
+  'glare':              { status: 'paralysis', chance: 1 },
+  'stun-spore':         { status: 'paralysis', chance: 1 },
+  'nuzzle':             { status: 'paralysis', chance: 1 },
+  'zap-cannon':         { status: 'paralysis', chance: 1 },
+  'body-slam':          { status: 'paralysis', chance: 0.3 },
+  'thunder':            { status: 'paralysis', chance: 0.3 },
+  'thunderbolt':        { status: 'paralysis', chance: 0.1 },
+  'discharge':          { status: 'paralysis', chance: 0.3 },
+  'spark':              { status: 'paralysis', chance: 0.3 },
+  'volt-tackle':        { status: 'paralysis', chance: 0.1 },
+  'bounce':             { status: 'paralysis', chance: 0.3 },
+  'bolt-strike':        { status: 'paralysis', chance: 0.2 },
+  'buzzy-buzz':         { status: 'paralysis', chance: 1 },
+  'dragon-breath':      { status: 'paralysis', chance: 0.3 },
+  'force-palm':         { status: 'paralysis', chance: 0.3 },
+  'freeze-shock':       { status: 'paralysis', chance: 0.3 }, // Ice-type but paralyzes, not freezes — matches 'bounce' (Flying) below, a real Pokémon type/effect mismatch
+  'lick':               { status: 'paralysis', chance: 0.3 },
+  'splishy-splash':     { status: 'paralysis', chance: 0.3 },
+  'stoked-sparksurfer': { status: 'paralysis', chance: 1 },
+  'thunder-fang':       { status: 'paralysis', chance: 0.1 },
+  'thunder-punch':      { status: 'paralysis', chance: 0.1 },
+  'thunder-shock':      { status: 'paralysis', chance: 0.1 },
   // Burn
-  'will-o-wisp':   { status: 'burn', chance: 1 },
-  'ember':         { status: 'burn', chance: 0.1 },
-  'flamethrower':  { status: 'burn', chance: 0.1 },
-  'fire-blast':    { status: 'burn', chance: 0.1 },
-  'fire-punch':    { status: 'burn', chance: 0.1 },
-  'flame-wheel':   { status: 'burn', chance: 0.1 },
-  'blaze-kick':    { status: 'burn', chance: 0.1 },
-  'heat-wave':     { status: 'burn', chance: 0.1 },
-  'sacred-fire':   { status: 'burn', chance: 0.5 },
-  'scald':         { status: 'burn', chance: 0.3 },
-  'lava-plume':    { status: 'burn', chance: 0.3 },
+  'will-o-wisp':     { status: 'burn', chance: 1 },
+  'ember':           { status: 'burn', chance: 0.1 },
+  'flamethrower':    { status: 'burn', chance: 0.1 },
+  'fire-blast':      { status: 'burn', chance: 0.1 },
+  'fire-punch':      { status: 'burn', chance: 0.1 },
+  'flame-wheel':     { status: 'burn', chance: 0.1 },
+  'blaze-kick':      { status: 'burn', chance: 0.1 },
+  'heat-wave':       { status: 'burn', chance: 0.1 },
+  'sacred-fire':     { status: 'burn', chance: 0.5 },
+  'scald':           { status: 'burn', chance: 0.3 },
+  'lava-plume':      { status: 'burn', chance: 0.3 },
+  'blue-flare':      { status: 'burn', chance: 0.2 },
+  'burning-jealousy': { status: 'burn', chance: 1 }, // Real effect only burns if the target's stats rose this turn; simplified to unconditional, same "close approximation" treatment as other condition-gated secondary effects
+  'fire-fang':       { status: 'burn', chance: 0.1 },
+  'flare-blitz':     { status: 'burn', chance: 0.1 },
+  'ice-burn':        { status: 'burn', chance: 0.3 }, // Fire-type despite the name (Reshiram signature)
+  'inferno':         { status: 'burn', chance: 1 },
+  'pyro-ball':       { status: 'burn', chance: 0.1 },
+  'scorching-sands': { status: 'burn', chance: 0.3 },
+  'searing-shot':    { status: 'burn', chance: 0.3 },
+  'sizzly-slide':    { status: 'burn', chance: 1 },
+  'steam-eruption':  { status: 'burn', chance: 0.3 },
   // Toxic / Poison
   'toxic':         { status: 'toxic',  chance: 1 },
   'poison-powder': { status: 'poison', chance: 1 },
@@ -45,6 +67,12 @@ export const STATUS_MOVES: Record<string, StatusMoveEffect> = {
   'sludge':        { status: 'poison', chance: 0.3 },
   'sludge-bomb':   { status: 'poison', chance: 0.3 },
   'sludge-wave':   { status: 'poison', chance: 0.1 },
+  'poison-fang':   { status: 'poison', chance: 0.5 },
+  'poison-tail':   { status: 'poison', chance: 0.1 },
+  'shell-side-arm': { status: 'poison', chance: 0.2 },
+  'smog':          { status: 'poison', chance: 0.4 },
+  'toxic-thread':  { status: 'poison', chance: 1 }, // also lowers the target's Speed — see STAT_STAGE_MOVES
+  'twineedle':     { status: 'poison', chance: 0.2 },
   // Sleep
   'hypnosis':      { status: 'sleep', chance: 1 },
   'sleep-powder':  { status: 'sleep', chance: 1 },
@@ -54,11 +82,13 @@ export const STATUS_MOVES: Record<string, StatusMoveEffect> = {
   'grass-whistle': { status: 'sleep', chance: 1 },
   'dark-void':     { status: 'sleep', chance: 1 },
   // Freeze
-  'ice-beam':      { status: 'freeze', chance: 0.1 },
-  'blizzard':      { status: 'freeze', chance: 0.1 },
-  'ice-punch':     { status: 'freeze', chance: 0.1 },
-  'freeze-dry':    { status: 'freeze', chance: 0.1 },
-  'powder-snow':   { status: 'freeze', chance: 0.1 },
+  'ice-beam':        { status: 'freeze', chance: 0.1 },
+  'blizzard':        { status: 'freeze', chance: 0.1 },
+  'ice-punch':       { status: 'freeze', chance: 0.1 },
+  'freeze-dry':      { status: 'freeze', chance: 0.1 },
+  'powder-snow':     { status: 'freeze', chance: 0.1 },
+  'freezing-glare':  { status: 'freeze', chance: 0.1 },
+  'ice-fang':        { status: 'freeze', chance: 0.1 },
   // Confusion
   'confuse-ray':   { status: 'confusion', chance: 1 },
   'supersonic':    { status: 'confusion', chance: 1 },
@@ -66,37 +96,52 @@ export const STATUS_MOVES: Record<string, StatusMoveEffect> = {
   'teeter-dance':  { status: 'confusion', chance: 1 },
   'flatter':       { status: 'confusion', chance: 1 },
   'swagger':       { status: 'confusion', chance: 1 },
-  'dynamicpunch':  { status: 'confusion', chance: 1 },
+  'dynamic-punch': { status: 'confusion', chance: 1 }, // fixed from the dead 'dynamicpunch' slug (PokeAPI's real slug is hyphenated) — this 100% confusion had never once fired
   'hurricane':     { status: 'confusion', chance: 0.3 },
   'dizzy-punch':   { status: 'confusion', chance: 0.2 },
   'confusion':     { status: 'confusion', chance: 0.1 },
   'psybeam':       { status: 'confusion', chance: 0.1 },
   'water-pulse':   { status: 'confusion', chance: 0.2 },
+  'chatter':       { status: 'confusion', chance: 1 },
+  'rock-climb':    { status: 'confusion', chance: 0.2 },
+  'signal-beam':   { status: 'confusion', chance: 0.1 },
+  'strange-steam': { status: 'confusion', chance: 0.2 },
 };
 
 // Non-zero move priority values. Only moves deviating from 0 are listed.
+// Values below verified against PokeAPI's live `priority` field (milestone 5.14 Wave 1
+// audit) — several pre-existing entries (Protect family, Roar/Whirlwind, Counter/Mirror
+// Coat, Trick Room, Revenge/Avalanche, Circle Throw/Dragon Tail) were off by one or two
+// brackets from real game values and are corrected here, not just extended.
 export const MOVE_PRIORITY: Record<string, number> = {
   // +5
   'helping-hand': 5,
+  // +4
+  'detect': 4, 'endure': 4, 'protect': 4, 'kings-shield': 4, 'spiky-shield': 4,
+  'baneful-bunker': 4, 'obstruct': 4, 'silk-trap': 4, 'burning-bulwark': 4,
+  'magic-coat': 4, 'max-guard': 4, 'snatch': 4,
   // +3
-  'detect': 3, 'endure': 3, 'fake-out': 3, 'protect': 3, 'kings-shield': 3, 'spiky-shield': 3,
-  'baneful-bunker': 3, 'obstruct': 3, 'quick-guard': 3, 'wide-guard': 3,
+  'fake-out': 3, 'quick-guard': 3, 'wide-guard': 3, 'crafty-shield': 3, 'spotlight': 3, 'upper-hand': 3,
   // +2
   'extreme-speed': 2, 'feint': 2, 'first-impression': 2, 'follow-me': 2, 'rage-powder': 2,
+  'ally-switch': 2, 'zippy-zap': 2,
   // +1
   'aqua-jet': 1, 'baby-doll-eyes': 1, 'bullet-punch': 1, 'ice-shard': 1,
   'mach-punch': 1, 'quick-attack': 1, 'shadow-sneak': 1, 'sucker-punch': 1,
-  'vacuum-wave': 1, 'water-shuriken': 1,
+  'vacuum-wave': 1, 'water-shuriken': 1, 'accelerock': 1, 'bide': 1, 'ion-deluge': 1,
+  'jet-punch': 1, 'powder': 1, 'thunderclap': 1,
   // -1
   'vital-throw': -1,
   // -3
-  'focus-punch': -3, 'revenge': -3, 'avalanche': -3,
+  'focus-punch': -3, 'beak-blast': -3, 'shell-trap': -3,
   // -4
-  'roar': -4, 'whirlwind': -4, 'dragon-tail': -4, 'circle-throw': -4,
+  'revenge': -4, 'avalanche': -4,
   // -5
-  'trick-room': -5, 'magic-room': -5, 'wonder-room': -5,
+  'counter': -5, 'mirror-coat': -5, 'metal-burst': -5,
   // -6
-  'counter': -6, 'mirror-coat': -6, 'metal-burst': -6,
+  'roar': -6, 'whirlwind': -6, 'dragon-tail': -6, 'circle-throw': -6, 'teleport': -6,
+  // -7
+  'trick-room': -7, 'magic-room': -7, 'wonder-room': -7,
 };
 
 // Moves that can cause the target to flinch. Value is flinch chance (0–1).
@@ -122,6 +167,15 @@ export const FLINCH_MOVES: Record<string, number> = {
   'twister':         0.2,
   'waterfall':       0.2,
   'zen-headbutt':    0.2,
+  'double-iron-bash': 0.3,
+  'fiery-wrath':      0.2,
+  'fire-fang':        0.1,
+  'floaty-fall':      0.3,
+  'ice-fang':         0.1,
+  'sky-attack':       0.3,
+  'steamroller':      0.3,
+  'thunder-fang':     0.1,
+  'zing-zap':         0.3,
 };
 
 // Moves that target only the user (stat boosts, recovery, etc.).
@@ -134,6 +188,14 @@ export const SELF_TARGETING_MOVES = new Set([
   'dragon-dance', 'shell-smash', 'geomancy', 'rock-polish', 'autotomize',
   'charge', 'focus-energy', 'meditate', 'sharpen', 'work-up',
   'double-team', 'minimize', 'acid-armor', 'clangorous-soul',
+  // Milestone 5.14 Wave 1 additions — 'user-and-allies'-target moves (coaching, gear-up,
+  // howl, magnetic-flux) are simplified to apply to the user only, since this project has
+  // no generic ally-stat-stacking outside the dedicated ally-targeting moves (Wave 6);
+  // no-retreat's trap-lock and tidy-up's hazard-clear are deferred to a later 5.14 wave.
+  'coaching', 'cotton-guard', 'defend-order', 'extreme-evoboost', 'gear-up',
+  'hone-claws', 'howl', 'magnetic-flux', 'no-retreat', 'tail-glow', 'tidy-up',
+  // Fillet Away — costs 1/2 max HP like Belly Drum, see the custom guard in battleController.ts
+  'fillet-away',
   // Recovery
   'recover', 'soft-boiled', 'roost', 'moonlight', 'morning-sun',
   'synthesis', 'rest', 'slack-off', 'milk-drink', 'heal-order', 'shore-up',
@@ -141,9 +203,22 @@ export const SELF_TARGETING_MOVES = new Set([
   'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
   // Protect family
   'protect', 'detect', 'kings-shield', 'spiky-shield', 'baneful-bunker', 'obstruct',
+  'silk-trap', 'burning-bulwark',
   // Side-wide protect (blocks the whole side, not just the user — resolved via
   // Battle.fieldConditions rather than a per-Pokémon volatileStatus)
   'wide-guard', 'quick-guard',
+  // Screens + Mist/Safeguard (milestone 5.14 Wave 6) — also side-wide, 5 turns
+  'reflect', 'light-screen', 'aurora-veil', 'mist', 'safeguard',
+  // Entry hazards (milestone 5.14 Wave 7) — no target picker needed (always land on
+  // the whole opposing side), even though they're resolved against the OPPONENT's
+  // side rather than the caster's own, unlike every other move in this set.
+  'stealth-rock', 'spikes', 'toxic-spikes', 'sticky-web',
+  // Perish Song (milestone 5.14 Wave 8) — hits every active Pokémon on BOTH sides,
+  // so it's routed here rather than through the (opponent-only) auto-target picker.
+  'perish-song',
+  // Healing Wish / Lunar Dance (milestone 5.14 Wave 10) — no foe target, faints the
+  // user and queues a full heal for whoever's sent in next.
+  'healing-wish', 'lunar-dance',
   // Room effects (field-wide, 5 turns, toggled off if used again while active —
   // also resolved via Battle.fieldConditions, see ROOM_MOVES below)
   'trick-room', 'magic-room', 'wonder-room',
@@ -165,12 +240,15 @@ export const ROOM_MESSAGES: Record<string, { start: string; end: string }> = {
 // Maps each protect-family move to the volatile condition it pushes.
 // The condition name encodes which variant was used so the hit loop can apply the correct contact side-effect.
 export const PROTECT_VOLATILE: Record<string, string> = {
-  'protect':        'protecting',
-  'detect':         'protecting',
-  'kings-shield':   'protecting-kings-shield',
-  'spiky-shield':   'protecting-spiky-shield',
-  'baneful-bunker': 'protecting-baneful-bunker',
-  'obstruct':       'protecting-obstruct',
+  'protect':          'protecting',
+  'detect':           'protecting',
+  'kings-shield':     'protecting-kings-shield',
+  'spiky-shield':     'protecting-spiky-shield',
+  'baneful-bunker':   'protecting-baneful-bunker',
+  'obstruct':         'protecting-obstruct',
+  // Found by the 5.14 Wave 1 audit — same protect family, missed by the original 4.12 build
+  'silk-trap':        'protecting-silk-trap',
+  'burning-bulwark':  'protecting-burning-bulwark',
 };
 
 // Two-turn moves that require a charge turn before firing.
@@ -285,6 +363,25 @@ export const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'stockpile':       [{ stat: 'def', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
   // Curse: non-Ghost variant (+1 Atk, +1 Def, −1 Spe). Ghost variant is handled separately in battles.ts.
   'curse':           [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }, { stat: 'spe', stages: -1, target: 'self' }],
+  // ── Milestone 5.14 Wave 1: status-class self-boost moves ──────────────────
+  // 'user-and-allies'-target moves (coaching, gear-up, howl, magnetic-flux) simplified
+  // to self-only, same reasoning as the SELF_TARGETING_MOVES comment above.
+  'coaching':        [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }],
+  'cotton-guard':    [{ stat: 'def', stages: 3, target: 'self' }],
+  'defend-order':    [{ stat: 'def', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
+  'extreme-evoboost': [{ stat: 'atk', stages: 2, target: 'self' }, { stat: 'def', stages: 2, target: 'self' }, { stat: 'spa', stages: 2, target: 'self' }, { stat: 'spd', stages: 2, target: 'self' }, { stat: 'spe', stages: 2, target: 'self' }],
+  // Fillet Away is NOT listed here — it costs 1/2 max HP like Belly Drum, so it needs
+  // the HP-gate to run BEFORE the stat change (same reason Belly Drum is hand-coded in
+  // battleController.ts instead of going through this generic table).
+  'gear-up':         [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'spa', stages: 1, target: 'self' }],
+  'hone-claws':      [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'acc', stages: 1, target: 'self' }],
+  'howl':            [{ stat: 'atk', stages: 1, target: 'self' }],
+  'magnetic-flux':   [{ stat: 'def', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
+  // Trap-lock (no switching) isn't modeled — same deferred-mechanic treatment as other traps below
+  'no-retreat':      [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }, { stat: 'spa', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }, { stat: 'spe', stages: 1, target: 'self' }],
+  'tail-glow':       [{ stat: 'spa', stages: 3, target: 'self' }],
+  // Hazard/Substitute-clear isn't modeled yet (hazards land in a later 5.14 wave)
+  'tidy-up':         [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'spe', stages: 1, target: 'self' }],
   // ── Opponent-debuff moves ──────────────────────────────────────────────────
   'growl':           [{ stat: 'atk', stages: -1, target: 'foe' }],
   'tail-whip':       [{ stat: 'def', stages: -1, target: 'foe' }],
@@ -308,6 +405,19 @@ export const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'flash':           [{ stat: 'acc', stages: -1, target: 'foe' }],
   'kinesis':         [{ stat: 'acc', stages: -1, target: 'foe' }],
   'sweet-scent':     [{ stat: 'eva', stages: -2, target: 'foe' }],
+  // ── Milestone 5.14 Wave 1: status-class foe-target moves ──────────────────
+  'confide':         [{ stat: 'spa', stages: -1, target: 'foe' }],
+  'defog':           [{ stat: 'eva', stages: -1, target: 'foe' }], // hazard-clear deferred to a later 5.14 wave
+  'memento':         [{ stat: 'atk', stages: -2, target: 'foe' }, { stat: 'spa', stages: -2, target: 'foe' }], // user-faints-after-use deferred (5.14 self-KO wave)
+  'parting-shot':    [{ stat: 'atk', stages: -1, target: 'foe' }, { stat: 'spa', stages: -1, target: 'foe' }], // switch-out-after-use deferred, no U-turn/Volt Switch-style mechanic exists yet
+  'play-nice':       [{ stat: 'atk', stages: -1, target: 'foe' }],
+  'tar-shot':        [{ stat: 'spe', stages: -1, target: 'foe' }], // also makes target Fire-weak — not modeled
+  'toxic-thread':    [{ stat: 'spe', stages: -1, target: 'foe' }], // also poisons — see STATUS_MOVES
+  // Decorate and Spicy Extract are real oddities: they buff whoever they're used ON,
+  // even a foe. 'target: foe' here just means "apply to whoever was targeted" — the
+  // code doesn't care about the sign of the stages, so this is correct as-is.
+  'decorate':        [{ stat: 'atk', stages: 2, target: 'foe' }, { stat: 'spa', stages: 2, target: 'foe' }],
+  'spicy-extract':   [{ stat: 'atk', stages: 2, target: 'foe' }, { stat: 'def', stages: -2, target: 'foe' }],
   // ── Confusion + stat-boost moves (confusion handled by STATUS_MOVES) ─────────
   'swagger':         [{ stat: 'atk', stages: 2, target: 'foe' }],
   'flatter':         [{ stat: 'spa', stages: 1, target: 'foe' }],
@@ -320,6 +430,17 @@ export const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'psycho-boost':  [{ stat: 'spa', stages: -2, target: 'self' }],
   'hammer-arm':    [{ stat: 'spe', stages: -1, target: 'self' }],
   'v-create':      [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }, { stat: 'spe', stages: -1, target: 'self' }],
+  // Milestone 5.14 Wave 1 additions — these look like foe-target damage moves
+  // (PokeAPI's move-level `target` field says "selected-pokemon", i.e. who takes the
+  // damage) but their stat change is a real self-cost/self-buff, not a foe debuff.
+  'armor-cannon':    [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }],
+  'clanging-scales': [{ stat: 'def', stages: -1, target: 'self' }],
+  'dragon-ascent':   [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }],
+  'fleur-cannon':    [{ stat: 'spa', stages: -2, target: 'self' }],
+  'hyperspace-fury': [{ stat: 'def', stages: -1, target: 'self' }],
+  'ice-hammer':      [{ stat: 'spe', stages: -1, target: 'self' }],
+  'make-it-rain':    [{ stat: 'spa', stages: -1, target: 'self' }],
+  'spin-out':        [{ stat: 'spe', stages: -2, target: 'self' }],
   // ── Damaging moves — chance-based foe stat drop ────────────────────────────
   'aurora-beam':   [{ stat: 'atk', stages: -1, target: 'foe', chance: 0.1 }],
   'crunch':        [{ stat: 'def', stages: -1, target: 'foe', chance: 0.2 }],
@@ -341,9 +462,69 @@ export const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'octazooka':     [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.5 }],
   'muddy-water':   [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.3 }],
   'mirror-shot':   [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.3 }],
+  // Milestone 5.14 Wave 1 additions
+  'apple-acid':      [{ stat: 'spd', stages: -1, target: 'foe', chance: 1 }],
+  'breaking-swipe':  [{ stat: 'atk', stages: -1, target: 'foe', chance: 1 }],
+  'bug-buzz':        [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
+  'bulldoze':        [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'chilling-water':  [{ stat: 'atk', stages: -1, target: 'foe', chance: 1 }],
+  'crush-claw':      [{ stat: 'def', stages: -1, target: 'foe', chance: 0.5 }],
+  'drum-beating':    [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'earth-power':     [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
+  'electroweb':      [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'fire-lash':       [{ stat: 'def', stages: -1, target: 'foe', chance: 1 }],
+  'focus-blast':     [{ stat: 'spd', stages: -1, target: 'foe', chance: 0.1 }],
+  'glaciate':        [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'grav-apple':      [{ stat: 'def', stages: -1, target: 'foe', chance: 1 }],
+  'iron-tail':       [{ stat: 'def', stages: -1, target: 'foe', chance: 0.3 }],
+  'leaf-tornado':    [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.5 }],
+  'liquidation':     [{ stat: 'def', stages: -1, target: 'foe', chance: 0.2 }],
+  'low-sweep':       [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'lumina-crash':    [{ stat: 'spd', stages: -2, target: 'foe', chance: 1 }],
+  'lunge':           [{ stat: 'atk', stages: -1, target: 'foe', chance: 1 }],
+  'moonblast':       [{ stat: 'spa', stages: -1, target: 'foe', chance: 0.3 }],
+  'mud-bomb':        [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.3 }],
+  'mystical-fire':   [{ stat: 'spa', stages: -1, target: 'foe', chance: 1 }],
+  'night-daze':      [{ stat: 'acc', stages: -1, target: 'foe', chance: 0.4 }],
+  'play-rough':      [{ stat: 'atk', stages: -1, target: 'foe', chance: 0.1 }],
+  'pounce':          [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'razor-shell':     [{ stat: 'def', stages: -1, target: 'foe', chance: 0.5 }],
+  'rock-tomb':       [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'seed-flare':      [{ stat: 'spd', stages: -2, target: 'foe', chance: 0.4 }],
+  'shadow-bone':     [{ stat: 'def', stages: -1, target: 'foe', chance: 0.2 }],
+  'skitter-smack':   [{ stat: 'spa', stages: -1, target: 'foe', chance: 1 }],
+  'snarl':           [{ stat: 'spa', stages: -1, target: 'foe', chance: 1 }],
+  'spirit-break':    [{ stat: 'spa', stages: -1, target: 'foe', chance: 1 }],
+  'struggle-bug':    [{ stat: 'spa', stages: -1, target: 'foe', chance: 1 }],
+  // Real Syrup Bomb re-lowers Speed each turn for 3 turns; simplified to a single
+  // one-shot drop, same "close approximation" treatment as other DOT-style effects.
+  'syrup-bomb':      [{ stat: 'spe', stages: -1, target: 'foe', chance: 1 }],
+  'thunderous-kick':  [{ stat: 'def', stages: -1, target: 'foe', chance: 1 }],
+  'trop-kick':       [{ stat: 'atk', stages: -1, target: 'foe', chance: 1 }],
   // ── Damaging moves — chance-based self stat boost ──────────────────────────
   'charge-beam':   [{ stat: 'spa', stages: 1, target: 'self', chance: 0.7 }],
   'meteor-mash':   [{ stat: 'atk', stages: 1, target: 'self', chance: 0.2 }],
+  // Milestone 5.14 Wave 1 additions
+  'ancient-power':   [{ stat: 'atk', stages: 1, target: 'self', chance: 0.1 }, { stat: 'def', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spa', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spd', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spe', stages: 1, target: 'self', chance: 0.1 }],
+  'silver-wind':     [{ stat: 'atk', stages: 1, target: 'self', chance: 0.1 }, { stat: 'def', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spa', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spd', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spe', stages: 1, target: 'self', chance: 0.1 }],
+  'ominous-wind':    [{ stat: 'atk', stages: 1, target: 'self', chance: 0.1 }, { stat: 'def', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spa', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spd', stages: 1, target: 'self', chance: 0.1 }, { stat: 'spe', stages: 1, target: 'self', chance: 0.1 }],
+  'clangorous-soulblaze': [{ stat: 'atk', stages: 1, target: 'self', chance: 1 }, { stat: 'def', stages: 1, target: 'self', chance: 1 }, { stat: 'spa', stages: 1, target: 'self', chance: 1 }, { stat: 'spd', stages: 1, target: 'self', chance: 1 }, { stat: 'spe', stages: 1, target: 'self', chance: 1 }],
+  'aqua-step':       [{ stat: 'spe', stages: 1, target: 'self', chance: 1 }],
+  'aura-wheel':      [{ stat: 'spe', stages: 1, target: 'self', chance: 1 }],
+  'diamond-storm':   [{ stat: 'def', stages: 2, target: 'self', chance: 0.5 }],
+  'electro-shot':    [{ stat: 'spa', stages: 1, target: 'self', chance: 1 }], // real move charges turn 1 and fires turn 2; not in CHARGE_MOVES, so this resolves as an immediate single-turn cast — a known simplification
+  'fiery-dance':     [{ stat: 'spa', stages: 1, target: 'self', chance: 0.5 }],
+  'flame-charge':    [{ stat: 'spe', stages: 1, target: 'self', chance: 1 }],
+  'metal-claw':      [{ stat: 'atk', stages: 1, target: 'self', chance: 0.1 }],
+  'power-up-punch':  [{ stat: 'atk', stages: 1, target: 'self', chance: 1 }],
+  'rapid-spin':      [{ stat: 'spe', stages: 1, target: 'self', chance: 1 }], // hazard/Leech Seed removal deferred to a later 5.14 wave
+  'steel-wing':      [{ stat: 'def', stages: 1, target: 'self', chance: 0.1 }],
+  'torch-song':      [{ stat: 'spa', stages: 1, target: 'self', chance: 1 }],
+  'trailblaze':      [{ stat: 'spe', stages: 1, target: 'self', chance: 1 }],
+  // Zippy Zap always crit in its Let's Go debut, but that was removed as of Sword/Shield
+  // — PokeAPI's current-gen crit_rate data confirms it no longer does (checked during
+  // Wave 3's crit-ratio audit), so the earlier note claiming otherwise was wrong.
+  'zippy-zap':       [{ stat: 'eva', stages: 1, target: 'self', chance: 1 }],
 };
 
 export const STAT_DISPLAY_NAMES: Record<keyof StatStages, string> = {
@@ -432,6 +613,7 @@ export const RECOIL_MOVES: Record<string, RecoilEffect> = {
   'wood-hammer':  { type: 'damage', fraction: 1 / 3 },
   'head-smash':   { type: 'damage', fraction: 1 / 2 },
   'struggle':     { type: 'max-hp', fraction: 1 / 4 },
+  'light-of-ruin': { type: 'damage', fraction: 1 / 2 },
 };
 
 // Multi-hit moves — hit a fixed number of times or a random 2–5.
@@ -459,6 +641,20 @@ export const MULTI_HIT_MOVES: Record<string, MultiHitEffect> = {
   'pin-missile':   { type: 'variable' },
   'tail-slap':     { type: 'variable' },
   'bone-rush':     { type: 'variable' },
+  'barrage':       { type: 'variable' },
+  'scale-shot':    { type: 'variable' },
+  'water-shuriken': { type: 'variable' },
+  'dragon-darts':  { type: 'fixed', count: 2 },
+  // Real hit counts. Surging Strikes' guaranteed crit is now modeled via
+  // ALWAYS_CRIT_MOVES (milestone 5.14 Wave 3). Triple Kick/Triple Axel's per-hit power
+  // still escalates (10/20/30 and 20/40/60) rather than hitting 3x at the move's flat
+  // listed power — that nuance remains an accepted "close approximation" simplification.
+  'surging-strikes': { type: 'fixed', count: 3 },
+  'triple-kick':     { type: 'fixed', count: 3 },
+  'triple-axel':     { type: 'fixed', count: 3 },
+  // Beat Up deliberately excluded — its real hit count/power come from each of the
+  // user's OTHER unfainted party members' own level/Attack stat, not the move's own
+  // power or a simple hit-count roll; needs bespoke logic, not a MULTI_HIT_MOVES entry.
 };
 
 export function getHitCount(moveId: string): number {
@@ -482,6 +678,7 @@ export const DRAIN_MOVES: Record<string, DrainEffect> = {
   'dream-eater':      { fraction: 0.5 },
   'draining-kiss':    { fraction: 0.75 },
   'oblivion-wing':    { fraction: 0.75 },
+  'drain-punch':      { fraction: 0.5 },
 };
 
 // Moves that lock the user in for multiple consecutive turns.
@@ -540,3 +737,133 @@ const AUTO_TARGET_VALUES = new Set([
 export function getMoveTargetCategory(target: string): 'single' | 'auto' {
   return AUTO_TARGET_VALUES.has(target) ? 'auto' : 'single';
 }
+
+// Fixed-damage moves — their damage doesn't come from the normal power/stat formula,
+// so they're cached with power:null and would otherwise silently deal 0 (milestone
+// 5.14 Wave 2). Split into two groups: @smogon/calc has NATIVE support for the first
+// group (handleFixedDamageMoves + a dedicated Final Gambit branch in its own gen789
+// mechanics) — resolveMove just needs to stop short-circuiting on power:null and let
+// them reach calculate(). The second group has no library support and is computed
+// directly in resolveMove instead (target's current HP, user's level, etc.) — same
+// "no @smogon/calc coverage, hand-roll it" treatment as Pain Split/Strength Sap.
+export const LIBRARY_FIXED_DAMAGE_MOVES = new Set([
+  'seismic-toss', 'night-shade', 'dragon-rage', 'sonic-boom', 'final-gambit',
+]);
+export const CUSTOM_FIXED_DAMAGE_MOVES = new Set([
+  'endeavor', 'super-fang', 'ruination', 'psywave',
+]);
+export const FIXED_DAMAGE_MOVES = new Set([...LIBRARY_FIXED_DAMAGE_MOVES, ...CUSTOM_FIXED_DAMAGE_MOVES]);
+
+// High-crit-ratio moves (milestone 5.14 Wave 3) — sourced from PokeAPI's move-level
+// meta.crit_rate field, which encodes two distinct real mechanics under one number:
+// a value of 1 raises the crit stage by 1 (stacks with Focus Energy's own +2 stages,
+// same shared stage pool as the real games); a value of 6 means the move ALWAYS crits
+// outright, bypassing the stage table entirely — a separate, stronger effect, not
+// "6 stages". (A 27th move, 10,000,000 Volt Thunderbolt, has crit_rate 2 but is a
+// Z-move exclusive to Pikachu — excluded, no Z-move system exists in this project.)
+export const HIGH_CRIT_MOVES = new Set([
+  'aeroblast', 'air-cutter', 'attack-order', 'blaze-kick', 'crabhammer', 'cross-chop',
+  'cross-poison', 'drill-run', 'karate-chop', 'leaf-blade', 'night-slash', 'poison-tail',
+  'psycho-cut', 'razor-leaf', 'razor-wind', 'shadow-claw', 'sky-attack', 'slash',
+  'snipe-shot', 'spacial-rend', 'stone-edge',
+]);
+export const ALWAYS_CRIT_MOVES = new Set(['frost-breath', 'storm-throw', 'surging-strikes', 'wicked-blow']);
+
+// Real Gen 6+ crit-stage table — index by total stage (capped at 3, which is
+// "always crits" via the normal roll rather than the ALWAYS_CRIT_MOVES shortcut).
+export const CRIT_STAGE_RATES = [1 / 24, 1 / 8, 1 / 2, 1];
+
+// OHKO moves (milestone 5.14 Wave 4) — deal damage equal to the target's current HP
+// on a hit. Own accuracy formula entirely separate from the move's own listed accuracy
+// (level_diff + 30, clamped 0-100), auto-fails against a higher-level target, and is
+// blocked outright by the target's Sturdy — a narrow, single-purpose ability check
+// added here without building out Sturdy's other (unrelated) "survive a hit at full
+// HP" effect, which isn't implemented anywhere in this project yet.
+export const OHKO_MOVES = new Set(['guillotine', 'horn-drill', 'fissure', 'sheer-cold']);
+
+// Recharge moves (milestone 5.14 Wave 5) — sourced from a live sweep of every PokeAPI
+// move's effect text for "recharge" (no dedicated meta field exists for this, unlike
+// ailment/drain/flinch/etc.), then hand-verified against two false positives the
+// keyword match picked up (Sleep Talk's text merely LISTS these moves as an exception,
+// it doesn't itself recharge; Shadow Half — a Pokémon Colosseum/XD Shadow-Pokémon-
+// exclusive move — turned out to be a genuine 11th recharge move, not a false
+// positive, and is included for completeness). The user must recharge (skip their
+// next turn entirely) after USING one of these, regardless of whether it hit, missed,
+// or was blocked by Protect — applied once per use, not once per target.
+export const RECHARGE_MOVES = new Set([
+  'blast-burn', 'eternabeam', 'frenzy-plant', 'giga-impact', 'hydro-cannon',
+  'hyper-beam', 'meteor-assault', 'prismatic-laser', 'roar-of-time', 'rock-wrecker',
+  'shadow-half',
+]);
+
+// Screens (milestone 5.14 Wave 6) — side-wide, 5 turns, same Battle.fieldConditions
+// pattern as Wide Guard/Quick Guard (5.13). @smogon/calc has NATIVE damage-halving
+// support for all three via Field.defenderSide.isReflect/isLightScreen/isAuroraVeil
+// (and correctly excludes critical hits from the reduction on its own) — no need to
+// hand-roll the damage math, just flip the right flag based on the defender's side.
+export const SCREEN_MOVES = new Set(['reflect', 'light-screen', 'aurora-veil']);
+export const SCREEN_MESSAGES: Record<string, string> = {
+  'reflect':      'put up a Reflect wall! Physical damage is reduced!',
+  'light-screen': 'put up a Light Screen! Special damage is reduced!',
+  'aurora-veil':  'put up an Aurora Veil! Damage is reduced!',
+};
+// Mist blocks incoming NEGATIVE stat changes for the caster's side; Safeguard blocks
+// incoming status conditions. Both reuse the same fieldConditions pattern.
+export const MIST_MESSAGE = "became shrouded in mist! The team's stats can't be lowered!";
+export const SAFEGUARD_MESSAGE = 'became cloaked in a mystical veil! The team is protected from status conditions!';
+
+// Entry hazards (milestone 5.14 Wave 7) — set on the OPPONENT's side (unlike screens/
+// Wide Guard, which protect the caster's own side), and trigger on send-out/switch-in
+// rather than through the normal move-damage pipeline, so this is fully custom code —
+// no @smogon/calc coverage applies here at all. Stacking count is encoded directly in
+// the fieldConditions condition string (e.g. 'spikes:enemySide:2'), same convention as
+// 'bound:<moveId>:<attackerId>' from milestone 5.13. Stealth Rock/Sticky Web are
+// single-layer; Spikes/Toxic Spikes stack.
+export const ENTRY_HAZARD_MOVES = new Set(['stealth-rock', 'spikes', 'toxic-spikes', 'sticky-web']);
+export const STACKABLE_HAZARDS: Record<string, number> = { spikes: 3, 'toxic-spikes': 2 };
+// Spikes damage fraction by layer count (index 0 unused, 1-indexed by layer count).
+export const SPIKES_DAMAGE_FRACTION = [0, 1 / 8, 1 / 6, 1 / 4];
+
+// Hazard-removal moves. Court Change (swaps every side condition between both sides)
+// is deliberately excluded — genuinely more complex than a simple clear, and rare
+// enough in practice that it's a better candidate for a future pass than this wave.
+// Rapid Spin only clears the user's own side (it's a damaging move; hooks into the
+// existing post-damage self-effect path from milestone 5.13's Wave 3 self-boost).
+// Defog and Tidy Up clear BOTH sides — Defog additionally clears screens/Mist/
+// Safeguard from both sides too (real Gen 6+ behavior), not just hazards.
+export const RAPID_SPIN_HAZARD_CLEAR = new Set(['rapid-spin']);
+export const BOTH_SIDES_HAZARD_CLEAR = new Set(['defog', 'tidy-up']);
+
+// No-damage trapping moves (milestone 5.14 Wave 8) — reuse the exact same
+// 'bound:<moveId>:<sourceId>' volatile as the real binding moves (Wrap/Bind/etc,
+// milestone 5.13), including the switch-block check and release-when-source-leaves
+// logic, but with no end-of-round chip damage and no turn-counted expiry (cast with
+// turnsRemaining:99, only cleared when the trapper itself leaves the field).
+export const NO_DAMAGE_TRAP_MOVES = new Set(['mean-look', 'block', 'spider-web']);
+
+// Perish Song (milestone 5.14 Wave 8) — hits every active Pokémon on BOTH sides
+// (self, allies, and opponents alike), so it's resolved through the self-targeting
+// path rather than the normal single-side auto-target picker, which only ever hits
+// the opposing side. Doesn't re-apply to a Pokémon already counting down.
+export const PERISH_SONG_TURNS = 3;
+
+// Delayed damage (milestone 5.14 Wave 9) — Future Sight/Doom Desire. Cast normally
+// (target picked, accuracy checked at cast time like any move) but the hit itself
+// lands 2 end-of-rounds later using the ATTACKER's stats as they were AT CAST TIME
+// (a snapshot on Battle.pendingAttacks — see the PendingAttack type in models/Battle.ts),
+// against whichever Pokémon occupies the targeted SLOT when the timer expires (not
+// necessarily the originally-targeted Pokémon, if it's since switched out).
+export const DELAYED_DAMAGE_MOVES = new Set(['future-sight', 'doom-desire']);
+export const DELAYED_DAMAGE_TURNS = 2;
+
+// Self-KO utility (milestone 5.14 Wave 10) — the user faints immediately after use,
+// regardless of whether the move actually hit/succeeded. Explosion/Self-Destruct/
+// Misty Explosion are otherwise ordinary damaging spread moves (power/type/target
+// already come from the normal PokeAPI-cached move data, no special table needed for
+// the damage itself); Memento's foe stat-drop was already built in Wave 1 — this only
+// adds the missing self-faint. Healing Wish/Lunar Dance additionally queue a full
+// heal for whoever's sent in next (see PendingWish in models/Battle.ts).
+export const SELF_KO_MOVES = new Set([
+  'explosion', 'self-destruct', 'misty-explosion', 'memento', 'healing-wish', 'lunar-dance',
+]);
+export const HEALING_WISH_MOVES = new Set(['healing-wish', 'lunar-dance']);

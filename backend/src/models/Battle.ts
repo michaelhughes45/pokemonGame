@@ -55,6 +55,37 @@ type CatchAttempt = {
   result: string;
 };
 
+// Future Sight / Doom Desire (milestone 5.14 Wave 9) — damage is calculated from the
+// ATTACKER's stats as they were at the moment of casting (a snapshot), since the real
+// games let the attacker switch out or even faint before the hit lands and it still
+// uses the original stats. targetSlotIndex identifies WHICH side-entry was targeted
+// (not a specific Pokémon ID) — if that slot's occupant has since switched, the hit
+// still lands on whoever is there now, matching the real games; if the slot is empty
+// or its occupant has already fainted, it fizzles silently.
+export type PendingAttack = {
+  moveId: string;
+  targetSide: 'playerSide' | 'enemySide';
+  targetSlotIndex: number;
+  turnsRemaining: number;
+  attackerName: string;
+  attackerSpeciesId: number;
+  attackerLevel: number;
+  attackerNature: string;
+  attackerEvs: Record<string, number>;
+  attackerIvs: Record<string, number>;
+  attackerAbilitySlug: string | null;
+};
+
+// Healing Wish / Lunar Dance (milestone 5.14 Wave 10) — the user faints immediately
+// on use, and whichever Pokémon is sent into that same slot NEXT (no delay, unlike
+// PendingAttack) is fully healed. restorePP distinguishes Lunar Dance (also restores
+// every move's PP) from Healing Wish (HP + status only).
+export type PendingWish = {
+  targetSide: 'playerSide' | 'enemySide';
+  targetSlotIndex: number;
+  restorePP: boolean;
+};
+
 type TurnLogEntry = {
   turn: number;
   events: string[];
@@ -125,6 +156,13 @@ export type IBattle = {
   // and a valid opposing ability was copied — the effective ability slug for every
   // ability-slug lookup afterward. Cleared on switch-out or faint, same as statStages.
   tracedAbility: Record<string, string>;
+  // Future Sight / Doom Desire (milestone 5.14 Wave 9) — see the PendingAttack type
+  // above for the full explanation. Resolved (and removed) in applyEndOfRound once
+  // turnsRemaining hits 0.
+  pendingAttacks: PendingAttack[];
+  // Healing Wish / Lunar Dance (milestone 5.14 Wave 10) — see PendingWish above.
+  // Consumed (and removed) the moment a Pokémon is sent into the matching slot.
+  pendingWishes: PendingWish[];
   expAwarded: boolean;
   moneyAwarded: boolean;
   // Set once the battle completes. For pve/wild this always mirrors "did the players win"
@@ -235,6 +273,30 @@ const BattleSchema = new Schema<IBattle>(
     lastMoveByPokemon:   { type: Schema.Types.Mixed, default: {} },
     globalLastMoveUsed:  { type: String, default: null },
     tracedAbility:       { type: Schema.Types.Mixed, default: {} },
+    pendingAttacks: [
+      {
+        moveId:              { type: String, required: true },
+        targetSide:          { type: String, enum: ['playerSide', 'enemySide'], required: true },
+        targetSlotIndex:     { type: Number, required: true },
+        turnsRemaining:      { type: Number, required: true },
+        attackerName:        { type: String, required: true },
+        attackerSpeciesId:   { type: Number, required: true },
+        attackerLevel:       { type: Number, required: true },
+        attackerNature:      { type: String, required: true },
+        attackerEvs:         { type: Schema.Types.Mixed, required: true },
+        attackerIvs:         { type: Schema.Types.Mixed, required: true },
+        attackerAbilitySlug: { type: String, default: null },
+        _id:                 false,
+      },
+    ],
+    pendingWishes: [
+      {
+        targetSide:      { type: String, enum: ['playerSide', 'enemySide'], required: true },
+        targetSlotIndex: { type: Number, required: true },
+        restorePP:       { type: Boolean, default: false },
+        _id:              false,
+      },
+    ],
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },

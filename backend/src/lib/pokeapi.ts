@@ -136,15 +136,20 @@ export async function fetchSpecies(idOrName: string | number): Promise<Transform
   const levelUpMoveData: LevelUpMove[] = [];
   const seen = new Set<string>();
   for (const m of pokemon.moves) {
+    // level_learned_at === 0 is a real PokeAPI convention for a handful of moves
+    // (e.g. Spidops' Silk Trap) meaning "known immediately" (on evolution/hatch),
+    // not "not a level-up move" — that's already excluded by the method check.
+    // Filtering on '> 0' here used to silently drop those moves from the cache
+    // entirely (found during the milestone 5.14 Wave 1 audit).
     const levelUpLevels = (m.version_group_details as any[])
-      .filter((d: any) => d.move_learn_method.name === 'level-up' && d.level_learned_at > 0)
+      .filter((d: any) => d.move_learn_method.name === 'level-up' && d.level_learned_at >= 0)
       .map((d: any) => d.level_learned_at as number);
 
     if (levelUpLevels.length > 0 && !seen.has(m.move.name)) {
       seen.add(m.move.name);
       levelUpMoveData.push({
         moveId: m.move.name as string,
-        level:  Math.min(...levelUpLevels),
+        level:  Math.max(1, Math.min(...levelUpLevels)),
       });
     }
   }

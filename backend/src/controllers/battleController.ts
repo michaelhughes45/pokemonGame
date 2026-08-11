@@ -45,7 +45,30 @@ import {
   ALLY_OR_FOE_MOVES,
   REDIRECT_MOVES,
   METRONOME_POOL,
+  FIXED_DAMAGE_MOVES,
+  CUSTOM_FIXED_DAMAGE_MOVES,
+  HIGH_CRIT_MOVES,
+  ALWAYS_CRIT_MOVES,
+  CRIT_STAGE_RATES,
+  OHKO_MOVES,
+  RECHARGE_MOVES,
+  SCREEN_MOVES,
+  SCREEN_MESSAGES,
+  MIST_MESSAGE,
+  SAFEGUARD_MESSAGE,
+  ENTRY_HAZARD_MOVES,
+  STACKABLE_HAZARDS,
+  SPIKES_DAMAGE_FRACTION,
+  RAPID_SPIN_HAZARD_CLEAR,
+  BOTH_SIDES_HAZARD_CLEAR,
+  NO_DAMAGE_TRAP_MOVES,
+  PERISH_SONG_TURNS,
+  DELAYED_DAMAGE_MOVES,
+  DELAYED_DAMAGE_TURNS,
+  SELF_KO_MOVES,
+  HEALING_WISH_MOVES,
 } from '../lib/moveData';
+import { PendingAttack, PendingWish } from '../models/Battle';
 import {
   GEN9,
   type CachedAbility,
@@ -125,6 +148,14 @@ function resolveActingSide(
   if (battle.playerSide.some(e => e.activePokemonId?.toString() === idStr)) return 'playerSide';
   if (battle.enemySide.some(e => e.activePokemonId?.toString() === idStr)) return 'enemySide';
   return null;
+}
+
+// True if a Battle.fieldConditions condition string is one of the four entry hazards
+// (milestone 5.14 Wave 7), scoped to the given side. Stackable hazards (spikes,
+// toxic-spikes) carry a third colon-separated segment for layer count.
+function isHazardCondition(condition: string, side: 'playerSide' | 'enemySide'): boolean {
+  const [moveId, condSide] = condition.split(':');
+  return condSide === side && ENTRY_HAZARD_MOVES.has(moveId);
 }
 
 export async function createBattle(req: Request, res: Response): Promise<void> {
@@ -569,6 +600,108 @@ export async function applyEntryAbilities(
   return events;
 }
 
+// Entry hazards (milestone 5.14 Wave 7) — checked on every send-out/switch-in against
+// the INCOMING Pokémon's own side (the side hazards were set against). Order matches
+// the real games: Stealth Rock, then Spikes, then Toxic Spikes, then Sticky Web.
+export async function applyEntryHazards(
+  battle: HydratedDocument<IBattle>, incomingId: mongoose.Types.ObjectId, incomingSide: 'player' | 'enemy',
+): Promise<string[]> {
+  const sideKey: 'playerSide' | 'enemySide' = incomingSide === 'player' ? 'playerSide' : 'enemySide';
+  const fieldConds = (battle.fieldConditions ?? []) as Array<{ condition: string; turnsRemaining: number }>;
+  const relevant = fieldConds.filter(f => isHazardCondition(f.condition, sideKey));
+  if (relevant.length === 0) return [];
+
+  const poke = await Pokemon.findById(incomingId, 'nickname speciesId level nature evs hasHiddenAbility currentHp ownerId ownerType statusCondition').lean();
+  if (!poke || poke.currentHp <= 0) return [];
+  const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name types baseStats abilities').lean();
+  if (!cache) return [];
+  const pokeName = pokeDisplayName(poke, cache);
+  const types = (cache.types as string[]) ?? [];
+  const abilitySlugs = getEffectiveAbilitySlugs(battle, incomingId.toString(), (cache.abilities as CachedAbility[]) ?? [], poke.hasHiddenAbility as boolean);
+  const isGrounded = !types.includes('flying') && !abilitySlugs.includes('levitate');
+  const events: string[] = [];
+  let currentHp = poke.currentHp;
+
+  const stealthRock = relevant.find(f => f.condition.startsWith('stealth-rock:'));
+  if (stealthRock && cache.baseStats) {
+    const ivs   = await getIvsForOwner(poke.ownerId, poke.ownerType);
+    const maxHp = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ivs).hp;
+    const effectiveness = getTypeEffectiveness('rock', types);
+    const damage = Math.max(1, Math.floor(maxHp * 0.125 * effectiveness));
+    currentHp = Math.max(0, currentHp - damage);
+    await Pokemon.updateOne({ _id: incomingId }, { $set: { currentHp } });
+    events.push(`Pointed stones dug into ${pokeName}!`);
+  }
+
+  const spikes = relevant.find(f => f.condition.startsWith('spikes:'));
+  if (spikes && isGrounded && currentHp > 0 && cache.baseStats) {
+    const layers = Number(spikes.condition.split(':')[2]) || 1;
+    const ivs    = await getIvsForOwner(poke.ownerId, poke.ownerType);
+    const maxHp  = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ivs).hp;
+    const damage = Math.max(1, Math.floor(maxHp * SPIKES_DAMAGE_FRACTION[layers]));
+    currentHp = Math.max(0, currentHp - damage);
+    await Pokemon.updateOne({ _id: incomingId }, { $set: { currentHp } });
+    events.push(`${pokeName} was hurt by the spikes!`);
+  }
+
+  const toxicSpikes = relevant.find(f => f.condition.startsWith('toxic-spikes:'));
+  if (toxicSpikes && currentHp > 0) {
+    if (types.includes('poison')) {
+      // Absorbed on contact — cleared for the whole side, not just this Pokémon.
+      battle.fieldConditions = (battle.fieldConditions ?? []).filter(f => f !== toxicSpikes);
+      battle.markModified('fieldConditions');
+      events.push(`${pokeName} absorbed the toxic spikes!`);
+    } else if (isGrounded && !poke.statusCondition) {
+      const layers = Number(toxicSpikes.condition.split(':')[2]) || 1;
+      events.push(...await applyStatusEffect(battle, incomingId, { status: layers >= 2 ? 'toxic' : 'poison', chance: 1 }));
+    }
+  }
+
+  const stickyWeb = relevant.find(f => f.condition.startsWith('sticky-web:'));
+  if (stickyWeb && isGrounded && currentHp > 0) {
+    const stageMap = battle.statStages as Record<string, StatStages>;
+    events.push(`${pokeName} was caught in a sticky web!`);
+    events.push(...applyStatStageEffects(stageMap, incomingId.toString(), [{ stat: 'spe', stages: -1, target: 'foe' }], pokeName, abilitySlugs));
+    battle.markModified('statStages');
+  }
+
+  return events;
+}
+
+// Healing Wish / Lunar Dance (milestone 5.14 Wave 10) — checked at the same send-out/
+// switch-in call sites as applyEntryHazards. Consumes (and removes) the wish the
+// instant a Pokémon lands in the matching slot, regardless of who it is.
+export async function applyPendingWish(
+  battle: HydratedDocument<IBattle>, incomingId: mongoose.Types.ObjectId, incomingSide: 'player' | 'enemy',
+): Promise<string[]> {
+  const sideKey: 'playerSide' | 'enemySide' = incomingSide === 'player' ? 'playerSide' : 'enemySide';
+  const slotIndex = battle[sideKey].findIndex(e => e.activePokemonId?.toString() === incomingId.toString());
+  if (slotIndex === -1) return [];
+  const wishIdx = (battle.pendingWishes ?? []).findIndex(w => w.targetSide === sideKey && w.targetSlotIndex === slotIndex);
+  if (wishIdx === -1) return [];
+  const wish = battle.pendingWishes[wishIdx];
+  battle.pendingWishes = battle.pendingWishes.filter((_, i) => i !== wishIdx);
+  battle.markModified('pendingWishes');
+
+  const poke = await Pokemon.findById(incomingId, 'nickname speciesId level nature evs hasHiddenAbility currentHp moves ownerId ownerType').lean();
+  if (!poke || poke.currentHp <= 0) return [];
+  const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name baseStats').lean();
+  if (!cache?.baseStats) return [];
+  const pokeName = pokeDisplayName(poke, cache);
+  const ivs   = await getIvsForOwner(poke.ownerId, poke.ownerType);
+  const maxHp = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ivs).hp;
+
+  const update: Record<string, unknown> = { currentHp: maxHp, statusCondition: null, statusCounter: null };
+  if (wish.restorePP) {
+    const moves = ((poke.moves as Array<{ moveId: string; maxPP: number }>) ?? []).map(m => ({ ...m, currentPP: m.maxPP }));
+    update.moves = moves;
+  }
+  await Pokemon.updateOne({ _id: incomingId }, { $set: update });
+  return [wish.restorePP
+    ? `${pokeName} was fully healed by the lunar dance!`
+    : `${pokeName} was fully healed by the healing wish!`];
+}
+
 async function applySwitchOutAbilities(
   battle: HydratedDocument<IBattle>, pokemonId: string, outgoing: Record<string, unknown> | null, outCache: Record<string, unknown> | null, outName: string,
 ): Promise<string[]> {
@@ -719,6 +852,10 @@ async function forceOpponentSwitch(
   const incomingCache = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
   moveEvents.push(`${outgoingName} was dragged out! ${pokeDisplayName(incoming, incomingCache)} was sent out!`);
   moveEvents.push(...await applyEntryAbilities(battle, chosenId, playerEntry ? 'player' : 'enemy'));
+  // Fainting from this is caught by submitTarget's own applyFaints/checkBattleEnd call
+  // right after the whole move resolves — no need to duplicate it here.
+  moveEvents.push(...await applyEntryHazards(battle, chosenId, playerEntry ? 'player' : 'enemy'));
+  moveEvents.push(...await applyPendingWish(battle, chosenId, playerEntry ? 'player' : 'enemy'));
 }
 
 // Follow Me / Rage Powder — if the defending side has an active Pokémon with either
@@ -799,6 +936,13 @@ async function resolveSwitch(battle: HydratedDocument<IBattle>, entry: TurnQueue
   const inCache = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
   events.push(`${pokeDisplayName(incoming, inCache)} was sent out!`);
   events.push(...await applyEntryAbilities(battle, incomingId, sideLabel));
+  events.push(...await applyEntryHazards(battle, incomingId, sideLabel));
+  events.push(...await applyPendingWish(battle, incomingId, sideLabel));
+  // Switches resolve mid-round inside autoSkipBlockedActors, well before the normal
+  // end-of-round applyFaints call — a hazard-fainted switch-in needs to be caught
+  // here directly, not left active-but-dead until the round ends.
+  events.push(...await applyFaints(battle));
+  events.push(...await checkBattleEnd(battle));
   return events;
 }
 
@@ -873,6 +1017,10 @@ async function resolveBatonPass(battle: HydratedDocument<IBattle>, entry: TurnQu
   const inCache  = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
   events.push(`${pokeDisplayName(incoming, inCache)} was sent out, inheriting the stat changes!`);
   events.push(...await applyEntryAbilities(battle, incomingId, sideLabel));
+  events.push(...await applyEntryHazards(battle, incomingId, sideLabel));
+  events.push(...await applyPendingWish(battle, incomingId, sideLabel));
+  events.push(...await applyFaints(battle));
+  events.push(...await checkBattleEnd(battle));
   return events;
 }
 
@@ -1004,6 +1152,16 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
       continue;
     }
 
+    const mustRecharge = ((poke.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'must-recharge');
+    if (mustRecharge) {
+      await Pokemon.updateOne({ _id: entry.activePokemonId }, { $pull: { volatileStatus: { condition: 'must-recharge' } } });
+      const rechargeCache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean();
+      appendToLog(battle, `${pokeDisplayName(poke, rechargeCache)} must recharge!`);
+      battle.turnQueue[battle.currentTargetIndex].resolved = true;
+      battle.currentTargetIndex++;
+      continue;
+    }
+
     // Infatuation (Attract) is a volatile, not the primary statusCondition, so it's
     // gated independently — a Pokémon can be both infatuated AND paralyzed/asleep/etc.
     // and needs to pass both checks to act.
@@ -1087,6 +1245,16 @@ async function applyStatusEffect(battle: HydratedDocument<IBattle>, targetId: mo
   if (!isConfusion && target.statusCondition) return [`${displayName} is already ${statusLabels[target.statusCondition]}!`];
   if (isConfusion && target.volatileStatus.some(v => v.condition === 'confusion')) return [`${displayName} is already confused!`];
 
+  // Safeguard (milestone 5.14 Wave 6) — blocks incoming status conditions (not
+  // confusion, which is a volatile rather than a statusCondition in the real games
+  // either) for the target's whole side, regardless of source (move, contact ability, etc).
+  if (!isConfusion) {
+    const targetSide = resolveActingSide(battle, targetId);
+    if (targetSide && (battle.fieldConditions ?? []).some(f => f.condition === `safeguard:${targetSide}`)) {
+      return [`${displayName}'s side is protected by Safeguard!`];
+    }
+  }
+
   const isImmune = (
     (effect.status === 'paralysis' && types.includes('electric')) ||
     (effect.status === 'burn'      && types.includes('fire'))     ||
@@ -1118,6 +1286,7 @@ async function resolveMove(
   attackerPokemonId: mongoose.Types.ObjectId, targetPokemonId: mongoose.Types.ObjectId,
   moveId: string, weather: IBattle['weather'], stages: { attacker?: StatStages; target?: StatStages } = {},
   powerOverride?: number, wonderRoomActive = false, magicRoomActive = false,
+  screens: { reflect: boolean; lightScreen: boolean; auroraVeil: boolean } = { reflect: false, lightScreen: false, auroraVeil: false },
 ): Promise<{ damage: number; isCrit: boolean; events: string[]; category: string | null }> {
   const [attacker, target] = await Promise.all([Pokemon.findById(attackerPokemonId).lean(), Pokemon.findById(targetPokemonId).lean()]);
   if (!attacker || !target) return { damage: 0, isCrit: false, events: ['(Pokémon not found during move resolution)'], category: null };
@@ -1144,13 +1313,24 @@ async function resolveMove(
     moveData = (anyCache?.moves as CachedMoveData[] | undefined)?.[0];
   }
 
-  if (!moveData || !moveData.power) {
+  // Fixed-damage moves (Seismic Toss, Endeavor, etc.) are cached with power:null since
+  // their damage doesn't come from the power/stat formula at all — they'd otherwise
+  // trip this guard and silently deal 0 (milestone 5.14 Wave 2 finding).
+  if (!moveData || (!moveData.power && !FIXED_DAMAGE_MOVES.has(moveId))) {
     const implNote = moveData && !moveData.implemented && !(moveId in STATUS_MOVES) && !(moveId in WEATHER_MOVES) && !SELF_TARGETING_MOVES.has(moveId) && !(moveId in STAT_STAGE_MOVES) ? ' (effect not yet implemented)' : '';
     return { damage: 0, isCrit: false, events: [`${attackerName} used ${moveName} on ${targetName}.${implNote}`], category: moveData?.category ?? null };
   }
 
   const hasFocusEnergy = ((attacker.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'focus-energy');
-  const isCrit = Math.random() < (hasFocusEnergy ? 1 / 6 : 1 / 24);
+  // Crit stage table (milestone 5.14 Wave 3) — Focus Energy contributes +2 stages (Gen
+  // 5+ value; corrected from this project's earlier flat 1/6 approximation, which
+  // matched no real gen's actual rate) and high-crit-ratio moves contribute +1, stacking
+  // in the same shared pool as the real games. A handful of moves (Storm Throw, Frost
+  // Breath, Surging Strikes, Wicked Blow) always crit outright regardless of stage.
+  // Fixed-damage moves can never land a critical hit in the real games.
+  const critStage = (hasFocusEnergy ? 2 : 0) + (HIGH_CRIT_MOVES.has(moveId) ? 1 : 0);
+  const isCrit = !FIXED_DAMAGE_MOVES.has(moveId) &&
+    (ALWAYS_CRIT_MOVES.has(moveId) || Math.random() < CRIT_STAGE_RATES[Math.min(critStage, CRIT_STAGE_RATES.length - 1)]);
   const hasHelpingHand = ((attacker.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'helping-hand');
 
   const attackerAbilities = (attackerCache.abilities as CachedAbility[]) ?? [];
@@ -1215,24 +1395,49 @@ async function resolveMove(
   }
 
   let damage = 0;
-  try {
+  if (CUSTOM_FIXED_DAMAGE_MOVES.has(moveId)) {
+    // No @smogon/calc support for these — computed directly, same treatment as
+    // Pain Split/Strength Sap. Blocked outright by a 0x type-chart matchup (e.g.
+    // Ghost-type immunity to Endeavor/Super Fang) since we bypass the library's own
+    // type chart entirely by not calling calculate() for these.
+    if (typeEffectiveness === 0) {
+      damage = 0;
+    } else if (moveId === 'endeavor') {
+      damage = Math.max(0, target.currentHp - attacker.currentHp);
+    } else if (moveId === 'super-fang' || moveId === 'ruination') {
+      damage = Math.max(1, Math.floor(target.currentHp / 2));
+    } else if (moveId === 'psywave') {
+      // Gen 6+ formula: random 50%–150% of the user's level, in whole-percent steps.
+      damage = Math.max(1, Math.floor((attacker.level * (Math.floor(Math.random() * 101) + 50)) / 100));
+    }
+  } else try {
     const toBoosts = (s?: StatStages) => s ? { atk: s.atk, def: s.def, spa: s.spa, spd: s.spd, spe: s.spe } : undefined;
     const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any });
     const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: toCalcIvs(targetIvs), curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any });
     // @smogon/calc has native Wonder Room (Def/SpDef swap) and Magic Room (held-item
     // suppression) support via Field flags — no need to hand-roll either. Magic Room's
     // flag is inert today since no held item is ever passed to CalcPokemon yet (5.16),
-    // but it'll suppress that for free once one is.
-    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName, powerOverride ? { overrides: { basePower: powerOverride } } as any : undefined), new Field({ weather: toCalcWeather(weather) as any, isWonderRoom: wonderRoomActive, isMagicRoom: magicRoomActive } as any));
+    // but it'll suppress that for free once one is. It also has NATIVE fixed-damage
+    // support for Seismic Toss/Night Shade/Dragon Rage/Sonic Boom/Final Gambit
+    // (handleFixedDamageMoves + a dedicated Final Gambit branch in its own gen789
+    // mechanics) — no hand-rolling needed for those, they just flow through here now
+    // that the power:null guard above no longer blocks them (milestone 5.14 Wave 2).
+    const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, moveName, powerOverride ? { overrides: { basePower: powerOverride } } as any : undefined), new Field({ weather: toCalcWeather(weather) as any, isWonderRoom: wonderRoomActive, isMagicRoom: magicRoomActive, defenderSide: { isReflect: screens.reflect, isLightScreen: screens.lightScreen, isAuroraVeil: screens.auroraVeil } } as any));
     const rolls  = Array.isArray(result.damage) ? result.damage : [result.damage];
     const picked = rolls[Math.floor(Math.random() * rolls.length)];
     damage = Array.isArray(picked) ? picked[Math.floor(Math.random() * picked.length)] : (picked as number);
     if (isCrit && damage > 0) damage = Math.floor(damage * 1.5);
   } catch {
-    damage = Math.max(1, Math.floor(((powerOverride ?? moveData.power) * attacker.level) / 50));
-    if (attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero') damage = Math.floor(damage * 1.5);
-    else if (attackerAbilitySlug && attackerAbilitySlug in ILATE_MAP && moveData.type?.toLowerCase() === 'normal') damage = Math.floor(damage * 1.2);
-    damage = Math.floor(damage * typeEffectiveness);
+    if (moveId === 'seismic-toss' || moveId === 'night-shade') damage = typeEffectiveness === 0 ? 0 : attacker.level;
+    else if (moveId === 'dragon-rage') damage = typeEffectiveness === 0 ? 0 : 40;
+    else if (moveId === 'sonic-boom') damage = typeEffectiveness === 0 ? 0 : 20;
+    else if (moveId === 'final-gambit') damage = typeEffectiveness === 0 ? 0 : attacker.currentHp;
+    else {
+      damage = Math.max(1, Math.floor(((powerOverride ?? moveData.power!) * attacker.level) / 50));
+      if (attackerAbilitySlug === 'protean' || attackerAbilitySlug === 'libero') damage = Math.floor(damage * 1.5);
+      else if (attackerAbilitySlug && attackerAbilitySlug in ILATE_MAP && moveData.type?.toLowerCase() === 'normal') damage = Math.floor(damage * 1.2);
+      damage = Math.floor(damage * typeEffectiveness);
+    }
   }
   // Secondary-ability multiplier stacking: @smogon/calc already fully and correctly
   // applied the PRIMARY ability (attackerAbilitySlugs[0] / targetAbilitySlugs[0]) inside
@@ -1240,13 +1445,15 @@ async function resolveMove(
   // the library a second time, so a small, well-known set of simple multiplier effects
   // are hand-applied here instead — the same technique this project already used for
   // Protean/-ilate in the fallback formula, just covering more abilities and running on
-  // the primary @smogon/calc path too, not just the fallback.
-  if (damage > 0) {
+  // the primary @smogon/calc path too, not just the fallback. None of this applies to
+  // fixed-damage moves — their damage is set, not scaled by anything (milestone 5.14
+  // Wave 2), so the whole block is skipped for them.
+  if (damage > 0 && !FIXED_DAMAGE_MOVES.has(moveId)) {
     const isStab = moveType != null && ((attackerCache.types as string[]) ?? []).includes(moveType);
     for (const slug of attackerAbilitySlugs.slice(1)) {
       if (slug === 'guts' && attacker.statusCondition && moveData.category === 'physical') damage = Math.floor(damage * 1.5);
       else if ((slug === 'huge-power' || slug === 'pure-power') && moveData.category === 'physical') damage = Math.floor(damage * 2);
-      else if (slug === 'technician' && (powerOverride ?? moveData.power) <= 60) damage = Math.floor(damage * 1.5);
+      else if (slug === 'technician' && (powerOverride ?? moveData.power!) <= 60) damage = Math.floor(damage * 1.5);
       else if (slug === 'adaptability' && isStab) damage = Math.floor(damage * (2 / 1.5));
       else if (slug === 'sniper' && isCrit) damage = Math.floor(damage * 1.5);
     }
@@ -1612,10 +1819,71 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
           remaining.push({ condition: fc.condition, turnsRemaining: turnsLeft });
           continue;
         }
+        // Screens + Mist/Safeguard (milestone 5.14 Wave 6) — 5-turn side effects,
+        // same decrement-and-expire shape as Room effects above.
+        const [screenMoveId] = fc.condition.split(':');
+        if (SCREEN_MOVES.has(screenMoveId) || screenMoveId === 'mist' || screenMoveId === 'safeguard') {
+          const turnsLeft = fc.turnsRemaining - 1;
+          if (turnsLeft <= 0) { allEvents.push(`${slugToDisplayName(screenMoveId)} wore off!`); continue; }
+          remaining.push({ condition: fc.condition, turnsRemaining: turnsLeft });
+          continue;
+        }
         remaining.push(fc);
       }
       battle.fieldConditions = remaining;
       battle.markModified('fieldConditions');
+    }
+
+    // Future Sight / Doom Desire (milestone 5.14 Wave 9) — resolves using the
+    // ATTACKER's snapshotted stats against whoever currently occupies the targeted
+    // slot (fresh live fetch; may not be the originally-targeted Pokémon if it's
+    // since switched out).
+    if ((battle.pendingAttacks ?? []).length > 0) {
+      const stillPending: PendingAttack[] = [];
+      for (const pa of battle.pendingAttacks) {
+        const turnsLeft = pa.turnsRemaining - 1;
+        if (turnsLeft > 0) { stillPending.push({ ...pa, turnsRemaining: turnsLeft }); continue; }
+
+        const slotEntry = battle[pa.targetSide][pa.targetSlotIndex] as (PlayerSideEntry | EnemySideEntry | undefined);
+        const targetId  = slotEntry?.activePokemonId;
+        const tgt       = targetId ? await Pokemon.findById(targetId).lean() : null;
+        const tgtCurHp  = tgt ? (runningHp.get(targetId!.toString()) ?? tgt.currentHp) : 0;
+        if (!tgt || tgtCurHp <= 0) {
+          allEvents.push(`${pa.attackerName}'s ${slugToDisplayName(pa.moveId)} found no target!`);
+          continue;
+        }
+        const tgtCache = await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name baseStats types abilities').lean();
+        if (!tgtCache?.baseStats) { continue; }
+        const tgtName = pokeDisplayName(tgt, tgtCache);
+        const tgtAbilitySlugs = getEffectiveAbilitySlugs(battle, targetId!.toString(), (tgtCache.abilities as CachedAbility[]) ?? [], tgt.hasHiddenAbility as boolean);
+        const tgtIvs = await getIvsForOwner(tgt.ownerId, tgt.ownerType);
+
+        try {
+          const atkCache = await PokedexCache.findOne({ pokeApiId: pa.attackerSpeciesId }, 'name').lean();
+          const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName((atkCache?.name as string) ?? 'unknown'), {
+            level: pa.attackerLevel, nature: cap(pa.attackerNature) as any,
+            evs: toCalcEvs(pa.attackerEvs as unknown as BaseStats), ivs: toCalcIvs(pa.attackerIvs as unknown as BaseStats),
+            ability: pa.attackerAbilitySlug ? (slugToDisplayName(pa.attackerAbilitySlug) as any) : undefined,
+          });
+          const calcTarget = new CalcPokemon(GEN9, slugToDisplayName(tgtCache.name as string), {
+            level: tgt.level, nature: cap(tgt.nature) as any, evs: toCalcEvs(tgt.evs as BaseStats), ivs: toCalcIvs(tgtIvs),
+            curHP: tgtCurHp, status: toCalcStatus(tgt.statusCondition) as any,
+            ability: tgtAbilitySlugs[0] ? (slugToDisplayName(tgtAbilitySlugs[0]) as any) : undefined,
+          });
+          const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, slugToDisplayName(pa.moveId)), new Field({}));
+          const rolls  = Array.isArray(result.damage) ? result.damage : [result.damage];
+          const picked = rolls[Math.floor(Math.random() * rolls.length)];
+          const damage = Array.isArray(picked) ? picked[Math.floor(Math.random() * picked.length)] : (picked as number);
+          const newHp  = Math.max(0, tgtCurHp - damage);
+          runningHp.set(targetId!.toString(), newHp);
+          await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+          allEvents.push(`${tgtName} was hit by ${pa.attackerName}'s ${slugToDisplayName(pa.moveId)}! (${damage} damage)`);
+        } catch {
+          allEvents.push(`${pa.attackerName}'s ${slugToDisplayName(pa.moveId)} fizzled!`);
+        }
+      }
+      battle.pendingAttacks = stillPending;
+      battle.markModified('pendingAttacks');
     }
 
     // Counter/Mirror Coat/Metal Burst only care about damage taken THIS round —
@@ -1700,8 +1968,14 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       const boundEntry = volStatus.find(v => v.condition.startsWith('bound:'));
       if (boundEntry) {
         const curHp = runningHp.get(pokeId) ?? poke.currentHp;
-        if (curHp > 0) {
-          const trapMoveId = boundEntry.condition.split(':')[1];
+        const trapMoveId = boundEntry.condition.split(':')[1];
+        // Mean Look/Block/Spider Web (milestone 5.14 Wave 8) share the exact same
+        // bound:<moveId>:<sourceId> volatile as the real binding moves (same switch-
+        // block check, same release-when-source-leaves via releaseBoundTargets) — but
+        // deal no chip damage and never expire on a turn counter, only when the user
+        // who trapped them leaves the field. Cast with turnsRemaining:99, same
+        // "persists until explicitly cleared" sentinel as focus-energy/ingrain.
+        if (curHp > 0 && !NO_DAMAGE_TRAP_MOVES.has(trapMoveId)) {
           const damage = Math.max(1, Math.floor(maxHp / 8));
           const newHp  = Math.max(0, curHp - damage);
           runningHp.set(pokeId, newHp); await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
@@ -1716,6 +1990,27 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
               { _id: poke._id, 'volatileStatus.condition': boundEntry.condition },
               { $set: { 'volatileStatus.$.turnsRemaining': turnsLeft } },
             );
+          }
+        }
+      }
+
+      // Perish Song (milestone 5.14 Wave 8) — hits 0 by fainting outright, picked up
+      // by this same function's own applyFaints call right after this loop.
+      const perishEntry = volStatus.find(v => v.condition === 'perish-song');
+      if (perishEntry) {
+        const curHp = runningHp.get(pokeId) ?? poke.currentHp;
+        if (curHp > 0) {
+          const turnsLeft = perishEntry.turnsRemaining - 1;
+          if (turnsLeft <= 0) {
+            runningHp.set(pokeId, 0);
+            await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: 0 }, $pull: { volatileStatus: { condition: 'perish-song' } } });
+            allEvents.push(`${pokeName}'s perish count fell to 0!`);
+          } else {
+            await Pokemon.updateOne(
+              { _id: poke._id, 'volatileStatus.condition': 'perish-song' },
+              { $set: { 'volatileStatus.$.turnsRemaining': turnsLeft } },
+            );
+            allEvents.push(`${pokeName}'s perish count fell to ${turnsLeft}!`);
           }
         }
       }
@@ -1940,6 +2235,26 @@ async function resolveSelfTargetMove(
       }
     }
 
+    if (entry.moveId === 'fillet-away' && attacker && atkCache?.baseStats) {
+      const maxHp  = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats, attackerIvs).hp;
+      const curHp  = attacker.currentHp as number;
+      const costHp = Math.floor(maxHp / 2);
+      if (curHp <= costHp) {
+        moveEvents.push(`${attackerName} doesn't have enough HP!`);
+      } else {
+        await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: curHp - costHp } });
+        const stageMap = battle.statStages as Record<string, StatStages>;
+        const atkAbilitySlugs = atkCache ? getEffectiveAbilitySlugs(battle, entry.activePokemonId.toString(), (atkCache.abilities as CachedAbility[]) ?? [], attacker.hasHiddenAbility as boolean) : [];
+        moveEvents.push(...applyStatStageEffects(
+          stageMap, entry.activePokemonId.toString(),
+          [{ stat: 'atk', stages: 2, target: 'self' }, { stat: 'spa', stages: 2, target: 'self' }, { stat: 'spe', stages: 2, target: 'self' }],
+          attackerName, atkAbilitySlugs,
+        ));
+        battle.markModified('statStages');
+        moveEvents.push(`${attackerName} cut its own HP and boosted its stats!`);
+      }
+    }
+
     if (entry.moveId === 'substitute' && attacker && atkCache?.baseStats) {
       // The substitute's own remaining HP is encoded in the volatile condition string
       // (substitute:<hp>), same convention as bound:/infatuated: — rewritten in place by
@@ -1996,6 +2311,117 @@ async function resolveSelfTargetMove(
           moveEvents.push(`${attackerName}'s side braced itself against ${flavor}!`);
         }
       }
+    }
+
+    if (SCREEN_MOVES.has(entry.moveId) || entry.moveId === 'mist' || entry.moveId === 'safeguard') {
+      const side = resolveActingSide(battle, entry.activePokemonId);
+      if (side) {
+        const condition = `${entry.moveId}:${side}`;
+        const already = (battle.fieldConditions ?? []).some(f => f.condition === condition);
+        if (already) {
+          moveEvents.push(`${attackerName}'s side is already protected!`);
+        } else {
+          battle.fieldConditions.push({ condition, turnsRemaining: 5 });
+          battle.markModified('fieldConditions');
+          const flavor = SCREEN_MESSAGES[entry.moveId] ?? (entry.moveId === 'mist' ? MIST_MESSAGE : SAFEGUARD_MESSAGE);
+          moveEvents.push(`${attackerName}'s side ${flavor}`);
+        }
+      }
+    }
+
+    if (ENTRY_HAZARD_MOVES.has(entry.moveId)) {
+      // Unlike every other side-condition move here, hazards land on the OPPONENT's
+      // side (they hurt whoever switches in over there), not the caster's own side.
+      const casterSide = resolveActingSide(battle, entry.activePokemonId);
+      const side = casterSide === 'playerSide' ? 'enemySide' : casterSide === 'enemySide' ? 'playerSide' : null;
+      if (side) {
+        const stackCap = STACKABLE_HAZARDS[entry.moveId];
+        if (stackCap) {
+          const existing = (battle.fieldConditions ?? []).find(f => f.condition.startsWith(`${entry.moveId}:${side}:`));
+          const currentLayers = existing ? Number(existing.condition.split(':')[2]) || 0 : 0;
+          if (currentLayers >= stackCap) {
+            moveEvents.push(`${attackerName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+          } else {
+            battle.fieldConditions = (battle.fieldConditions ?? []).filter(f => f !== existing);
+            battle.fieldConditions.push({ condition: `${entry.moveId}:${side}:${currentLayers + 1}`, turnsRemaining: 0 });
+            battle.markModified('fieldConditions');
+            moveEvents.push(`${attackerName} scattered ${slugToDisplayName(entry.moveId)} around the opposing side!`);
+          }
+        } else {
+          const condition = `${entry.moveId}:${side}`;
+          const already = (battle.fieldConditions ?? []).some(f => f.condition === condition);
+          if (already) {
+            moveEvents.push(`${attackerName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+          } else {
+            battle.fieldConditions.push({ condition, turnsRemaining: 0 });
+            battle.markModified('fieldConditions');
+            const flavor = entry.moveId === 'stealth-rock' ? 'floating rocks' : 'a sticky web';
+            moveEvents.push(`${attackerName} scattered ${flavor} around the opposing side!`);
+          }
+        }
+      }
+    }
+
+    if (RAPID_SPIN_HAZARD_CLEAR.has(entry.moveId)) {
+      // Damaging move — this only runs the CLEAR half; Rapid Spin's own +1 Speed self-
+      // boost already fires via the normal selfStatEffects path (milestone 5.13).
+      const casterSide = resolveActingSide(battle, entry.activePokemonId);
+      if (casterSide) {
+        const before = (battle.fieldConditions ?? []).length;
+        battle.fieldConditions = (battle.fieldConditions ?? []).filter(f => !isHazardCondition(f.condition, casterSide));
+        if (battle.fieldConditions.length !== before) {
+          battle.markModified('fieldConditions');
+          moveEvents.push(`${attackerName}'s side was cleared of hazards!`);
+        }
+      }
+    }
+
+    if (BOTH_SIDES_HAZARD_CLEAR.has(entry.moveId) && SELF_TARGETING_MOVES.has(entry.moveId)) {
+      // Tidy Up only (Defog's clear is handled in the foe-effect path below, since
+      // Defog targets a foe and needs that target resolved first).
+      const before = (battle.fieldConditions ?? []).length;
+      battle.fieldConditions = (battle.fieldConditions ?? []).filter(f => !isHazardCondition(f.condition, 'playerSide') && !isHazardCondition(f.condition, 'enemySide'));
+      if (battle.fieldConditions.length !== before) {
+        battle.markModified('fieldConditions');
+        moveEvents.push('All hazards were cleared from the field!');
+      }
+    }
+
+    if (entry.moveId === 'perish-song') {
+      const allActivePokemonIds = [
+        ...battle.playerSide.map(e => e.activePokemonId),
+        ...battle.enemySide.map(e => e.activePokemonId),
+      ].filter((id): id is mongoose.Types.ObjectId => id != null);
+      let affectedAny = false;
+      for (const id of allActivePokemonIds) {
+        const target = await Pokemon.findById(id, 'volatileStatus currentHp').lean();
+        if (!target || target.currentHp <= 0) continue;
+        const already = ((target.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'perish-song');
+        if (already) continue;
+        await Pokemon.updateOne({ _id: id }, { $push: { volatileStatus: { condition: 'perish-song', turnsRemaining: PERISH_SONG_TURNS } } });
+        affectedAny = true;
+      }
+      // No "${attackerName} used Perish Song!" line here — the self-targeting branch
+      // this code lives in already pushes that generic line unconditionally before
+      // dispatching to any move-specific handler (confirmed live: without this
+      // comment/fix it printed twice).
+      moveEvents.push(affectedAny
+        ? `All Pokémon that heard the song will faint in ${PERISH_SONG_TURNS} turns!`
+        : 'But nobody was affected!');
+    }
+
+    if (HEALING_WISH_MOVES.has(entry.moveId)) {
+      const side = resolveActingSide(battle, entry.activePokemonId);
+      if (side) {
+        const slotIndex = battle[side].findIndex(e => e.activePokemonId?.toString() === entry.activePokemonId.toString());
+        if (slotIndex !== -1) {
+          const wish: PendingWish = { targetSide: side, targetSlotIndex: slotIndex, restorePP: entry.moveId === 'lunar-dance' };
+          battle.pendingWishes.push(wish);
+          battle.markModified('pendingWishes');
+        }
+      }
+      await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: 0 } });
+      moveEvents.push(`${attackerName}'s wish will be granted to whoever takes its place!`);
     }
 
     if (ROOM_MOVES.has(entry.moveId)) {
@@ -2076,7 +2502,7 @@ async function resolveDamagingMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, targets: string[],
   targetHpMap: Map<string, number>, enduringTargets: Set<string>,
   protectingTargets: Map<string, string | null>, moveEvents: string[],
-  sideGuard: { wideGuard: boolean; quickGuard: boolean } = { wideGuard: false, quickGuard: false },
+  sideGuard: { wideGuard: boolean; quickGuard: boolean; reflect?: boolean; lightScreen?: boolean; auroraVeil?: boolean } = { wideGuard: false, quickGuard: false },
   // Keyed by pokemonId, value is the substitute's current remaining HP (absent/0 = no
   // substitute). Mutated in place as hits land so a multi-hit move sees the updated value.
   substituteTargets: Map<string, number> = new Map(),
@@ -2316,6 +2742,40 @@ async function resolveDamagingMove(
       continue;
     }
 
+    if (OHKO_MOVES.has(entry.moveId) && atkSnap && atkSnapCache) {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId level hasHiddenAbility').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types abilities').lean() : null;
+      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      if (!tgt || !tgtCache) { moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`); continue; }
+
+      const moveType = moveMeta?.type?.toLowerCase();
+      const typeEff  = moveType ? getTypeEffectiveness(moveType, (tgtCache.types as string[]) ?? []) : 1;
+      const tgtAbilitySlugs = getEffectiveAbilitySlugs(battle, targetId, (tgtCache.abilities as CachedAbility[]) ?? [], (tgt as any).hasHiddenAbility ?? false);
+      const typeImmune = moveType != null && TYPE_IMMUNITY_ABILITIES.some(t => tgtAbilitySlugs.includes(t.abilitySlug) && t.type === moveType);
+
+      if (typeEff === 0 || typeImmune) {
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)} on ${tgtName}, but it had no effect!`);
+      } else if (atkSnap.level < (tgt as any).level) {
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+      } else if (tgtAbilitySlugs.includes('sturdy')) {
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed against ${tgtName}'s Sturdy!`);
+      } else {
+        // Own accuracy formula, unrelated to the move's own listed accuracy value.
+        const ohkoAccuracy = Math.min(100, Math.max(0, atkSnap.level - (tgt as any).level + 30));
+        if (Math.random() * 100 >= ohkoAccuracy) {
+          moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)} on ${tgtName}, but it missed!`);
+        } else {
+          const isEnduring = enduringTargets.has(targetId);
+          const newHp = isEnduring ? 1 : 0;
+          await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+          targetHpMap.set(targetId, newHp);
+          moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}! It's a one-hit KO!${isEnduring ? ` ${tgtName} endured the hit!` : ''}`);
+        }
+      }
+      continue;
+    }
+
     if (moveAccuracy !== null) {
       const attackerAccStage = stageMap[entry.activePokemonId.toString()]?.acc ?? 0;
       const targetEvaStage   = stageMap[targetId]?.eva ?? 0;
@@ -2355,6 +2815,32 @@ async function resolveDamagingMove(
       continue;
     }
 
+    if (entry.moveId === 'strength-sap' && atkSnap && atkSnapCache?.baseStats) {
+      const tgt      = await Pokemon.findById(targetId, 'ownerId ownerType nickname speciesId level nature evs hasHiddenAbility').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name baseStats abilities').lean() : null;
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      if (tgt && tgtCache?.baseStats) {
+        const tgtIvs = await getIvsForOwner((tgt as any).ownerId, (tgt as any).ownerType);
+        // Real Strength Sap heals by the target's CURRENT (stage-modified) Attack; this
+        // project approximates with the target's base computed Attack (no stage factor),
+        // same simplification level already accepted for other stat-dependent effects.
+        const tgtAtk   = computeStats(tgtCache.baseStats as BaseStats, (tgt as any).level, (tgt as any).nature, (tgt as any).evs as BaseStats, tgtIvs).atk;
+        const atkMaxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp;
+        const healed   = Math.min(atkMaxHp - atkSnap.currentHp, tgtAtk);
+        if (healed > 0) {
+          const newAtkHp = atkSnap.currentHp + healed;
+          await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newAtkHp } });
+          atkSnap.currentHp = newAtkHp;
+        }
+        moveEvents.push(`${atkName} used Strength Sap! ${atkName} restored ${Math.max(0, healed)} HP!`);
+        const tgtName = pokeDisplayName(tgt, tgtCache);
+        const tgtAbilitySlugs = getEffectiveAbilitySlugs(battle, targetId, (tgtCache.abilities as CachedAbility[]) ?? [], (tgt as any).hasHiddenAbility as boolean);
+        moveEvents.push(...applyStatStageEffects(stageMap, targetId, [{ stat: 'atk', stages: -1, target: 'self' }], tgtName, tgtAbilitySlugs));
+        battle.markModified('statStages');
+      }
+      continue;
+    }
+
     if (entry.moveId === 'leech-seed') {
       const tgt      = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
       const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types').lean() : null;
@@ -2367,6 +2853,54 @@ async function resolveDamagingMove(
       } else {
         await Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition: 'leech-seed', turnsRemaining: 99 } } });
         moveEvents.push(`${atkName} used Leech Seed! ${tgtName} was seeded!`);
+      }
+      continue;
+    }
+
+    if (NO_DAMAGE_TRAP_MOVES.has(entry.moveId)) {
+      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
+      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const alreadyBound = ((tgt?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
+      if (alreadyBound) {
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+      } else {
+        await Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition: `bound:${entry.moveId}:${entry.activePokemonId.toString()}`, turnsRemaining: 99 } } });
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}! ${tgtName} can no longer flee!`);
+      }
+      continue;
+    }
+
+    if (DELAYED_DAMAGE_MOVES.has(entry.moveId) && atkSnap && atkSnapCache) {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      let targetSide: 'playerSide' | 'enemySide' | null = null;
+      let targetSlotIndex = -1;
+      const playerIdx = battle.playerSide.findIndex(e => e.activePokemonId?.toString() === targetId);
+      if (playerIdx !== -1) { targetSide = 'playerSide'; targetSlotIndex = playerIdx; }
+      else {
+        const enemyIdx = battle.enemySide.findIndex(e => e.activePokemonId?.toString() === targetId);
+        if (enemyIdx !== -1) { targetSide = 'enemySide'; targetSlotIndex = enemyIdx; }
+      }
+      if (!targetSide) {
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`);
+      } else {
+        const pending: PendingAttack = {
+          moveId: entry.moveId,
+          targetSide,
+          targetSlotIndex,
+          turnsRemaining: DELAYED_DAMAGE_TURNS,
+          attackerName: atkName,
+          attackerSpeciesId: atkSnap.speciesId,
+          attackerLevel: atkSnap.level,
+          attackerNature: atkSnap.nature,
+          attackerEvs: atkSnap.evs as unknown as Record<string, number>,
+          attackerIvs: atkIvs as unknown as Record<string, number>,
+          attackerAbilitySlug: attackerAbilitySlugs[0] ?? null,
+        };
+        battle.pendingAttacks.push(pending);
+        battle.markModified('pendingAttacks');
+        moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}! ${atkName} foresaw an attack!`);
       }
       continue;
     }
@@ -2475,6 +3009,12 @@ async function resolveDamagingMove(
           } else if (protectCondition === 'protecting-baneful-bunker') {
             const statusEvents = await applyStatusEffect(battle, entry.activePokemonId, { status: 'poison', chance: 1 });
             if (statusEvents.length) { moveEvents.push(`${atkName} was poisoned by Baneful Bunker!`); moveEvents.push(...statusEvents); }
+          } else if (protectCondition === 'protecting-silk-trap') {
+            moveEvents.push(...applyStatStageEffects(stageMap, entry.activePokemonId.toString(), [{ stat: 'spe', stages: -1, target: 'self' }], atkName, attackerAbilitySlugs));
+            battle.markModified('statStages');
+          } else if (protectCondition === 'protecting-burning-bulwark') {
+            const statusEvents = await applyStatusEffect(battle, entry.activePokemonId, { status: 'burn', chance: 1 });
+            if (statusEvents.length) { moveEvents.push(`${atkName} was burned by Burning Bulwark!`); moveEvents.push(...statusEvents); }
           }
         }
         break;
@@ -2484,6 +3024,7 @@ async function resolveDamagingMove(
         battle, entry.activePokemonId, new mongoose.Types.ObjectId(targetId), entry.moveId, battle.weather,
         { attacker: stageMap[entry.activePokemonId.toString()], target: stageMap[targetId] },
         escalatedPower ?? meFirstPowerOverride, wonderRoomActive, magicRoomActive,
+        { reflect: !!sideGuard.reflect, lightScreen: !!sideGuard.lightScreen, auroraVeil: !!sideGuard.auroraVeil },
       );
       if (isCrit) anyCrit = true;
       if (hitCount > 1) { moveEvents.push(`(Hit ${hit}) ${events[0]}`); } else { moveEvents.push(...events); }
@@ -2552,7 +3093,18 @@ async function resolveDamagingMove(
 
     const statEffects = STAT_STAGE_MOVES[entry.moveId];
     if (statEffects) {
-      const foeEffects = statEffects.filter(e => e.target === 'foe' && Math.random() < (sereneGrace ? Math.min(1, (e.chance ?? 1) * 2) : (e.chance ?? 1)));
+      let foeEffects = statEffects.filter(e => e.target === 'foe' && Math.random() < (sereneGrace ? Math.min(1, (e.chance ?? 1) * 2) : (e.chance ?? 1)));
+      // Mist (milestone 5.14 Wave 6) — blocks incoming NEGATIVE stat changes for the
+      // target's side only; Decorate/Spicy Extract-style positive "used on a foe"
+      // effects (see Wave 1) are unaffected, matching the real games.
+      if (foeEffects.some(e => e.stages < 0)) {
+        const targetSide = resolveActingSide(battle, new mongoose.Types.ObjectId(targetId));
+        if (targetSide && (battle.fieldConditions ?? []).some(f => f.condition === `mist:${targetSide}`)) {
+          const blocked = foeEffects.some(e => e.stages < 0);
+          foeEffects = foeEffects.filter(e => e.stages >= 0);
+          if (blocked) moveEvents.push(`${slugToDisplayName(entry.moveId)} was blocked by Mist!`);
+        }
+      }
       if (foeEffects.length > 0) {
         const tgt      = await Pokemon.findById(targetId, 'nickname speciesId hasHiddenAbility').lean();
         const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name abilities').lean() : null;
@@ -2569,6 +3121,24 @@ async function resolveDamagingMove(
             battle.markModified('statStages');
           }
         }
+      }
+    }
+
+    if (BOTH_SIDES_HAZARD_CLEAR.has(entry.moveId) && entry.moveId === 'defog') {
+      // Unconditional — real Defog always clears both sides regardless of whether the
+      // -1 Evasion above landed or was blocked by Mist (a hazard clear isn't a "stat
+      // change", so Mist doesn't touch it). Also clears screens/Mist/Safeguard on both
+      // sides (real Gen 6+ behavior), not just hazards.
+      const before = (battle.fieldConditions ?? []).length;
+      battle.fieldConditions = (battle.fieldConditions ?? []).filter(f => {
+        const [moveId, side] = f.condition.split(':');
+        const isHazard = (side === 'playerSide' || side === 'enemySide') && ENTRY_HAZARD_MOVES.has(moveId);
+        const isScreenOrGuard = (side === 'playerSide' || side === 'enemySide') && (SCREEN_MOVES.has(moveId) || moveId === 'mist' || moveId === 'safeguard');
+        return !isHazard && !isScreenOrGuard;
+      });
+      if (battle.fieldConditions.length !== before) {
+        battle.markModified('fieldConditions');
+        moveEvents.push('Hazards and screens were blown away from the field!');
       }
     }
 
@@ -2721,6 +3291,25 @@ async function resolveDamagingMove(
     battle.lockedMoves = lockedMovesMap;
     battle.markModified('lockedMoves');
   }
+
+  // Recharge moves (milestone 5.14 Wave 5) — applies once per use, regardless of
+  // hit/miss/Protect, hence placed here rather than inside the per-target loop above.
+  // The actual skip is enforced in autoSkipBlockedActors via the 'must-recharge'
+  // volatile, same shape as the flinch/status-block checks already there.
+  if (RECHARGE_MOVES.has(entry.moveId)) {
+    await Pokemon.updateOne({ _id: entry.activePokemonId }, { $push: { volatileStatus: { condition: 'must-recharge', turnsRemaining: 0 } } });
+  }
+
+  // Self-KO utility (milestone 5.14 Wave 10) — Explosion/Self-Destruct/Misty
+  // Explosion/Memento all reach here via the normal foe-targeting damaging-move path
+  // (Memento's stat-drop already fires earlier in the per-target loop above, from
+  // Wave 1); the user faints unconditionally afterward, same "applies once per use"
+  // placement as recharge above. Healing Wish/Lunar Dance are self-targeting and
+  // handled in resolveSelfTargetMove instead — never reach this function.
+  if (SELF_KO_MOVES.has(entry.moveId) && atkSnap) {
+    await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: 0 } });
+    moveEvents.push(`${pokeDisplayName(atkSnap, atkSnapCache)} used up all its energy!`);
+  }
 }
 
 export async function sendOut(req: Request, res: Response): Promise<void> {
@@ -2762,7 +3351,11 @@ export async function sendOut(req: Request, res: Response): Promise<void> {
   if (!alreadyUsed) playerEntry.usedPokemonIds.push(pokeId);
 
   const entryEvents = await applyEntryAbilities(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy');
-  appendToLog(battle, ...entryEvents);
+  const hazardEvents = await applyEntryHazards(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy');
+  const wishEvents = await applyPendingWish(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy');
+  const faintEvents = await applyFaints(battle);
+  const endEvents = await checkBattleEnd(battle);
+  appendToLog(battle, ...entryEvents, ...hazardEvents, ...wishEvents, ...faintEvents, ...endEvents);
   battle.lastUpdatedAt = new Date();
   await battle.save();
   // Direct update for activeSentOutOnTurn — bypasses Mongoose subdocument tracking.
@@ -3052,8 +3645,11 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
       const defendingSide = actingSide === 'playerSide' ? 'enemySide' : 'playerSide';
       const fieldConds = (battle.fieldConditions ?? []) as Array<{ condition: string; turnsRemaining: number }>;
       const sideGuard = {
-        wideGuard:  fieldConds.some(f => f.condition === `wide-guard:${defendingSide}`),
-        quickGuard: fieldConds.some(f => f.condition === `quick-guard:${defendingSide}`),
+        wideGuard:   fieldConds.some(f => f.condition === `wide-guard:${defendingSide}`),
+        quickGuard:  fieldConds.some(f => f.condition === `quick-guard:${defendingSide}`),
+        reflect:     fieldConds.some(f => f.condition === `reflect:${defendingSide}`),
+        lightScreen: fieldConds.some(f => f.condition === `light-screen:${defendingSide}`),
+        auroraVeil:  fieldConds.some(f => f.condition === `aurora-veil:${defendingSide}`),
       };
       await resolveDamagingMove(battle, currentEntry as unknown as ActiveEntry, effectiveTargets, targetHpMap, enduringTargets, protectingTargets, moveEvents, sideGuard, substituteTargets, resolvedMoveId);
     }
@@ -3277,7 +3873,11 @@ export async function dmSendOut(req: Request, res: Response): Promise<void> {
 
   npcEntry.activePokemonId = pokeId;
   const npcEntryEvents = await applyEntryAbilities(battle, pokeId, 'enemy');
-  appendToLog(battle, ...npcEntryEvents);
+  const npcHazardEvents = await applyEntryHazards(battle, pokeId, 'enemy');
+  const npcWishEvents = await applyPendingWish(battle, pokeId, 'enemy');
+  const npcFaintEvents = await applyFaints(battle);
+  const npcEndEvents = await checkBattleEnd(battle);
+  appendToLog(battle, ...npcEntryEvents, ...npcHazardEvents, ...npcWishEvents, ...npcFaintEvents, ...npcEndEvents);
   battle.lastUpdatedAt = new Date();
   await battle.save();
   await Battle.updateOne(
