@@ -5,7 +5,7 @@ import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { computeStats, BaseStats } from '../lib/statCalc';
 import { canEvolve, canEvolveWithItem } from '../lib/evolution';
-import { fetchSpecies } from '../lib/pokeapi';
+import { resolveEvolvedSpecies } from '../lib/evolutionResolve';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 import { EV_STAT_DISPLAY_NAMES, applyEvGain } from '../lib/evData';
 import { getIvsForOwner } from '../lib/trainerIv';
@@ -398,18 +398,8 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     });
     if (evolveIntoId !== null) {
       pokemon.speciesId = evolveIntoId;
-      let evolved = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
-      if (!evolved) {
-        try {
-          const fetched = await fetchSpecies(evolveIntoId);
-          const created = await PokedexCache.create(fetched);
-          evolved = created.toObject();
-        } catch { /* leave evolved null — name falls back below */ }
-      }
-      if (evolved?.baseStats) {
-        pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
-      }
-      const evolvedName = evolved ? (evolved.name as string) : 'a new form';
+      const { displayName: evolvedName, fullHp } = await resolveEvolvedSpecies(evolveIntoId, pokemon.level, pokemon.nature, pokemon.evs, ivs);
+      if (fullHp !== null) pokemon.currentHp = fullHp;
       message += ` ${pokemon.nickname ?? 'It'} evolved into ${evolvedName}!`;
     }
 
@@ -517,18 +507,8 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     // Same convention as Rare Candy's own evolution branch above: full-heal to
     // the new species' max HP on evolution (level-up itself is delta-based —
     // see the level_up branch — but an evolution step fully heals either way).
-    let evolved = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
-    if (!evolved) {
-      try {
-        const fetched = await fetchSpecies(evolveIntoId);
-        const created = await PokedexCache.create(fetched);
-        evolved = created.toObject();
-      } catch { /* leave evolved null — name falls back below */ }
-    }
-    if (evolved?.baseStats) {
-      pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
-    }
-    const evolvedName = evolved ? (evolved.name as string) : 'a new form';
+    const { displayName: evolvedName, fullHp } = await resolveEvolvedSpecies(evolveIntoId, pokemon.level, pokemon.nature, pokemon.evs, ivs);
+    if (fullHp !== null) pokemon.currentHp = fullHp;
     message = `${pokemon.nickname ?? 'It'} evolved into ${evolvedName}!`;
   }
 

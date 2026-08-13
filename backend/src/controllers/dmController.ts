@@ -13,11 +13,14 @@ import { isTmHmMove, TM_HM_MOVES } from '../lib/tmHmData';
 import { fetchSpecies } from '../lib/pokeapi';
 import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { canEvolve } from '../lib/evolution';
+import { resolveEvolvedSpecies } from '../lib/evolutionResolve';
+import { healPartyPokemon } from '../lib/healParty';
 import { slugToDisplayName } from '../lib/battleCalc';
 import { applyLevelUpLoop, getPlayerEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
 import { BADGE_CATALOG } from '../lib/badgeData';
 import { EV_STAT_CAP, EV_TOTAL_CAP, EV_STAT_DISPLAY_NAMES } from '../lib/evData';
 import { ivsFromSpread, getUnspentTrainerIv, getIvsForOwner } from '../lib/trainerIv';
+import { fixAllPokemonExp } from '../lib/fixPokemonExp';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -250,6 +253,26 @@ function resolveItemPocket(itemId: string, res: Response): string | null {
   return pocket;
 }
 
+// Shared by every give-item route (player/campaign/NPC) — the 1–99 cap matches
+// this project's item-quantity convention everywhere else.
+function assertValidGiveQuantity(quantity: number, res: Response): boolean {
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    sendError(res, 400, 'quantity must be an integer between 1 and 99');
+    return false;
+  }
+  return true;
+}
+
+// Shared by every give-money route (player/campaign) — deliberately not capped
+// like items, since money grants are commonly in the thousands.
+function assertValidMoneyAmount(amount: unknown, res: Response): amount is number {
+  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 1) {
+    sendError(res, 400, 'amount must be a positive integer');
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // DELETE /api/dm/players/:username/starter
 // Deletes all Pokémon belonging to the player so they can pick a new starter.
@@ -361,9 +384,7 @@ export async function givePlayerItem(req: Request, res: Response): Promise<void>
   if (!itemId?.trim()) {
     return sendError(res, 400, 'itemId is required');
   }
-  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
-    return sendError(res, 400, 'quantity must be an integer between 1 and 99');
-  }
+  if (!assertValidGiveQuantity(quantity, res)) return;
 
   const pocket = resolveItemPocket(itemId.trim(), res);
   if (!pocket) return;
@@ -396,9 +417,7 @@ export async function giveCampaignItem(req: Request, res: Response): Promise<voi
   if (!itemId?.trim()) {
     return sendError(res, 400, 'itemId is required');
   }
-  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
-    return sendError(res, 400, 'quantity must be an integer between 1 and 99');
-  }
+  if (!assertValidGiveQuantity(quantity, res)) return;
 
   const pocket = resolveItemPocket(itemId.trim(), res);
   if (!pocket) return;
@@ -434,9 +453,7 @@ export async function givePlayerMoney(req: Request, res: Response): Promise<void
   if (!username?.trim()) {
     return sendError(res, 400, 'username is required');
   }
-  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 1) {
-    return sendError(res, 400, 'amount must be a positive integer');
-  }
+  if (!assertValidMoneyAmount(amount, res)) return;
 
   const user = await assertCampaignPlayer(req.user!.userId, username.trim(), res);
   if (!user) return;
@@ -455,9 +472,7 @@ export async function givePlayerMoney(req: Request, res: Response): Promise<void
 export async function giveCampaignMoney(req: Request, res: Response): Promise<void> {
   const { amount } = req.body as { amount?: number };
 
-  if (typeof amount !== 'number' || !Number.isInteger(amount) || amount < 1) {
-    return sendError(res, 400, 'amount must be a positive integer');
-  }
+  if (!assertValidMoneyAmount(amount, res)) return;
 
   const campaign = await assertDmCampaign(req.user!.userId, res);
   if (!campaign) return;
@@ -833,20 +848,7 @@ export async function healNpc(req: Request, res: Response): Promise<void> {
     return sendOk(res, { message: 'This NPC has no Pokémon.' });
   }
 
-  const speciesIds = [...new Set(party.map(p => p.speciesId))];
-  const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
-  const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
-
-  await Promise.all(party.map(poke => {
-    const cache      = cacheMap.get(poke.speciesId);
-    const maxHp      = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ZERO_IVS).hp : poke.currentHp;
-    const fullMoves  = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
-      .map(m => ({ ...m, currentPP: m.maxPP }));
-    return Pokemon.updateOne(
-      { _id: poke._id },
-      { $set: { currentHp: maxHp, statusCondition: null, statusCounter: null, volatileStatus: [], moves: fullMoves } },
-    );
-  }));
+  await healPartyPokemon(party, ZERO_IVS);
 
   sendOk(res, { message: `${npc.name}'s party has been healed!` });
 }
@@ -875,9 +877,7 @@ export async function giveNpcItem(req: Request, res: Response): Promise<void> {
   if (!itemId?.trim()) {
     return sendError(res, 400, 'itemId is required');
   }
-  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
-    return sendError(res, 400, 'quantity must be an integer between 1 and 99');
-  }
+  if (!assertValidGiveQuantity(quantity, res)) return;
 
   const pocket = resolveItemPocket(itemId.trim(), res);
   if (!pocket) return;
@@ -899,26 +899,8 @@ export async function giveNpcItem(req: Request, res: Response): Promise<void> {
 // One-time migration: bumps any Pokémon below their level minimum EXP.
 // Safe to run multiple times.
 // ---------------------------------------------------------------------------
-export async function fixPokemonExp(req: Request, res: Response): Promise<void> {
-  const allPokemon = await Pokemon.find({}, '_id speciesId level exp').lean();
-
-  const speciesIds = [...new Set(allPokemon.map(p => p.speciesId))];
-  const caches = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId expGroup').lean();
-  const expGroupMap = new Map(
-    caches.map(c => [c.pokeApiId as number, (c.expGroup as string) || 'medium-fast']),
-  );
-
-  const toFix = allPokemon.filter(poke => {
-    const expGroup = expGroupMap.get(poke.speciesId) ?? 'medium-fast';
-    return poke.exp < expForLevel(poke.level, expGroup);
-  });
-
-  await Promise.all(toFix.map(poke => {
-    const expGroup = expGroupMap.get(poke.speciesId) ?? 'medium-fast';
-    return Pokemon.updateOne({ _id: poke._id }, { $set: { exp: expForLevel(poke.level, expGroup) } });
-  }));
-
-  sendOk(res, { fixed: toFix.length, total: allPokemon.length });
+export async function fixPokemonExp(_req: Request, res: Response): Promise<void> {
+  sendOk(res, await fixAllPokemonExp());
 }
 
 // ---------------------------------------------------------------------------
@@ -1407,20 +1389,10 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
 
   if (evolveIntoId !== null) {
     pokemon.speciesId = evolveIntoId;
-    let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
-    if (!evolvedCache) {
-      try {
-        const fetched  = await fetchSpecies(evolveIntoId);
-        const created  = await PokedexCache.create(fetched);
-        evolvedCache   = created.toObject();
-      } catch { /* leave null */ }
-    }
-    if (evolvedCache?.baseStats) {
-      pokemon.currentHp = computeStats(
-        evolvedCache.baseStats as BaseStats, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats, ivs,
-      ).hp;
-    }
-    const evolvedName = evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form';
+    const { displayName: evolvedName, fullHp } = await resolveEvolvedSpecies(
+      evolveIntoId, pokemon.level as number, pokemon.nature as string, pokemon.evs as BaseStats, ivs,
+    );
+    if (fullHp !== null) pokemon.currentHp = fullHp;
     events.push(`${displayName} evolved into ${evolvedName}!`);
   }
 

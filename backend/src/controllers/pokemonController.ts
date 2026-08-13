@@ -7,6 +7,7 @@ import { Item } from '../models/Item';
 import { computeStats, expForLevel, BaseStats } from '../lib/statCalc';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 import { getIvsForOwner } from '../lib/trainerIv';
+import { healPartyPokemon } from '../lib/healParty';
 import { moveIdFromTmItem } from '../lib/itemData';
 import { isTmHmMove } from '../lib/tmHmData';
 import { slugToDisplayName } from '../lib/battleCalc';
@@ -46,6 +47,37 @@ async function assertPokemonAccess(
     return null;
   }
   return pokemon;
+}
+
+// Renumbers a trainer's remaining party slots to run 1, 2, 3 … with no gaps —
+// called after a Pokémon leaves the party (withdraw or release) so the next
+// one added lands at the real next-open slot instead of colliding.
+async function compactPartySlots(ownerId: string | mongoose.Types.ObjectId): Promise<void> {
+  const remaining = await Pokemon.find({ ownerId, isInParty: true })
+    .select('_id')
+    .lean()
+    .sort({ partySlot: 1 });
+
+  await Promise.all(remaining.map((p, index) =>
+    Pokemon.updateOne({ _id: p._id }, { partySlot: index + 1 }),
+  ));
+}
+
+type MoveSlot = { moveId: string; currentPP: number; maxPP: number; ppUps: number };
+
+// Resolves a move's real max PP from the species' cached move-detail list, then
+// replaces one slot of `currentMoves` with the new move at that PP (PP Ups reset
+// to 0 — the boost is tied to the move, not the slot). Returns null if `slot` is
+// out of range for this Pokémon's actual move count. Shared by Move Reminder
+// (replaceMoveSlot) and TM/HM teaching (teachTmMove) — the two callers differ
+// only in how the new moveId was validated before reaching this point.
+function replaceMoveInSlot(
+  species: { moves?: unknown }, currentMoves: MoveSlot[], slot: number, moveId: string,
+): MoveSlot[] | null {
+  if (slot >= currentMoves.length) return null;
+  const moveDetail = ((species.moves ?? []) as { name: string; pp: number | null }[]).find(m => m.name === moveId);
+  const pp = moveDetail?.pp ?? 5;
+  return currentMoves.map((m, i) => i === slot ? { moveId, currentPP: pp, maxPP: pp, ppUps: 0 } : m);
 }
 
 type LeanPokemonDoc = {
@@ -218,16 +250,7 @@ export async function withdrawFromParty(req: Request, res: Response): Promise<vo
   }
 
   await Pokemon.updateOne({ _id: partyPokemonId }, { isInParty: false, partySlot: null });
-
-  // Compact remaining party slots so they run 1, 2, 3 … with no gaps
-  const remaining = await Pokemon.find({ ownerId: userId, isInParty: true })
-    .select('_id')
-    .lean()
-    .sort({ partySlot: 1 });
-
-  await Promise.all(remaining.map((p, index) =>
-    Pokemon.updateOne({ _id: p._id }, { partySlot: index + 1 }),
-  ));
+  await compactPartySlots(userId);
 
   sendOk(res, { ok: true });
 }
@@ -244,21 +267,8 @@ export async function healParty(req: Request, res: Response): Promise<void> {
     return sendOk(res, { message: 'Your party is already in great shape!' });
   }
 
-  const speciesIds = [...new Set(party.map(p => p.speciesId))];
-  const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats').lean();
-  const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
-  const ivs        = await getIvsForOwner(userId, 'player');
-
-  await Promise.all(party.map(poke => {
-    const cache      = cacheMap.get(poke.speciesId);
-    const maxHp      = cache ? computeStats(cache.baseStats as any, poke.level, poke.nature, poke.evs, ivs).hp : poke.currentHp;
-    const fullMoves  = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[])
-      .map(m => ({ ...m, currentPP: m.maxPP }));
-    return Pokemon.updateOne(
-      { _id: poke._id },
-      { $set: { currentHp: maxHp, statusCondition: null, statusCounter: null, volatileStatus: [], moves: fullMoves } },
-    );
-  }));
+  const ivs = await getIvsForOwner(userId, 'player');
+  await healPartyPokemon(party, ivs);
 
   sendOk(res, { message: 'Your Pokémon have been healed!' });
 }
@@ -295,22 +305,11 @@ export async function replaceMoveSlot(req: Request, res: Response): Promise<void
     return sendError(res, 400, "Move not available at this Pokémon's level");
   }
 
-  type MoveRecord = { name: string; pp: number | null };
-  const moveDetail = ((species.moves ?? []) as MoveRecord[]).find(m => m.name === moveId);
-  const pp = moveDetail?.pp ?? 5;
-
-  type MoveSlot = { moveId: string; currentPP: number; maxPP: number; ppUps: number };
   const currentMoves = (pokemon.moves ?? []) as MoveSlot[];
-
-  if ((slot as number) >= currentMoves.length) {
+  const newMoves = replaceMoveInSlot(species, currentMoves, slot as number, moveId);
+  if (!newMoves) {
     return sendError(res, 400, `No move in slot ${slot}`);
   }
-
-  // A newly learned move starts with no PP Up bonus, even if it's replacing
-  // a move that had one — the boost is tied to the move, not the slot.
-  const newMoves: MoveSlot[] = currentMoves.map((m, i) =>
-    i === (slot as number) ? { moveId: moveId as string, currentPP: pp, maxPP: pp, ppUps: 0 } : m,
-  );
 
   await Pokemon.updateOne({ _id: pokemon._id }, { moves: newMoves });
   sendOk(res, { moves: newMoves });
@@ -363,20 +362,11 @@ export async function teachTmMove(req: Request, res: Response): Promise<void> {
     return sendError(res, 400, `${slugToDisplayName(species.name)} can't learn this move via TM/HM`);
   }
 
-  type MoveRecord = { name: string; pp: number | null };
-  const moveDetail = ((species.moves ?? []) as MoveRecord[]).find(m => m.name === moveId);
-  const pp = moveDetail?.pp ?? 5;
-
-  type MoveSlot = { moveId: string; currentPP: number; maxPP: number; ppUps: number };
   const currentMoves = (pokemon.moves ?? []) as MoveSlot[];
-
-  if ((slot as number) >= currentMoves.length) {
+  const newMoves = replaceMoveInSlot(species, currentMoves, slot as number, moveId);
+  if (!newMoves) {
     return sendError(res, 400, `No move in slot ${slot}`);
   }
-
-  const newMoves: MoveSlot[] = currentMoves.map((m, i) =>
-    i === (slot as number) ? { moveId, currentPP: pp, maxPP: pp, ppUps: 0 } : m,
-  );
 
   // No item deduction here — TM/HM items are reusable, unlike every other bag item.
   await Pokemon.updateOne({ _id: pokemon._id }, { moves: newMoves });
@@ -509,16 +499,8 @@ export async function releasePokemon(req: Request, res: Response): Promise<void>
     await Npc.updateOne({ party: id }, { $pull: { party: new mongoose.Types.ObjectId(id) } });
   }
 
-  // Compact party slots so they run 1, 2, 3 … with no gaps
   if (isInParty) {
-    const remaining = await Pokemon.find({ ownerId, isInParty: true })
-      .select('_id')
-      .lean()
-      .sort({ partySlot: 1 });
-
-    await Promise.all(remaining.map((p, index) =>
-      Pokemon.updateOne({ _id: p._id }, { partySlot: index + 1 }),
-    ));
+    await compactPartySlots(ownerId);
   }
 
   sendOk(res, { ok: true });

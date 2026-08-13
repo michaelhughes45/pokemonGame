@@ -4,9 +4,9 @@ import { User } from '../models/User';
 import { Campaign } from '../models/Campaign';
 import { Pokemon } from '../models/Pokemon';
 import { computeStats, expForLevel, BaseStats } from './statCalc';
-import { slugToDisplayName, pokeDisplayName } from './battleCalc';
+import { pokeDisplayName } from './battleCalc';
 import { canEvolve } from './evolution';
-import { fetchSpecies } from './pokeapi';
+import { resolveEvolvedSpecies } from './evolutionResolve';
 import { getIvsForOwner } from './trainerIv';
 
 export const BASE_LEVEL_CAP = 6;
@@ -80,15 +80,9 @@ export async function applyLevelUpLoop(params: {
 
     const evolveIntoId = await canEvolve({ speciesId, level, evolutionOverrides: params.evolutionOverrides });
     if (evolveIntoId !== null) {
-      let evolvedCache = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
-      if (!evolvedCache) {
-        try {
-          const fetched = await fetchSpecies(evolveIntoId);
-          evolvedCache = (await PokedexCache.create(fetched)).toObject();
-        } catch { /* skip */ }
-      }
-      if (evolvedCache?.baseStats) currentHp = computeStats(evolvedCache.baseStats as BaseStats, level, nature, evs, ivs).hp;
-      events.push(`${displayName} evolved into ${evolvedCache ? slugToDisplayName(evolvedCache.name as string) : 'a new form'}!`);
+      const { displayName: evolvedName, fullHp } = await resolveEvolvedSpecies(evolveIntoId, level, nature, evs, ivs);
+      if (fullHp !== null) currentHp = fullHp;
+      events.push(`${displayName} evolved into ${evolvedName}!`);
       speciesId = evolveIntoId;
     }
   }

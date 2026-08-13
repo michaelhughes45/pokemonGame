@@ -9,7 +9,7 @@ import { Encounter } from '../models/Encounter';
 import { Battle } from '../models/Battle';
 import { Item } from '../models/Item';
 import { fetchSpecies } from '../lib/pokeapi';
-import { expForLevel } from '../lib/statCalc';
+import { fixAllPokemonExp } from '../lib/fixPokemonExp';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -38,26 +38,7 @@ export function ping(_req: Request, res: Response): void {
 // Safe to run multiple times — only touches Pokémon that still need fixing.
 // ---------------------------------------------------------------------------
 export async function fixPokemonExp(_req: Request, res: Response): Promise<void> {
-  const allPokemon = await Pokemon.find({}, '_id speciesId level exp').lean();
-
-  const speciesIds = [...new Set(allPokemon.map(p => p.speciesId))];
-  const caches = await PokedexCache.find(
-    { pokeApiId: { $in: speciesIds } },
-    'pokeApiId expGroup',
-  ).lean();
-  const expGroupMap = new Map(
-    caches.map(c => [c.pokeApiId as number, (c.expGroup as string) || 'medium-fast']),
-  );
-
-  const toFix = allPokemon
-    .map(p => ({ ...p, minExp: expForLevel(p.level, expGroupMap.get(p.speciesId) ?? 'medium-fast') }))
-    .filter(p => p.exp < p.minExp);
-
-  await Promise.all(toFix.map(p =>
-    Pokemon.updateOne({ _id: p._id }, { $set: { exp: p.minExp } }),
-  ));
-
-  sendOk(res, { fixed: toFix.length, total: allPokemon.length });
+  sendOk(res, await fixAllPokemonExp());
 }
 
 // ---------------------------------------------------------------------------

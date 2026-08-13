@@ -22,6 +22,44 @@ async function findActiveCampaignByDm(userId: string) {
   return Campaign.findOne({ dmId: userId, isActive: true });
 }
 
+// Shared prefix for every campaign-flag toggle route (level cap, field mode,
+// hidden abilities): validates the request body's `enabled` boolean and loads
+// the calling DM's active campaign. Returns null (having already sent the
+// error response) when either check fails, so callers just `if (!loaded) return;`.
+async function loadCampaignForFlagToggle(req: Request, res: Response) {
+  const { userId } = req.user!;
+  const { enabled } = req.body as { enabled?: boolean };
+
+  if (typeof enabled !== 'boolean') {
+    sendError(res, 400, 'enabled must be a boolean');
+    return null;
+  }
+
+  const campaign = await findActiveCampaignByDm(userId);
+  if (!campaign) {
+    sendError(res, 400, 'You do not have an active campaign');
+    return null;
+  }
+
+  return { enabled, campaign };
+}
+
+// Factory for the two campaign flags that are a plain "set the field, save,
+// echo it back" toggle with no side effects (unlike setLevelCapEnabled below,
+// which also replays banked exp — kept explicit rather than forced into this shape).
+function makeCampaignFlagToggle(field: 'fieldModeEnabled' | 'hiddenAbilitiesEnabled') {
+  return async function (req: Request, res: Response): Promise<void> {
+    const loaded = await loadCampaignForFlagToggle(req, res);
+    if (!loaded) return;
+    const { enabled, campaign } = loaded;
+
+    campaign[field] = enabled;
+    await campaign.save();
+
+    sendOk(res, { [field]: campaign[field] });
+  };
+}
+
 async function findUserByUsername(username: string) {
   return User.findOne({ username }).lean();
 }
@@ -288,17 +326,9 @@ export async function removePlayer(req: Request, res: Response): Promise<void> {
 // Body: { enabled: boolean }
 // ---------------------------------------------------------------------------
 export async function setLevelCapEnabled(req: Request, res: Response): Promise<void> {
-  const { userId } = req.user!;
-  const { enabled } = req.body as { enabled?: boolean };
-
-  if (typeof enabled !== 'boolean') {
-    return sendError(res, 400, 'enabled must be a boolean');
-  }
-
-  const campaign = await findActiveCampaignByDm(userId);
-  if (!campaign) {
-    return sendError(res, 400, 'You do not have an active campaign');
-  }
+  const loaded = await loadCampaignForFlagToggle(req, res);
+  if (!loaded) return;
+  const { enabled, campaign } = loaded;
 
   campaign.levelCapEnabled = enabled;
   await campaign.save();
@@ -322,46 +352,12 @@ export async function setLevelCapEnabled(req: Request, res: Response): Promise<v
 // (blocks players from /pc and /town — enforced client-side per route).
 // Body: { enabled: boolean }
 // ---------------------------------------------------------------------------
-export async function setFieldModeEnabled(req: Request, res: Response): Promise<void> {
-  const { userId } = req.user!;
-  const { enabled } = req.body as { enabled?: boolean };
-
-  if (typeof enabled !== 'boolean') {
-    return sendError(res, 400, 'enabled must be a boolean');
-  }
-
-  const campaign = await findActiveCampaignByDm(userId);
-  if (!campaign) {
-    return sendError(res, 400, 'You do not have an active campaign');
-  }
-
-  campaign.fieldModeEnabled = enabled;
-  await campaign.save();
-
-  sendOk(res, { fieldModeEnabled: campaign.fieldModeEnabled });
-}
+export const setFieldModeEnabled = makeCampaignFlagToggle('fieldModeEnabled');
 
 // ---------------------------------------------------------------------------
 // PATCH /api/campaigns/hidden-abilities
 // ---------------------------------------------------------------------------
-export async function setHiddenAbilitiesEnabled(req: Request, res: Response): Promise<void> {
-  const { userId } = req.user!;
-  const { enabled } = req.body as { enabled?: boolean };
-
-  if (typeof enabled !== 'boolean') {
-    return sendError(res, 400, 'enabled must be a boolean');
-  }
-
-  const campaign = await findActiveCampaignByDm(userId);
-  if (!campaign) {
-    return sendError(res, 400, 'You do not have an active campaign');
-  }
-
-  campaign.hiddenAbilitiesEnabled = enabled;
-  await campaign.save();
-
-  sendOk(res, { hiddenAbilitiesEnabled: campaign.hiddenAbilitiesEnabled });
-}
+export const setHiddenAbilitiesEnabled = makeCampaignFlagToggle('hiddenAbilitiesEnabled');
 
 // ---------------------------------------------------------------------------
 // GET /api/campaigns/shop-catalog

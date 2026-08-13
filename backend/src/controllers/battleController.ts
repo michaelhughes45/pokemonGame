@@ -9,7 +9,6 @@ import { Npc } from '../models/Npc';
 import { Item } from '../models/Item';
 import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smogon/calc';
-import { canEvolve } from '../lib/evolution';
 import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem, getPocket, getFlingPower, CHOICE_ITEMS } from '../lib/itemData';
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
@@ -977,7 +976,7 @@ async function forceOpponentSwitch(
   const enemyEntry  = !playerEntry ? battle.enemySide.find(e => e.activePokemonId?.toString() === targetId) : undefined;
   if (!playerEntry && !enemyEntry) return;
 
-  const { poke: outgoingDoc, cache: outgoingCache, name: outgoingName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+  const { name: outgoingName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
 
   let candidates: mongoose.Types.ObjectId[] = [];
   let usedPokemonIds: mongoose.Types.ObjectId[] | null = null; // non-null => pokemon-limit tracking applies
@@ -2355,7 +2354,7 @@ async function resolveWeatherMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry,
   weatherEffect: { weather: IBattle['weather']; startMessage: string }, moveEvents: string[],
 ): Promise<void> {
-  const { poke: attacker, cache: atkCache, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
+  const { poke: attacker, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
   const moveName     = slugToDisplayName(entry.moveId);
 
   const moveMeta = attacker ? await fetchMoveMeta(attacker.speciesId, entry.moveId) : undefined;
@@ -2751,7 +2750,7 @@ async function resolveSelfTargetMove(
 async function resolveAllyTargetMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, targetId: string, moveEvents: string[],
 ): Promise<void> {
-  const { poke: attacker, cache: atkCache, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
+  const { name: attackerName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
 
   const target = await Pokemon.findById(
     targetId, 'ownerId ownerType nickname speciesId currentHp nature level evs hasHiddenAbility volatileStatus',
@@ -2828,7 +2827,7 @@ async function resolveDamagingMove(
     // recorded by submitTarget under the resolved moveId — so a Copycat chain, or copying a
     // Metronome roll, picks up the real move, not the wrapper name). Fails with nothing to
     // copy yet, or a self-referential/nonsensical source.
-    const { poke: atkDoc, cache: atkCache, name: atkName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
+    const { name: atkName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
     const lastMove = battle.globalLastMoveUsed;
     if (!lastMove || lastMove === 'copycat' || lastMove === 'sketch' || lastMove === 'struggle') {
       moveEvents.push(`${atkName} used Copycat, but it failed!`);
@@ -2848,7 +2847,7 @@ async function resolveDamagingMove(
     // target with no queue entry to peek at), a non-move action, or a non-damaging move
     // (no cached base power) — matches the real restriction that Me First only works on
     // an opponent's about-to-be-used damaging move.
-    const { poke: atkDoc, cache: atkCache, name: atkName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
+    const { name: atkName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
     const targetId = targets[0];
     const targetQueueEntry = targetId
       ? battle.turnQueue.find(e => e.activePokemonId?.toString() === targetId && e.actionType === 'move' && !e.resolved && e.moveId)
@@ -2888,7 +2887,7 @@ async function resolveDamagingMove(
     if (isGhost && atkDoc && atkDocCache?.baseStats) {
       const targetId = targets[0];
       if (targetId) {
-        const { poke: tgtPoke, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId volatileStatus', 'name');
+        const { poke: tgtPoke, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId volatileStatus', 'name');
         if (((tgtPoke?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'cursed')) {
           moveEvents.push(`${tgtName} is already cursed!`);
         } else {
@@ -3109,7 +3108,7 @@ async function resolveDamagingMove(
     // the TARGET's type, Reflect Type copies the TARGET's type onto the USER. Neither
     // deals damage, same "custom branch + continue" shape as leech-seed/pain-split above.
     if (entry.moveId === 'soak') {
-      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
+      const { cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const currentTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
       if (currentTypes.length === 1 && currentTypes[0] === 'water') {
@@ -3123,7 +3122,7 @@ async function resolveDamagingMove(
     }
 
     if (entry.moveId === 'reflect-type') {
-      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
+      const { cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const targetTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
       (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()] = targetTypes;
@@ -3243,7 +3242,7 @@ async function resolveDamagingMove(
     }
 
     if (NO_DAMAGE_TRAP_MOVES.has(entry.moveId)) {
-      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId volatileStatus', 'name');
+      const { poke: tgt, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId volatileStatus', 'name');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const alreadyBound = ((tgt?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
       if (alreadyBound) {
@@ -3320,7 +3319,7 @@ async function resolveDamagingMove(
       // same tracking Copycat reads globally). Never consumes the copied move's PP; the normal
       // PP-deduction call after this function returns finds no 'sketch' slot left to decrement
       // once the swap below has happened, which is exactly the desired no-op.
-      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+      const { name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const lastMoveMap  = (battle.lastMoveByPokemon ?? {}) as Record<string, string>;
       const copiedMoveId = lastMoveMap[targetId];
@@ -3346,7 +3345,7 @@ async function resolveDamagingMove(
       // permanent. battle.mimicState snapshots the ORIGINAL Mimic slot's own data
       // (moveId/PP/ppUps) so it can be restored later, keyed by slotIndex since the
       // copied move's PP will drift independently while it's active.
-      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+      const { name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const lastMoveMap  = (battle.lastMoveByPokemon ?? {}) as Record<string, string>;
       const copiedMoveId = lastMoveMap[targetId];
