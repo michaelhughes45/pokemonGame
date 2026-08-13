@@ -29,9 +29,14 @@ const MoveSchema = new Schema(
 
 const EvolutionStepSchema = new Schema(
   {
-    speciesId:  { type: Number, required: true },
-    condition:  { type: String, default: '' }, // e.g. 'level-up', 'use-item'
-    value:      { type: String, default: '' }, // e.g. '16', 'fire-stone'
+    speciesId:     { type: Number, required: true },
+    condition:     { type: String, default: '' }, // e.g. 'level-up', 'use-item'
+    value:         { type: String, default: '' }, // e.g. '16', 'fire-stone'
+    // Added milestone 5.17c — see EvolutionStep in lib/pokeapi.ts for why these
+    // two exist. Old cached entries predate both and read as undefined/null,
+    // which canEvolveWithItem's stale-cache check (lib/evolution.ts) refreshes.
+    fromSpeciesId: { type: Number, default: null },
+    gender:        { type: Number, default: null },
   },
   { _id: false }
 );

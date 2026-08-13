@@ -66,6 +66,87 @@ export const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
   'silk-scarf':     'held_type',
   'metal-coat':     'held_type',
 
+  // ── Arceus type Plates (milestone 5.17a) ──────────────────────────────────
+  // Mechanically identical to the type-boost items above (1.2x same-type move
+  // power via @smogon/calc's own getItemBoostType) — one per non-Normal type,
+  // so they slot into the same held_type pocket rather than a new one.
+  'draco-plate':    'held_type', // Dragon
+  'dread-plate':    'held_type', // Dark
+  'earth-plate':    'held_type', // Ground
+  'fist-plate':     'held_type', // Fighting
+  'flame-plate':    'held_type', // Fire
+  'icicle-plate':   'held_type', // Ice
+  'insect-plate':   'held_type', // Bug
+  'iron-plate':     'held_type', // Steel
+  'meadow-plate':   'held_type', // Grass
+  'mind-plate':     'held_type', // Psychic
+  'pixie-plate':    'held_type', // Fairy
+  'sky-plate':      'held_type', // Flying
+  'splash-plate':   'held_type', // Water
+  'spooky-plate':   'held_type', // Ghost
+  'stone-plate':    'held_type', // Rock
+  'toxic-plate':    'held_type', // Poison
+  'zap-plate':      'held_type', // Electric
+
+  // ── Competitive held items (milestone 5.17b) ──────────────────────────────
+  // Separate pocket from held_type since these are battle-flow items (end-of-
+  // round effects, move-choice locking, one-time triggers), not pure damage-
+  // formula type boosters. Most of the damage-relevant ones (Choice items'
+  // 1.5x, Life Orb's 1.3x, Eviolite/Assault Vest's 1.5x defensive boost,
+  // Expert Belt's 1.2x) need no project code at all beyond this registration —
+  // @smogon/calc already applies them internally once heldItem reaches
+  // CalcPokemon (5.17a). DM-give-only, like Master Ball — not in the wild/NPC
+  // random-drop pool (rollHeldItem below), which stays scoped to the original
+  // 17 held_type items + mints.
+  'leftovers':      'held_battle',
+  'black-sludge':   'held_battle',
+  'choice-band':    'held_battle',
+  'choice-specs':   'held_battle',
+  'choice-scarf':   'held_battle',
+  'life-orb':       'held_battle',
+  'focus-sash':     'held_battle',
+  'assault-vest':   'held_battle',
+  'eviolite':       'held_battle',
+  'expert-belt':    'held_battle',
+
+  // ── Evolution items (milestone 5.17c) ─────────────────────────────────────
+  // Real PokeAPI 'use-item' evolution triggers, verified live against PokeAPI
+  // (not guessed) — each itemId is the exact slug PokeAPI's evolution_details
+  // uses, which is also exactly what canEvolveWithItem (lib/evolution.ts)
+  // matches against. King's Rock and other trade-required evolution items are
+  // deliberately excluded — this project has no trade system (same reasoning
+  // as every other trade-only mechanic being out of scope). Consumed on use,
+  // out-of-battle only, same convention as Rare Candy/mints — not "held".
+  'fire-stone':       'evolution',
+  'water-stone':      'evolution',
+  'thunder-stone':    'evolution',
+  'leaf-stone':       'evolution',
+  'moon-stone':       'evolution',
+  'sun-stone':        'evolution',
+  'shiny-stone':      'evolution',
+  'dusk-stone':       'evolution',
+  'dawn-stone':       'evolution', // gender-gated: Kirlia (male) / Snorunt (female) — see canEvolveWithItem
+  'ice-stone':        'evolution',
+  'sweet-apple':      'evolution',
+  'tart-apple':       'evolution',
+  'syrupy-apple':     'evolution',
+  'auspicious-armor': 'evolution',
+  'malicious-armor':  'evolution',
+
+  // ── Consumable battle stat-boosters (milestone 5.17d) ─────────────────────
+  // Real PokeAPI 'stat-boosts' item category. X items and Dire Hit raise 2
+  // stages (not the 1 stage PokeAPI's own generic effect_entries text still
+  // describes) — a Gen 6+ buff, same "pick the modern generation's numbers"
+  // judgment call already made for Exp. Share and TM/HM (see Key Decisions).
+  'x-attack':   'battle_boost',
+  'x-defense':  'battle_boost',
+  'x-sp-atk':   'battle_boost',
+  'x-sp-def':   'battle_boost',
+  'x-speed':    'battle_boost',
+  'x-accuracy': 'battle_boost',
+  'dire-hit':   'battle_boost',
+  'guard-spec': 'battle_boost',
+
   // ── Poké Balls ────────────────────────────────────────────────────────────
   'poke-ball':      'pokeballs',
   'great-ball':     'pokeballs',
@@ -194,13 +275,11 @@ export function rollHeldItem(includeMints: boolean): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Fling base power (milestone 5.14 Wave 12) — real values sourced from
-// Bulbapedia/Serebii's Fling item-power tables, verified per-item (never
-// guessed) same as every other real-item value in this project. Only the 17
-// held_type items are covered, since heldItem is only ever populated with one
-// of those (or a mint) by this project's item system. Poison Barb additionally
-// poisons the target on a successful Fling hit — the one real Fling secondary
-// effect among the items this project supports.
+// Fling base power (milestone 5.14 Wave 12; Plates added 5.17a) — real values
+// sourced from Bulbapedia/Serebii's Fling item-power tables, verified per-item
+// (never guessed) same as every other real-item value in this project.
+// Poison Barb additionally poisons the target on a successful Fling hit — the
+// one real Fling secondary effect among the items this project supports.
 // ---------------------------------------------------------------------------
 
 export const FLING_POWER: Record<string, number> = {
@@ -221,7 +300,43 @@ export const FLING_POWER: Record<string, number> = {
   'dragon-fang':    70,
   'poison-barb':    70,
   'hard-stone':     100,
+  // Every type Plate shares the same real Fling power (Bulbapedia).
+  'draco-plate':    90,
+  'dread-plate':    90,
+  'earth-plate':    90,
+  'fist-plate':     90,
+  'flame-plate':    90,
+  'icicle-plate':   90,
+  'insect-plate':   90,
+  'iron-plate':     90,
+  'meadow-plate':   90,
+  'mind-plate':     90,
+  'pixie-plate':    90,
+  'sky-plate':      90,
+  'splash-plate':   90,
+  'spooky-plate':   90,
+  'stone-plate':    90,
+  'toxic-plate':    90,
+  'zap-plate':      90,
+  // Competitive held items (milestone 5.17b) — real values from Bulbapedia,
+  // cross-checked against @smogon/calc's own Fling table.
+  'leftovers':      10,
+  'choice-band':    10,
+  'choice-specs':   10,
+  'choice-scarf':   10,
+  'focus-sash':     10,
+  'expert-belt':    10,
+  'black-sludge':   30,
+  'life-orb':       30,
+  'assault-vest':   80,
+  'eviolite':       40,
 };
+
+// Choice Band/Specs/Scarf (milestone 5.17b) — the 1.5x damage boost itself is
+// free from @smogon/calc once heldItem reaches CalcPokemon (5.17a); the
+// move-choice lock is this project's own code (see submitTarget in
+// battleController.ts), reusing this set to identify a Choice item by name.
+export const CHOICE_ITEMS = new Set(['choice-band', 'choice-specs', 'choice-scarf']);
 
 // Mints are a project-invented item type (Key Decision, milestone 5.12) with no
 // real Fling value to source — flat low fallback, same "no real equivalent, flat
@@ -243,7 +358,17 @@ export type BattleItemEffect =
   | { kind: 'hp_full' }
   | { kind: 'hp_full_cure' }
   | { kind: 'revive';       amount: 'half' | 'full' }
-  | { kind: 'status_cure';  cures: string[] | 'all' };
+  | { kind: 'status_cure';  cures: string[] | 'all' }
+  // X items (milestone 5.17d) — stat is one of StatStages' keys (atk/def/spa/
+  // spd/spe/acc); target is always the item's own recipient (self).
+  | { kind: 'stat_stage';   stat: 'atk' | 'def' | 'spa' | 'spd' | 'spe' | 'acc'; stages: number }
+  // Dire Hit — identical effect to the move Focus Energy (+2 crit stages),
+  // reuses that exact volatile so all existing crit-stage logic applies for free.
+  | { kind: 'crit_boost' }
+  // Guard Spec — identical effect to the move Mist for the WHOLE team (5
+  // turns), reuses that exact fieldConditions entry so all existing Mist
+  // logic (blocks incoming negative stat changes) applies for free.
+  | { kind: 'guard_spec' };
 
 export const BATTLE_ITEM_EFFECTS: Record<string, BattleItemEffect> = {
   'potion':         { kind: 'hp_flat',     amount: 20 },
@@ -270,6 +395,16 @@ export const BATTLE_ITEM_EFFECTS: Record<string, BattleItemEffect> = {
   'poke-flute':     { kind: 'status_cure', cures: ['sleep'] },
   'blue-flute':     { kind: 'status_cure', cures: ['sleep'] },
   'green-flute':    { kind: 'status_cure', cures: ['sleep'] },
+
+  // ── Consumable battle stat-boosters (milestone 5.17d) ─────────────────────
+  'x-attack':   { kind: 'stat_stage', stat: 'atk', stages: 2 },
+  'x-defense':  { kind: 'stat_stage', stat: 'def', stages: 2 },
+  'x-sp-atk':   { kind: 'stat_stage', stat: 'spa', stages: 2 },
+  'x-sp-def':   { kind: 'stat_stage', stat: 'spd', stages: 2 },
+  'x-speed':    { kind: 'stat_stage', stat: 'spe', stages: 2 },
+  'x-accuracy': { kind: 'stat_stage', stat: 'acc', stages: 2 },
+  'dire-hit':   { kind: 'crit_boost' },
+  'guard-spec': { kind: 'guard_spec' },
 };
 
 // ---------------------------------------------------------------------------

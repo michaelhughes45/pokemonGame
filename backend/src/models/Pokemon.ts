@@ -97,7 +97,12 @@ const PokemonSchema = new Schema<IPokemon>(
     evolutionOverrides: [
       {
         condition: { type: String, required: true },
-        value:     { type: String, required: true },
+        // NOT required — the 'prevent' override (blockEvolution, dmController.ts)
+        // has always pushed value: '' by design (there's nothing to store), but
+        // Mongoose's default String required validator rejects an empty string as
+        // "missing," which silently 500'd this endpoint every time it was ever
+        // actually called. Found live while verifying milestone 5.17c.
+        value:     { type: String, default: '' },
         _id:       false,
       },
     ],

@@ -6,6 +6,9 @@ export type ItemPocket =
   | 'pp_recovery'
   | 'stat_booster'
   | 'held_type'
+  | 'held_battle'
+  | 'evolution'
+  | 'battle_boost'
   | 'pokeballs'
   | 'escape'
   | 'berry'
@@ -28,7 +31,7 @@ const ItemSchema = new Schema<IItem>(
     quantity:  { type: Number, required: true, min: 1 },
     pocket:    {
       type: String,
-      enum: ['healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry', 'tm_hm', 'mint'],
+      enum: ['healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'held_battle', 'evolution', 'battle_boost', 'pokeballs', 'escape', 'berry', 'tm_hm', 'mint'],
       required: true,
     },
   },

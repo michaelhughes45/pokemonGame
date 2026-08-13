@@ -74,6 +74,7 @@ export type PendingAttack = {
   attackerEvs: Record<string, number>;
   attackerIvs: Record<string, number>;
   attackerAbilitySlug: string | null;
+  attackerHeldItem: string | null;
 };
 
 // Mimic (milestone 5.14 Wave 13) — unlike Sketch's permanent overwrite, Mimic's move-
@@ -317,6 +318,7 @@ const BattleSchema = new Schema<IBattle>(
         attackerEvs:         { type: Schema.Types.Mixed, required: true },
         attackerIvs:         { type: Schema.Types.Mixed, required: true },
         attackerAbilitySlug: { type: String, default: null },
+        attackerHeldItem:    { type: String, default: null },
         _id:                 false,
       },
     ],

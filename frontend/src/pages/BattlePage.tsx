@@ -408,7 +408,7 @@ export default function BattlePage() {
       .then(res => {
         const all: BagItem[] = res.data.data ?? [];
         setBagItems(all.filter(i =>
-          i.pocket === 'healing' || i.pocket === 'status_cure' || i.pocket === 'pokeballs'
+          i.pocket === 'healing' || i.pocket === 'status_cure' || i.pocket === 'pokeballs' || i.pocket === 'battle_boost'
           || (i.pocket === 'berry' && !EV_BERRIES.has(i.itemId))
         ));
       })
@@ -1605,7 +1605,7 @@ export default function BattlePage() {
                                     <p className="text-sm text-muted-foreground">Loading bag…</p>
                                   ) : (() => {
                                     const battleItems = (npcBags[npcId] ?? []).filter(
-                                      i => i.pocket === 'healing' || i.pocket === 'status_cure'
+                                      i => i.pocket === 'healing' || i.pocket === 'status_cure' || i.pocket === 'battle_boost'
                                         || (i.pocket === 'berry' && !EV_BERRIES.has(i.itemId)),
                                     );
                                     const selectedItemId = npcSelectedItem[slotKey] ?? null;

@@ -58,6 +58,31 @@ export function toCalcIvs(ivs: BaseStats) {
   return { hp: ivs.hp, atk: ivs.atk, def: ivs.def, spa: ivs.spatk, spd: ivs.spdef, spe: ivs.speed };
 }
 
+// A handful of real item names don't survive the naive slug-to-title split
+// (e.g. "never-melt-ice" needs to stay hyphenated as "Never-Melt Ice", not
+// become "Never Melt Ice") — everything else converts cleanly the same way
+// move/ability slugs do.
+const ITEM_NAME_OVERRIDES: Record<string, string> = {
+  'never-melt-ice': 'Never-Melt Ice',
+};
+
+// Milestone 5.17a — maps our stored heldItem slug to the exact display name
+// @smogon/calc's own item table expects (checked directly against the
+// library's data/items.ts, not guessed). Passing this into CalcPokemon is
+// what actually activates type-boost items (Charcoal, the type Plates, etc.)
+// and — once competitive held items land in 5.17b — everything else the
+// library already knows how to apply (Choice items, Life Orb, Eviolite,
+// Assault Vest, and so on) for free, with zero extra project code needed for
+// any item @smogon/calc's damage formula already understands.
+export function toCalcItem(itemId: string | null | undefined): string | undefined {
+  // Mints (milestone 5.12) can be held as loot but have no passive effect while
+  // merely held — they're not a real item @smogon/calc's table would recognise
+  // anyway, but this keeps the intent explicit rather than relying on the
+  // library silently ignoring an unmatched name.
+  if (!itemId || itemId.startsWith('mint-')) return undefined;
+  return ITEM_NAME_OVERRIDES[itemId] ?? slugToDisplayName(itemId);
+}
+
 // Convert a PokeAPI slug to a display name. "ice-beam" → "Ice Beam"
 export function slugToDisplayName(slug: string): string {
   return slug.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');

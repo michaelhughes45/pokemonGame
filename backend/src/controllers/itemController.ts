@@ -4,12 +4,12 @@ import { Item } from '../models/Item';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { computeStats, BaseStats } from '../lib/statCalc';
-import { canEvolve } from '../lib/evolution';
+import { canEvolve, canEvolveWithItem } from '../lib/evolution';
 import { fetchSpecies } from '../lib/pokeapi';
 import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 import { EV_STAT_DISPLAY_NAMES, applyEvGain } from '../lib/evData';
 import { getIvsForOwner } from '../lib/trainerIv';
-import { natureFromMintItem } from '../lib/itemData';
+import { natureFromMintItem, getPocket } from '../lib/itemData';
 
 // ---------------------------------------------------------------------------
 // Item effect table
@@ -32,6 +32,7 @@ type ItemEffect =
   | { kind: 'ev_reduce'; stat: keyof BaseStats; amount: number } // EV-reducing berries
   | { kind: 'pp_up';     amount: 1 | 3 } // PP Up (+1 use, cap 3) / PP Max (straight to 3)
   | { kind: 'held_item' }    // Equip as held item on a Pokémon
+  | { kind: 'evolution_item' } // Fire Stone, Sweet Apple, etc. — trigger a use-item evolution
   | { kind: 'nature_change'; nature: string } // Mints — overwrite nature outright
   | { kind: 'escape_rope' }  // Consumed immediately, no Pokémon target needed
   | { kind: 'battle_only' }; // Pokéballs only
@@ -109,6 +110,54 @@ const ITEM_EFFECTS: Record<string, ItemEffect> = {
   'black-glasses':  { kind: 'held_item' },
   'silk-scarf':     { kind: 'held_item' },
   'metal-coat':     { kind: 'held_item' },
+
+  // ── Arceus type Plates (milestone 5.17a) ──────────────────────────────────
+  'draco-plate':    { kind: 'held_item' },
+  'dread-plate':    { kind: 'held_item' },
+  'earth-plate':    { kind: 'held_item' },
+  'fist-plate':     { kind: 'held_item' },
+  'flame-plate':    { kind: 'held_item' },
+  'icicle-plate':   { kind: 'held_item' },
+  'insect-plate':   { kind: 'held_item' },
+  'iron-plate':     { kind: 'held_item' },
+  'meadow-plate':   { kind: 'held_item' },
+  'mind-plate':     { kind: 'held_item' },
+  'pixie-plate':    { kind: 'held_item' },
+  'sky-plate':      { kind: 'held_item' },
+  'splash-plate':   { kind: 'held_item' },
+  'spooky-plate':   { kind: 'held_item' },
+  'stone-plate':    { kind: 'held_item' },
+  'toxic-plate':    { kind: 'held_item' },
+  'zap-plate':      { kind: 'held_item' },
+
+  // ── Competitive held items (milestone 5.17b) ──────────────────────────────
+  'leftovers':      { kind: 'held_item' },
+  'black-sludge':   { kind: 'held_item' },
+  'choice-band':    { kind: 'held_item' },
+  'choice-specs':   { kind: 'held_item' },
+  'choice-scarf':   { kind: 'held_item' },
+  'life-orb':       { kind: 'held_item' },
+  'focus-sash':     { kind: 'held_item' },
+  'assault-vest':   { kind: 'held_item' },
+  'eviolite':       { kind: 'held_item' },
+  'expert-belt':    { kind: 'held_item' },
+
+  // ── Evolution items (milestone 5.17c) ─────────────────────────────────────
+  'fire-stone':       { kind: 'evolution_item' },
+  'water-stone':      { kind: 'evolution_item' },
+  'thunder-stone':    { kind: 'evolution_item' },
+  'leaf-stone':       { kind: 'evolution_item' },
+  'moon-stone':       { kind: 'evolution_item' },
+  'sun-stone':        { kind: 'evolution_item' },
+  'shiny-stone':      { kind: 'evolution_item' },
+  'dusk-stone':       { kind: 'evolution_item' },
+  'dawn-stone':       { kind: 'evolution_item' },
+  'ice-stone':        { kind: 'evolution_item' },
+  'sweet-apple':      { kind: 'evolution_item' },
+  'tart-apple':       { kind: 'evolution_item' },
+  'syrupy-apple':     { kind: 'evolution_item' },
+  'auspicious-armor': { kind: 'evolution_item' },
+  'malicious-armor':  { kind: 'evolution_item' },
 
   // ── Escape ─────────────────────────────────────────────────────────────────
   'escape-rope':    { kind: 'escape_rope' },
@@ -438,17 +487,49 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     const previousHeldItem = pokemon.heldItem;
     pokemon.heldItem = itemId;
 
-    // Return the old held item to the bag so it isn't lost
+    // Return the old held item to the bag so it isn't lost. Pocket must be
+    // looked up per-item (getPocket), not hardcoded to held_type — since
+    // milestone 5.17b this equip slot can also hold a held_battle item, and
+    // hardcoding would have misfiled it into the wrong bag tab on return.
     if (previousHeldItem) {
+      const previousPocket = getPocket(previousHeldItem) ?? 'held_type';
       await Item.findOneAndUpdate(
         { ownerId: userId, itemId: previousHeldItem },
-        { $inc: { quantity: 1 }, $setOnInsert: { pocket: 'held_type' } },
+        { $inc: { quantity: 1 }, $setOnInsert: { pocket: previousPocket } },
         { upsert: true },
       );
       message = `Equipped ${itemId}. ${previousHeldItem} was returned to your bag.`;
     } else {
       message = `Equipped ${itemId}.`;
     }
+
+  } else if (effect.kind === 'evolution_item') {
+    const evolveIntoId = await canEvolveWithItem({
+      speciesId:          pokemon.speciesId,
+      gender:             pokemon.gender,
+      evolutionOverrides: (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[],
+    }, itemId);
+    if (evolveIntoId === null) {
+      return sendError(res, 400, 'That Pokémon cannot evolve using this item.');
+    }
+
+    pokemon.speciesId = evolveIntoId;
+    // Same convention as Rare Candy's own evolution branch above: full-heal to
+    // the new species' max HP on evolution (level-up itself is delta-based —
+    // see the level_up branch — but an evolution step fully heals either way).
+    let evolved = await PokedexCache.findOne({ pokeApiId: evolveIntoId }).select('name baseStats').lean();
+    if (!evolved) {
+      try {
+        const fetched = await fetchSpecies(evolveIntoId);
+        const created = await PokedexCache.create(fetched);
+        evolved = created.toObject();
+      } catch { /* leave evolved null — name falls back below */ }
+    }
+    if (evolved?.baseStats) {
+      pokemon.currentHp = computeStats(evolved.baseStats, pokemon.level, pokemon.nature, pokemon.evs, ivs).hp;
+    }
+    const evolvedName = evolved ? (evolved.name as string) : 'a new form';
+    message = `${pokemon.nickname ?? 'It'} evolved into ${evolvedName}!`;
   }
 
   await pokemon.save();

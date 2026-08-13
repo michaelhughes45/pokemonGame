@@ -18,7 +18,18 @@ type Move = {
   effect: string; flavorText: string; target: string; implemented: boolean;
 };
 
-type EvolutionStep = { speciesId: number; condition: string; value: string };
+type EvolutionStep = {
+  speciesId: number; condition: string; value: string;
+  // Added milestone 5.17c for item-triggered evolution: fromSpeciesId identifies
+  // which species this step evolves FROM (the flat array otherwise loses that —
+  // canEvolve's level-up path gets away with a position-based approximation, but
+  // exact item matching needs the real edge). gender (PokeAPI convention: 1 =
+  // female, 2 = male) captures the one real extra condition among the evolution
+  // items this project supports (Dawn Stone: Kirlia needs male, Snorunt needs
+  // female) — null/absent means no gender requirement.
+  fromSpeciesId: number;
+  gender: number | null;
+};
 
 type LevelUpMove = { moveId: string; level: number };
 
@@ -57,12 +68,14 @@ function flattenEvolutionChain(chain: any): EvolutionStep[] {
   const steps: EvolutionStep[] = [];
 
   function walk(node: any) {
+    const fromSpeciesId = extractIdFromUrl(node.species.url);
     for (const next of node.evolves_to) {
       const speciesId = extractIdFromUrl(next.species.url);
       const detail = next.evolution_details[0]; // most pokemon have one trigger
 
       let condition = '';
       let value = '';
+      let gender: number | null = null;
 
       if (detail) {
         condition = detail.trigger.name; // 'level-up' | 'use-item' | 'trade' | etc.
@@ -71,13 +84,14 @@ function flattenEvolutionChain(chain: any): EvolutionStep[] {
           value = String(detail.min_level);
         } else if (detail.trigger.name === 'use-item' && detail.item) {
           value = detail.item.name;
+          gender = detail.gender ?? null;
         } else if (detail.trigger.name === 'trade' && detail.held_item) {
           value = detail.held_item.name;
         }
         // Additional trigger types can be handled here in later milestones
       }
 
-      steps.push({ speciesId, condition, value });
+      steps.push({ speciesId, condition, value, fromSpeciesId, gender });
       walk(next); // recurse for multi-stage evolutions (e.g. Bulba → Ivy → Venu)
     }
   }

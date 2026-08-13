@@ -15,7 +15,7 @@ const API = import.meta.env.VITE_API_URL;
 
 type ItemPocket =
   | 'healing' | 'status_cure' | 'pp_recovery'
-  | 'stat_booster' | 'held_type' | 'pokeballs' | 'escape' | 'berry' | 'tm_hm' | 'mint';
+  | 'stat_booster' | 'held_type' | 'held_battle' | 'evolution' | 'battle_boost' | 'pokeballs' | 'escape' | 'berry' | 'tm_hm' | 'mint';
 
 type BagItem = {
   _id: string;
@@ -46,6 +46,9 @@ const POCKET_LABEL: Record<ItemPocket, string> = {
   pp_recovery:  'PP Items',
   stat_booster: 'Vitamins',
   held_type:    'Held Items',
+  held_battle:  'Battle Items',
+  evolution:    'Evolution Items',
+  battle_boost: 'Battle Boosters',
   pokeballs:    'Poké Balls',
   escape:       'Escape',
   berry:        'Berries',
@@ -55,11 +58,11 @@ const POCKET_LABEL: Record<ItemPocket, string> = {
 
 // Canonical pocket display order, reused wherever pockets are sorted/matched.
 const POCKET_ORDER: ItemPocket[] = [
-  'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'pokeballs', 'escape', 'berry', 'tm_hm', 'mint',
+  'healing', 'status_cure', 'pp_recovery', 'stat_booster', 'held_type', 'held_battle', 'evolution', 'battle_boost', 'pokeballs', 'escape', 'berry', 'tm_hm', 'mint',
 ];
 
 // Pockets that cannot be used outside of battle (show a notice, skip targeting flow)
-const BATTLE_ONLY_POCKETS: ItemPocket[] = ['pokeballs'];
+const BATTLE_ONLY_POCKETS: ItemPocket[] = ['pokeballs', 'battle_boost'];
 
 // Pockets whose items are consumed directly with no Pokémon target needed
 const DIRECT_USE_POCKETS: ItemPocket[] = ['escape'];

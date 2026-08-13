@@ -10,7 +10,7 @@ import { Item } from '../models/Item';
 import { computeStats, expForLevel, BaseStats, NATURES, ZERO_EVS, ZERO_IVS } from '../lib/statCalc';
 import { calculate, Pokemon as CalcPokemon, Move as CalcMove, Field } from '@smogon/calc';
 import { canEvolve } from '../lib/evolution';
-import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem, getPocket, getFlingPower } from '../lib/itemData';
+import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem, getPocket, getFlingPower, CHOICE_ITEMS } from '../lib/itemData';
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
 import { ivsFromSpread, getIvsForOwner } from '../lib/trainerIv';
@@ -83,6 +83,7 @@ import {
   cap,
   toCalcEvs,
   toCalcIvs,
+  toCalcItem,
   appendToLog,
   getTypeEffectiveness,
   getEffectiveTypes,
@@ -540,16 +541,16 @@ async function checkStatusBlock(
   return { blocked: false, events: [] };
 }
 
-async function resolveItemAction(entry: TurnQueueEntry): Promise<string[]> {
+async function resolveItemAction(battle: HydratedDocument<IBattle>, entry: TurnQueueEntry): Promise<string[]> {
   const events: string[] = [];
   const { itemId, targets, actorId } = entry;
   if (!itemId || targets.length === 0) return events;
   const effect = BATTLE_ITEM_EFFECTS[itemId];
   if (!effect) return events;
   const targetId = targets[0];
-  const pokemon = await Pokemon.findById(targetId, 'ownerId ownerType nickname speciesId level nature currentHp statusCondition evs').lean();
+  const pokemon = await Pokemon.findById(targetId, 'ownerId ownerType nickname speciesId level nature currentHp statusCondition evs hasHiddenAbility volatileStatus').lean();
   if (!pokemon) return events;
-  const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId }, 'name baseStats').lean();
+  const cache = await PokedexCache.findOne({ pokeApiId: pokemon.speciesId }, 'name baseStats abilities').lean();
   const displayName = pokeDisplayName(pokemon, cache);
   const ivs = await getIvsForOwner(pokemon.ownerId, pokemon.ownerType);
   const maxHp = cache ? computeStats(cache.baseStats as BaseStats, pokemon.level, pokemon.nature, pokemon.evs as BaseStats, ivs).hp : pokemon.currentHp;
@@ -615,6 +616,54 @@ async function resolveItemAction(entry: TurnQueueEntry): Promise<string[]> {
       } else {
         await Pokemon.updateOne({ _id: targetId }, { $set: { statusCondition: null, statusCounter: null } });
         events.push(`${userName} used ${itemName} on ${displayName}! ${pokemon.statusCondition} was cured.`);
+        wasUsed = true;
+      }
+    }
+
+  } else if (effect.kind === 'stat_stage') {
+    // X items (milestone 5.17d) — always consumed on use, even at +6, matching
+    // the real games (unlike status_cure above, which project convention
+    // deliberately doesn't consume on a genuine no-op — X items are a real,
+    // narrower exception to that, and always-consume also sidesteps the
+    // Contrary-inverts-the-cap-direction edge case a "check the cap first"
+    // guard would otherwise need to handle).
+    const abilitySlugs = cache
+      ? getEffectiveAbilitySlugs(battle, targetId.toString(), (cache.abilities as CachedAbility[]) ?? [], pokemon.hasHiddenAbility as boolean)
+      : [];
+    const stageMap = battle.statStages as Record<string, StatStages>;
+    const statEvents = applyStatStageEffects(stageMap, targetId.toString(), [{ stat: effect.stat, stages: effect.stages, target: 'self' }], displayName, abilitySlugs);
+    battle.markModified('statStages');
+    events.push(`${userName} used ${itemName} on ${displayName}!`, ...statEvents);
+    wasUsed = true;
+
+  } else if (effect.kind === 'crit_boost') {
+    // Dire Hit — identical effect to the move Focus Energy (same volatile,
+    // same +2 crit-stage contribution already read by resolveMove).
+    const volStatus = (pokemon.volatileStatus as Array<{ condition: string }>) ?? [];
+    if (volStatus.some(v => v.condition === 'focus-energy')) {
+      events.push(`${userName} used ${itemName} on ${displayName}, but ${displayName} is already focusing!`);
+    } else {
+      await Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition: 'focus-energy', turnsRemaining: 99 } } });
+      events.push(`${userName} used ${itemName} on ${displayName}! ${displayName} is getting pumped!`);
+      wasUsed = true;
+    }
+
+  } else if (effect.kind === 'guard_spec') {
+    // Guard Spec — identical effect to the move Mist, applied to the WHOLE
+    // side (not just the recipient), same fieldConditions entry and 5-turn
+    // duration Mist already uses.
+    const side = resolveActingSide(battle, entry.activePokemonId);
+    if (!side) {
+      events.push(`${userName} used ${itemName}, but it had no effect!`);
+    } else {
+      const condition = `mist:${side}`;
+      const already = (battle.fieldConditions ?? []).some(f => f.condition === condition);
+      if (already) {
+        events.push(`${userName} used ${itemName}, but ${side === 'playerSide' ? 'your' : "the opposing"} side is already protected!`);
+      } else {
+        battle.fieldConditions.push({ condition, turnsRemaining: 5 });
+        battle.markModified('fieldConditions');
+        events.push(`${userName} used ${itemName}! ${userName}'s team ${MIST_MESSAGE}`);
         wasUsed = true;
       }
     }
@@ -1225,7 +1274,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
     const entry = battle.turnQueue[battle.currentTargetIndex];
 
     if (entry.actionType === 'item') {
-      const itemEvents = await resolveItemAction(entry as unknown as TurnQueueEntry);
+      const itemEvents = await resolveItemAction(battle, entry as unknown as TurnQueueEntry);
       appendToLog(battle, ...itemEvents);
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
@@ -1559,23 +1608,24 @@ async function resolveMove(
     // built-in species dex by name and would silently ignore any override this project
     // applies elsewhere (milestone 5.14 Wave 11) — same overrides mechanism already used
     // one line below for Metronome's power override.
-    const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, boosts: toBoosts(stages.attacker) as any, overrides: { types: attackerEffectiveTypes.map(cap) } as any });
-    const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: toCalcIvs(targetIvs), curHP: target.currentHp,   ability: targetAbilityName   as any, boosts: toBoosts(stages.target)   as any, overrides: { types: targetEffectiveTypes.map(cap) } as any });
+    const calcAttacker = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), { level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs as BaseStats), ivs: toCalcIvs(attackerIvs), curHP: attacker.currentHp, status: toCalcStatus(attacker.statusCondition) as any, ability: attackerAbilityName as any, item: toCalcItem(attacker.heldItem as string | null) as any, boosts: toBoosts(stages.attacker) as any, overrides: { types: attackerEffectiveTypes.map(cap) } as any });
+    const calcTarget   = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string),   { level: target.level,   nature: cap(target.nature)   as any, evs: toCalcEvs(target.evs as BaseStats),   ivs: toCalcIvs(targetIvs), curHP: target.currentHp,   ability: targetAbilityName   as any, item: toCalcItem(target.heldItem as string | null) as any,   boosts: toBoosts(stages.target)   as any, overrides: { types: targetEffectiveTypes.map(cap) } as any });
     // @smogon/calc has native Wonder Room (Def/SpDef swap) and Magic Room (held-item
-    // suppression) support via Field flags — no need to hand-roll either. Magic Room's
-    // flag is inert today since no held item is ever passed to CalcPokemon yet (5.16),
-    // but it'll suppress that for free once one is. It also has NATIVE fixed-damage
-    // support for Seismic Toss/Night Shade/Dragon Rage/Sonic Boom/Final Gambit
-    // (handleFixedDamageMoves + a dedicated Final Gambit branch in its own gen789
-    // mechanics) — no hand-rolling needed for those, they just flow through here now
-    // that the power:null guard above no longer blocks them (milestone 5.14 Wave 2).
+    // suppression) support via Field flags — no need to hand-roll either. Both are live
+    // now that a real held item reaches CalcPokemon (milestone 5.17a) — Magic Room's
+    // flag was inert before this since there was nothing for it to suppress. It also has
+    // NATIVE fixed-damage support for Seismic Toss/Night Shade/Dragon Rage/Sonic Boom/
+    // Final Gambit (handleFixedDamageMoves + a dedicated Final Gambit branch in its own
+    // gen789 mechanics) — no hand-rolling needed for those, they just flow through here
+    // now that the power:null guard above no longer blocks them (milestone 5.14 Wave 2).
     // Fling (milestone 5.14 Wave 12) needs a special dodge: @smogon/calc has its OWN
     // native `case 'Fling':` handling that recomputes basePower from attacker.item —
-    // completely ignoring overrides.basePower — and this project doesn't pass held
-    // items into CalcPokemon at all (deferred to 5.16), so that path would silently
-    // compute 0. Passing a neutral stand-in move name sidesteps the name-keyed special
-    // case entirely, while overrides.type/category still make sure Fling's own real
-    // type/category (not the stand-in's) are what the formula actually uses.
+    // completely ignoring overrides.basePower. This is moot for calcAttacker.item
+    // itself anyway (the item's already been cleared from the DB by the time this
+    // fresh fetch runs, see flingPowerOverride above), but the name-keyed special
+    // case would still zero out the move even so. Passing a neutral stand-in move
+    // name sidesteps it entirely, while overrides.type/category still make sure
+    // Fling's own real type/category (not the stand-in's) are what the formula uses.
     const calcMoveName = moveId === 'fling' ? 'Tackle' : moveName;
     const moveOverrides: Record<string, unknown> = {};
     if (powerOverride) moveOverrides.basePower = powerOverride;
@@ -1910,7 +1960,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
   ].filter((id): id is mongoose.Types.ObjectId => id != null);
 
   if (allActiveIds.length > 0) {
-    const activePokemons = await Pokemon.find({ _id: { $in: allActiveIds }, currentHp: { $gt: 0 } }, 'ownerId ownerType speciesId level nature currentHp statusCondition statusCounter nickname volatileStatus hasHiddenAbility evs').lean();
+    const activePokemons = await Pokemon.find({ _id: { $in: allActiveIds }, currentHp: { $gt: 0 } }, 'ownerId ownerType speciesId level nature currentHp statusCondition statusCounter nickname volatileStatus hasHiddenAbility evs heldItem').lean();
     const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
     const caches     = speciesIds.length > 0 ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name baseStats types abilities').lean() : [];
     const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
@@ -2030,11 +2080,13 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
             level: pa.attackerLevel, nature: cap(pa.attackerNature) as any,
             evs: toCalcEvs(pa.attackerEvs as unknown as BaseStats), ivs: toCalcIvs(pa.attackerIvs as unknown as BaseStats),
             ability: pa.attackerAbilitySlug ? (slugToDisplayName(pa.attackerAbilitySlug) as any) : undefined,
+            item: toCalcItem(pa.attackerHeldItem) as any,
           });
           const calcTarget = new CalcPokemon(GEN9, slugToDisplayName(tgtCache.name as string), {
             level: tgt.level, nature: cap(tgt.nature) as any, evs: toCalcEvs(tgt.evs as BaseStats), ivs: toCalcIvs(tgtIvs),
             curHP: tgtCurHp, status: toCalcStatus(tgt.statusCondition) as any,
             ability: tgtAbilitySlugs[0] ? (slugToDisplayName(tgtAbilitySlugs[0]) as any) : undefined,
+            item: toCalcItem(tgt.heldItem as string | null) as any,
           });
           const result = calculate(GEN9, calcAttacker, calcTarget, new CalcMove(GEN9, slugToDisplayName(pa.moveId)), new Field({}));
           const rolls  = Array.isArray(result.damage) ? result.damage : [result.damage];
@@ -2086,6 +2138,32 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
       }
       if (abilitySlugs.includes('shed-skin') && poke.statusCondition) {
         if (Math.random() < 1/3) { await Pokemon.updateOne({_id:poke._id},{$set:{statusCondition:null,statusCounter:null}}); allEvents.push(`${pokeName}'s Shed Skin! ${pokeName} shed its skin and cured its status!`); }
+      }
+    }
+
+    // Leftovers / Black Sludge (milestone 5.17b) — held-item end-of-round effects,
+    // same 1/16 maxHp fraction as Leftovers has always had; Black Sludge heals a
+    // Poison-type holder identically but damages anyone else instead. Deliberately
+    // a separate loop from the ability loop above rather than folded into it — that
+    // loop early-continues when a Pokémon has no active ability at all, which would
+    // wrongly skip an item-only holder.
+    for (const poke of activePokemons) {
+      if (!poke.heldItem || (poke.heldItem !== 'leftovers' && poke.heldItem !== 'black-sludge')) continue;
+      const cache = cacheMap.get(poke.speciesId); if (!cache) continue;
+      const pokeName = pokeDisplayName(poke, cache);
+      const maxHp    = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).hp;
+
+      if (poke.heldItem === 'leftovers') {
+        await applyFractionHeal(poke._id.toString(), poke._id, maxHp, 1/16, runningHp, `${pokeName}'s Leftovers`, allEvents);
+      } else if (((cache.types as string[]) ?? []).includes('poison')) {
+        await applyFractionHeal(poke._id.toString(), poke._id, maxHp, 1/16, runningHp, `${pokeName}'s Black Sludge`, allEvents);
+      } else {
+        const curHp = runningHp.get(poke._id.toString()) ?? poke.currentHp;
+        const dmg   = Math.max(1, Math.floor(maxHp / 8));
+        const newHp = Math.max(0, curHp - dmg);
+        runningHp.set(poke._id.toString(), newHp);
+        await Pokemon.updateOne({ _id: poke._id }, { $set: { currentHp: newHp } });
+        allEvents.push(`${pokeName} is hurt by its Black Sludge! (${dmg} damage, ${newHp} HP remaining)`);
       }
     }
 
@@ -2209,7 +2287,7 @@ export async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promis
   if (totalActors === 0 || battle.turnQueue.length < totalActors) return;
 
   const pokemonIds = battle.turnQueue.map(e => e.activePokemonId);
-  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'ownerId ownerType speciesId level nature statusCondition hasHiddenAbility evs').lean();
+  const pokemons   = await Pokemon.find({ _id: { $in: pokemonIds } }, 'ownerId ownerType speciesId level nature statusCondition hasHiddenAbility evs heldItem').lean();
   const speciesIds = [...new Set(pokemons.map(p => p.speciesId))];
   const caches     = await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId baseStats abilities').lean();
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
@@ -2231,7 +2309,11 @@ export async function checkAndAdvance(battle: HydratedDocument<IBattle>): Promis
     const rawSpeed = poke && cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, pokeIvs(poke)).speed : 0;
     const afterParalysis = poke?.statusCondition === 'paralysis' ? Math.floor(rawSpeed * 0.5) : rawSpeed;
     const weatherMatches = abilitySlugs.some(s => (WEATHER_SPEED_DOUBLERS[s] ?? []).includes(battle.weather ?? ''));
-    const speed = weatherMatches ? afterParalysis * 2 : afterParalysis;
+    const afterWeather = weatherMatches ? afterParalysis * 2 : afterParalysis;
+    // Choice Scarf (milestone 5.17b) — 1.5x Speed for turn-order purposes only;
+    // this never touches @smogon/calc, which doesn't use Speed in its damage
+    // formula at all. Stacks with a weather-doubling ability, same as the real games.
+    const speed = poke?.heldItem === 'choice-scarf' ? Math.floor(afterWeather * 1.5) : afterWeather;
     const pranksterBonus = abilitySlugs.includes('prankster') && PRANKSTER_MOVES.has(entry.moveId ?? '') ? 1 : 0;
     const movePriority   = (MOVE_PRIORITY[entry.moveId ?? ''] ?? 0) + pranksterBonus;
     return { entry, speed, movePriority };
@@ -2921,6 +3003,14 @@ async function resolveDamagingMove(
     moveEvents.push(`${atkName} flung its ${slugToDisplayName(flingItem)}!`);
   }
 
+  // Life Orb (milestone 5.17b) — 10% of the attacker's OWN max HP recoil once per
+  // move use, not once per target hit (unlike RECOIL_MOVES/DRAIN_MOVES below, which
+  // never needed this guard since every real recoil move is single-target). Declared
+  // outside the target loop so a spread move (Discharge, Earthquake, etc.) only
+  // recoils once. The 1.3x damage boost itself needs no code here — it's part of
+  // @smogon/calc's own formula once heldItem reaches CalcPokemon (5.17a).
+  let lifeOrbApplied = false;
+
   for (const targetId of targets) {
     if (FORCE_SWITCH_STATUS_MOVES.has(entry.moveId)) {
       // Roar/Whirlwind bypass accuracy checks entirely (modern-gen rule) and deal no damage.
@@ -2963,7 +3053,7 @@ async function resolveDamagingMove(
 
     if (OHKO_MOVES.has(entry.moveId) && atkSnap && atkSnapCache) {
       const atkName = pokeDisplayName(atkSnap, atkSnapCache);
-      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId level hasHiddenAbility', 'name types abilities');
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId level hasHiddenAbility heldItem nature evs ownerId ownerType', 'name types abilities baseStats');
       if (!tgt || !tgtCache) { moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`); continue; }
 
       const moveType = moveMeta?.type?.toLowerCase();
@@ -2984,10 +3074,20 @@ async function resolveDamagingMove(
           moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)} on ${tgtName}, but it missed!`);
         } else {
           const isEnduring = enduringTargets.has(targetId);
-          const newHp = isEnduring ? 1 : 0;
-          await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+          // Focus Sash (milestone 5.17b) — an OHKO move only ever "deals" the target's
+          // own current HP as damage, so full-HP is the only state that can ever be
+          // saved from here (a chipped target dying to an OHKO was never at full HP).
+          const currentHp = targetHpMap.get(targetId) ?? 0;
+          const tgtMaxHp  = tgtCache.baseStats
+            ? computeStats(tgtCache.baseStats as BaseStats, (tgt as any).level, (tgt as any).nature, (tgt as any).evs as BaseStats, await getIvsForOwner((tgt as any).ownerId, (tgt as any).ownerType)).hp
+            : null;
+          const hasFocusSash = !isEnduring && (tgt as any).heldItem === 'focus-sash' && tgtMaxHp != null && currentHp === tgtMaxHp;
+          const newHp = (isEnduring || hasFocusSash) ? 1 : 0;
+          const hpUpdate: Record<string, unknown> = { currentHp: newHp };
+          if (hasFocusSash) { hpUpdate.heldItem = null; hpUpdate.consumedHeldItem = 'focus-sash'; }
+          await Pokemon.updateOne({ _id: targetId }, { $set: hpUpdate });
           targetHpMap.set(targetId, newHp);
-          moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}! It's a one-hit KO!${isEnduring ? ` ${tgtName} endured the hit!` : ''}`);
+          moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}! It's a one-hit KO!${isEnduring ? ` ${tgtName} endured the hit!` : hasFocusSash ? ` ${tgtName} hung on using its Focus Sash!` : ''}`);
         }
       }
       continue;
@@ -3180,6 +3280,7 @@ async function resolveDamagingMove(
           attackerEvs: atkSnap.evs as unknown as Record<string, number>,
           attackerIvs: atkIvs as unknown as Record<string, number>,
           attackerAbilitySlug: attackerAbilitySlugs[0] ?? null,
+          attackerHeldItem: atkSnap.heldItem ?? null,
         };
         battle.pendingAttacks.push(pending);
         battle.markModified('pendingAttacks');
@@ -3282,6 +3383,18 @@ async function resolveDamagingMove(
       }
     }
 
+    // Focus Sash (milestone 5.17b) — fetched once per target here (not per hit) since
+    // heldItem/maxHp don't change mid-sequence; the "still at full HP" check itself is
+    // re-evaluated fresh on every hit below, which is what actually limits the save to
+    // the first hit of a multi-hit move.
+    const focusSashTgt = await Pokemon.findById(targetId, 'heldItem speciesId level nature evs ownerId ownerType').lean();
+    const focusSashCache = focusSashTgt?.heldItem === 'focus-sash'
+      ? await PokedexCache.findOne({ pokeApiId: focusSashTgt.speciesId }, 'baseStats').lean()
+      : null;
+    const focusSashMaxHp = focusSashTgt && focusSashCache?.baseStats
+      ? computeStats(focusSashCache.baseStats as BaseStats, focusSashTgt.level, focusSashTgt.nature, focusSashTgt.evs as BaseStats, await getIvsForOwner(focusSashTgt.ownerId, focusSashTgt.ownerType)).hp
+      : null;
+
     const hitCount  = getHitCount(entry.moveId);
     let totalDamage = 0; let actualHits = 0; let anyCrit = false;
 
@@ -3368,12 +3481,19 @@ async function resolveDamagingMove(
       if (damage > 0) {
         const currentHp  = targetHpMap.get(targetId) ?? 0;
         const isEnduring = enduringTargets.has(targetId);
+        // Focus Sash only saves from exactly full HP — re-checked against the CURRENT
+        // running HP on every hit, so a multi-hit move only gets saved on its first
+        // hit; by hit 2 currentHp no longer equals focusSashMaxHp and this is false.
+        const hasFocusSash = !isEnduring && focusSashMaxHp != null && currentHp === focusSashMaxHp;
         const rawNewHp   = currentHp - damage;
-        const newHp      = isEnduring && rawNewHp <= 0 ? 1 : Math.max(0, rawNewHp);
-        await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: newHp } });
+        const newHp      = (isEnduring || hasFocusSash) && rawNewHp <= 0 ? 1 : Math.max(0, rawNewHp);
+        const hpUpdate: Record<string, unknown> = { currentHp: newHp };
+        if (hasFocusSash && rawNewHp <= 0) { hpUpdate.heldItem = null; hpUpdate.consumedHeldItem = 'focus-sash'; }
+        await Pokemon.updateOne({ _id: targetId }, { $set: hpUpdate });
         targetHpMap.set(targetId, newHp);
         totalDamage += damage;
         if (isEnduring && rawNewHp <= 0) moveEvents.push('It endured the hit!');
+        else if (hasFocusSash && rawNewHp <= 0) moveEvents.push('It hung on using its Focus Sash!');
         if (category === 'physical' || category === 'special') {
           const damageMap = battle.damageTakenThisTurn as Record<string, { amount: number; category: string; attackerId: string }>;
           damageMap[targetId] = { amount: damage, category, attackerId: entry.activePokemonId.toString() };
@@ -3486,6 +3606,16 @@ async function resolveDamagingMove(
         atkSnap.currentHp = newAtkHp;
         moveEvents.push(`${pokeDisplayName(atkSnap, atkSnapCache)} restored ${restored} HP!`);
       }
+    }
+
+    if (!lifeOrbApplied && atkSnap?.heldItem === 'life-orb' && totalDamage > 0 && atkSnapCache?.baseStats) {
+      lifeOrbApplied = true;
+      const maxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp;
+      const recoilDmg = Math.max(1, Math.floor(maxHp / 10));
+      const newAtkHp  = Math.max(0, atkSnap.currentHp - recoilDmg);
+      await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: newAtkHp } });
+      atkSnap.currentHp = newAtkHp;
+      moveEvents.push(`${pokeDisplayName(atkSnap, atkSnapCache)} was hurt by its Life Orb!`);
     }
 
     const flinchChance = FLINCH_MOVES[entry.moveId];
@@ -3756,7 +3886,7 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
 
     const item = await Item.findOne({ ownerId: userId, itemId }).lean();
     if (!item)                                                      { res.status(400).json({ data: null, error: 'Item not found in your bag' }); return; }
-    if (item.pocket !== 'healing' && item.pocket !== 'status_cure' && item.pocket !== 'berry') { res.status(400).json({ data: null, error: 'That item cannot be used in battle' }); return; }
+    if (item.pocket !== 'healing' && item.pocket !== 'status_cure' && item.pocket !== 'berry' && item.pocket !== 'battle_boost') { res.status(400).json({ data: null, error: 'That item cannot be used in battle' }); return; }
 
     const targetObjId   = new mongoose.Types.ObjectId(targetPokemonId);
     const targetPokemon = await Pokemon.findOne({ _id: targetObjId, ownerId: userId, isInParty: true }).lean();
@@ -3976,6 +4106,27 @@ export async function submitTarget(req: Request, res: Response): Promise<void> {
     battle.lastMoveByPokemon = lastMoveMap;
     battle.markModified('lastMoveByPokemon');
     battle.globalLastMoveUsed = resolvedMoveId.value;
+
+    // Choice item lock (milestone 5.17b) — Choice Band/Specs/Scarf permanently lock
+    // the holder into whichever move they just used until they switch out. Reuses
+    // the same lockedMoves map LOCK_MOVES multi-turn moves (Outrage/Thrash/etc.)
+    // already write to, with the turnsRemaining:99 "persists until cleared"
+    // sentinel used elsewhere in this project — already cleaned up on switch-out/
+    // faint by the three existing lockedMoves deletion sites, no new cleanup code
+    // needed. Skipped whenever a lock entry already exists for this Pokémon this
+    // turn: a LOCK_MOVES-driven lock's own countdown must keep decrementing
+    // normally rather than being overwritten with a permanent one; once that
+    // countdown naturally expires, the next freely-chosen move re-locks on its own.
+    const lockKey = currentEntry.activePokemonId.toString();
+    const lockedMovesMap = (battle.lockedMoves ?? {}) as Record<string, { moveId: string; turnsRemaining: number }>;
+    if (!lockedMovesMap[lockKey]) {
+      const holder = await Pokemon.findById(currentEntry.activePokemonId, 'heldItem').lean();
+      if (holder?.heldItem && CHOICE_ITEMS.has(holder.heldItem)) {
+        lockedMovesMap[lockKey] = { moveId: resolvedMoveId.value, turnsRemaining: 99 };
+        battle.lockedMoves = lockedMovesMap;
+        battle.markModified('lockedMoves');
+      }
+    }
 
     await Pokemon.updateOne(
       { _id: currentEntry.activePokemonId, moves: { $elemMatch: { moveId: currentEntry.moveId, currentPP: { $gt: 0 } } } },
@@ -4309,11 +4460,11 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
 }
 
 async function estimateDamage(
-  attacker: { currentHp: number; nature: string; level: number; evs: BaseStats },
+  attacker: { currentHp: number; nature: string; level: number; evs: BaseStats; heldItem?: string | null },
   attackerCache: { name: unknown },
   attackerAbilitySlug: string | null,
   moveId: string,
-  target: { currentHp: number; nature: string; level: number; evs: BaseStats },
+  target: { currentHp: number; nature: string; level: number; evs: BaseStats; heldItem?: string | null },
   targetCache: { name: unknown },
   targetAbilitySlug: string | null,
   weather: string | null,
@@ -4324,10 +4475,12 @@ async function estimateDamage(
     const calcAtk = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), {
       level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs), ivs: toCalcIvs(attackerIvs),
       curHP: attacker.currentHp, ability: attackerAbilitySlug ? slugToDisplayName(attackerAbilitySlug) as any : undefined,
+      item: toCalcItem(attacker.heldItem) as any,
     });
     const calcTgt = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string), {
       level: target.level, nature: cap(target.nature) as any, evs: toCalcEvs(target.evs), ivs: toCalcIvs(targetIvs),
       curHP: target.currentHp, ability: targetAbilitySlug ? slugToDisplayName(targetAbilitySlug) as any : undefined,
+      item: toCalcItem(target.heldItem) as any,
     });
     const result = calculate(GEN9, calcAtk, calcTgt, new CalcMove(GEN9, slugToDisplayName(moveId)), new Field({ weather: toCalcWeather(weather as any) as any }));
     const rolls  = Array.isArray(result.damage) ? (result.damage as number[]) : [result.damage as number];
@@ -4357,7 +4510,7 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
     );
     if (alreadySubmitted) continue;
 
-    const poke = await Pokemon.findById(slot.activePokemonId, 'moves currentHp nature level speciesId hasHiddenAbility evs').lean();
+    const poke = await Pokemon.findById(slot.activePokemonId, 'moves currentHp nature level speciesId hasHiddenAbility evs heldItem').lean();
     if (!poke) continue;
 
     const movesWithPP = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[]).filter(m => m.currentPP > 0);
@@ -4396,7 +4549,7 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
       const atkAbility = atkCache ? (getEffectiveAbilitySlugs(battle, poke._id.toString(), atkCache.abilities as CachedAbility[], poke.hasHiddenAbility ?? false)[0] ?? null) : null;
 
       const targetPokes = activePlayerIds.length > 0
-        ? await Pokemon.find({ _id: { $in: activePlayerIds } }, 'currentHp nature level speciesId hasHiddenAbility evs').lean()
+        ? await Pokemon.find({ _id: { $in: activePlayerIds } }, 'currentHp nature level speciesId hasHiddenAbility evs heldItem').lean()
         : [];
       const tCaches = targetPokes.length > 0
         ? await PokedexCache.find({ pokeApiId: { $in: targetPokes.map(t => t.speciesId) } }, 'pokeApiId name abilities').lean()
