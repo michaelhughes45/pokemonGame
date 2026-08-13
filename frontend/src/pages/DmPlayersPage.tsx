@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -69,12 +70,6 @@ type Roster = {
 const selectClass =
   'w-full border border-input bg-background rounded-md px-3 py-2 text-sm min-h-11 ' +
   'focus:outline-none focus:ring-2 focus:ring-ring';
-
-function apiError(err: unknown, fallback: string) {
-  return axios.isAxiosError(err)
-    ? (err.response?.data?.error ?? fallback)
-    : fallback;
-}
 
 // ---------------------------------------------------------------------------
 // ExpBar

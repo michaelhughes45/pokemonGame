@@ -3,6 +3,8 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
 import { TYPE_BG } from '../lib/typeColors';
+import { apiError } from '../lib/apiError';
+import { formatItemName as formatName } from '../lib/formatName';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -89,18 +91,6 @@ function statBarColor(base: number): string {
   if (base < 50) return 'bg-red-500';
   if (base < 80) return 'bg-yellow-400';
   return 'bg-green-500';
-}
-
-// Capitalise and replace hyphens with spaces: "mr-mime" → "Mr Mime"
-function formatName(name: string): string {
-  if (name.startsWith('mint-')) {
-    const nature = name.slice(5);
-    return `${nature.charAt(0).toUpperCase() + nature.slice(1)} Mint`;
-  }
-  return name
-    .split('-')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
 }
 
 // Gender symbol
@@ -269,11 +259,7 @@ export default function PokemonDetailPage() {
       })
       .then(res => setPokemon(res.data.data))
       .catch(err => {
-        setError(
-          axios.isAxiosError(err)
-            ? (err.response?.data?.error ?? 'Failed to load Pokémon')
-            : 'Failed to load Pokémon'
-        );
+        setError(apiError(err, 'Failed to load Pokémon'));
       })
       .finally(() => setLoading(false));
   }, [id, token]);
@@ -316,11 +302,7 @@ export default function PokemonDetailPage() {
       );
       setReminderOpen(false);
     } catch (err) {
-      setReminderError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? 'Failed to change move')
-          : 'Failed to change move'
-      );
+      setReminderError(apiError(err, 'Failed to change move'));
     } finally {
       setReminderBusy(false);
     }
@@ -340,11 +322,7 @@ export default function PokemonDetailPage() {
       );
       navigate('/dashboard');
     } catch (err) {
-      setReleaseError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? 'Failed to release Pokémon')
-          : 'Failed to release Pokémon'
-      );
+      setReleaseError(apiError(err, 'Failed to release Pokémon'));
       setReleaseStep('confirm2');
     }
   }
@@ -365,11 +343,7 @@ export default function PokemonDetailPage() {
       setPokemon(prev => prev ? { ...prev, hasHiddenAbility: res.data.data.hasHiddenAbility } : prev);
       setHiddenAbilityMsg(res.data.data.hasHiddenAbility ? 'Using hidden ability.' : 'Using normal ability.');
     } catch (err) {
-      setHiddenAbilityMsg(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? 'Failed to update ability')
-          : 'Failed to update ability',
-      );
+      setHiddenAbilityMsg(apiError(err, 'Failed to update ability'));
     } finally {
       setHiddenAbilityBusy(false);
     }
@@ -401,11 +375,7 @@ export default function PokemonDetailPage() {
       });
       setOverrideMsg(isPrevented ? 'Evolution block lifted.' : 'Evolution blocked.');
     } catch (err) {
-      setOverrideMsg(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? 'Failed to update override')
-          : 'Failed to update override',
-      );
+      setOverrideMsg(apiError(err, 'Failed to update override'));
     } finally {
       setOverrideBusy(false);
     }

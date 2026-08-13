@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -27,12 +28,6 @@ type WildEntry = {
   level:       string;   // kept as string so the input is controlled without coercion
   catchable:   boolean;
 };
-
-function apiError(err: unknown, fallback: string) {
-  return axios.isAxiosError(err)
-    ? (err.response?.data?.error ?? fallback)
-    : fallback;
-}
 
 // ---------------------------------------------------------------------------
 // WildEntryRow

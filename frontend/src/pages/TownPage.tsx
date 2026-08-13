@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
+import { formatItemName } from '../lib/formatName';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 
@@ -25,11 +27,7 @@ export default function TownPage() {
       );
       setHealMsg(res.data.data.message);
     } catch (err) {
-      setHealMsg(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? 'Healing failed.')
-          : 'Healing failed.',
-      );
+      setHealMsg(apiError(err, 'Healing failed.'));
     } finally {
       setHealBusy(false);
     }
@@ -90,17 +88,6 @@ type ShopCatalogEntry = { itemId: string; pocket: string | null; buyPrice: numbe
 type BagItem = { itemId: string; quantity: number };
 type MartRow = { itemId: string; pocket: string | null; price: number; quantity?: number };
 
-function formatItemName(slug: string): string {
-  if (slug.startsWith('mint-')) {
-    const nature = slug.slice(5);
-    return `${nature.charAt(0).toUpperCase() + nature.slice(1)} Mint`;
-  }
-  return slug
-    .split('-')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
 const POCKET_LABELS: Record<string, string> = {
   healing:      'Healing',
   status_cure:  'Status Cures',
@@ -150,7 +137,7 @@ function PokemartCard({ token }: { token: string }) {
     .map(e => ({ itemId: e.itemId, pocket: e.pocket, price: e.buyPrice }));
 
   const sellList: MartRow[] = bag
-    .map(item => {
+    .map((item): MartRow | null => {
       const entry = catalogById.get(item.itemId);
       if (entry?.sellPrice == null) return null;
       return { itemId: item.itemId, pocket: entry.pocket, price: entry.sellPrice, quantity: item.quantity };
@@ -179,7 +166,7 @@ function PokemartCard({ token }: { token: string }) {
       await Promise.all([loadAll(), refreshUser()]);
     } catch (err) {
       const label = kind === 'buy' ? 'Failed to buy' : 'Failed to sell';
-      setMsgs(m => ({ ...m, [itemId]: axios.isAxiosError(err) ? (err.response?.data?.error ?? label) : label }));
+      setMsgs(m => ({ ...m, [itemId]: apiError(err, label) }));
     } finally {
       setBusy(b => ({ ...b, [itemId]: false }));
     }
@@ -299,10 +286,7 @@ function DmHealSection({ token }: { token: string }) {
       );
       setMsgs(m => ({ ...m, [npcId]: res.data.data.message }));
     } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.error ?? 'Failed to heal.')
-        : 'Failed to heal.';
-      setMsgs(m => ({ ...m, [npcId]: msg }));
+      setMsgs(m => ({ ...m, [npcId]: apiError(err, 'Failed to heal.') }));
     } finally {
       setBusy(b => ({ ...b, [npcId]: false }));
     }

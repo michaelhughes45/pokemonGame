@@ -3,6 +3,9 @@ import { useParams, Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
 import { TYPE_BG } from '../lib/typeColors';
+import { apiError } from '../lib/apiError';
+import { formatName as formatMove } from '../lib/formatName';
+import { HpBar } from '../components/HpBar';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
@@ -246,44 +249,6 @@ function WeatherBadge({ battle }: { battle: BattleState }) {
   );
 }
 
-function apiError(err: unknown, fallback: string): string {
-  if (
-    err &&
-    typeof err === 'object' &&
-    'response' in err &&
-    err.response &&
-    typeof err.response === 'object' &&
-    'data' in err.response &&
-    err.response.data &&
-    typeof err.response.data === 'object' &&
-    'error' in err.response.data &&
-    typeof (err.response.data as { error: unknown }).error === 'string'
-  ) {
-    return (err.response.data as { error: string }).error;
-  }
-  return fallback;
-}
-
-// "hydro-pump" → "Hydro Pump"
-function formatMove(id: string): string {
-  return id.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-}
-
-function HpBar({ current, max }: { current: number; max: number | null }) {
-  const pct = max && max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
-  const color = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-yellow-400' : 'bg-red-500';
-  return (
-    <div className="flex items-center gap-2 mt-1">
-      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="text-xs font-mono text-muted-foreground">
-        {current}{max !== null ? `/${max}` : ''}
-      </span>
-    </div>
-  );
-}
-
 function BattlePokemonCard({ info, extra }: { info: ActivePokemonInfo; extra?: React.ReactNode }) {
   return (
     <Card>
@@ -320,9 +285,102 @@ function BattlePokemonCard({ info, extra }: { info: ActivePokemonInfo; extra?: R
   );
 }
 
+// Shared "one row per trainer" roster list — used for the Player Side card
+// and, in pvp, the Enemy Side card (a pvp enemySide is just another roster
+// of real trainers, structurally identical to playerSide).
+function TrainerRosterList({
+  entries,
+  battle,
+}: {
+  entries: { userId?: string; username?: string; activePokemonInfo: ActivePokemonInfo | null }[];
+  battle: BattleState;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      {entries.map(entry => {
+        const submitted = battle.turnQueue.some(
+          e => e.actorId === entry.userId && e.actorType === 'player'
+        );
+        return (
+          <div key={entry.userId} className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">{entry.username}</span>
+              {battle.status === 'active' && battle.phase === 'move_submission' && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full ${
+                  submitted
+                    ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                    : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
+                }`}>
+                  {submitted ? 'Submitted' : 'Pending'}
+                </span>
+              )}
+            </div>
+            {entry.activePokemonInfo
+              ? <BattlePokemonCard info={entry.activePokemonInfo} />
+              : <p className="text-xs text-muted-foreground">No Pokémon out</p>
+            }
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // Display name for a party Pokémon
 function pokemonLabel(p: PartyPokemon): string {
   return p.nickname ?? p.speciesName ?? `#${p.speciesId}`;
+}
+
+// Shared list of clickable party-Pokémon rows, used by the send-out, Baton
+// Pass, and Switch pickers — each disables fainted/active/limit-blocked
+// entries the same way and just wires a different action into onSelect.
+function PartyPicker({
+  party,
+  myEntry,
+  submitting,
+  showLevel = false,
+  onSelect,
+}: {
+  party: PartyPokemon[];
+  myEntry: { activePokemonId: string | null; usedPokemonIds: string[]; pokemonLimitReached: boolean } | undefined;
+  submitting: boolean;
+  showLevel?: boolean;
+  onSelect: (pokemonId: string) => void;
+}) {
+  return (
+    <>
+      {party.map(p => {
+        const isActive     = p._id === myEntry?.activePokemonId;
+        const fainted      = p.currentHp <= 0;
+        const alreadyUsed  = myEntry?.usedPokemonIds.includes(p._id) ?? false;
+        const limitBlocked = !alreadyUsed && (myEntry?.pokemonLimitReached ?? false);
+        const disabled     = isActive || fainted || limitBlocked || submitting;
+
+        let subLabel: string;
+        if (isActive)           subLabel = 'Active';
+        else if (fainted)       subLabel = 'Fainted';
+        else if (limitBlocked)  subLabel = 'Limit reached';
+        else subLabel = `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`;
+
+        return (
+          <button
+            key={p._id}
+            onClick={() => !disabled && onSelect(p._id)}
+            disabled={disabled}
+            className={[
+              'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
+              disabled ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+            ].join(' ')}
+          >
+            <span className="font-medium">{pokemonLabel(p)}</span>
+            <span className="text-muted-foreground text-xs">
+              {showLevel ? <>Lv.{p.level}{' · '}{subLabel}</> : subLabel}
+            </span>
+          </button>
+        );
+      })}
+    </>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,38 +1076,7 @@ export default function BattlePage() {
               {party.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No Pokémon in your party.</p>
               ) : (
-                party.map(p => {
-                  const fainted      = p.currentHp <= 0;
-                  const alreadyUsed  = myEntry?.usedPokemonIds.includes(p._id) ?? false;
-                  const limitBlocked = !alreadyUsed && (myEntry?.pokemonLimitReached ?? false);
-                  const disabled     = fainted || limitBlocked || submitting;
-
-                  let subLabel: string;
-                  if (fainted)            subLabel = 'Fainted';
-                  else if (limitBlocked)  subLabel = 'Limit reached';
-                  else subLabel = `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`;
-
-                  return (
-                    <button
-                      key={p._id}
-                      onClick={() => !disabled && handleSendOut(p._id)}
-                      disabled={disabled}
-                      className={[
-                        'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                        disabled
-                          ? 'opacity-40 cursor-not-allowed bg-muted'
-                          : 'hover:bg-accent cursor-pointer',
-                      ].join(' ')}
-                    >
-                      <span className="font-medium">{pokemonLabel(p)}</span>
-                      <span className="text-muted-foreground text-xs">
-                        Lv.{p.level}
-                        {' · '}
-                        {subLabel}
-                      </span>
-                    </button>
-                  );
-                })
+                <PartyPicker party={party} myEntry={myEntry} submitting={submitting} showLevel onSelect={handleSendOut} />
               )}
             </CardContent>
           </Card>
@@ -1108,32 +1135,7 @@ export default function BattlePage() {
                           {party.length === 0 ? (
                             <p className="text-sm text-muted-foreground">No other Pokémon in your party.</p>
                           ) : (
-                            party.map(p => {
-                              const isActive     = p._id === myEntry?.activePokemonId;
-                              const fainted      = p.currentHp <= 0;
-                              const alreadyUsed  = myEntry?.usedPokemonIds.includes(p._id) ?? false;
-                              const limitBlocked = !alreadyUsed && (myEntry?.pokemonLimitReached ?? false);
-                              const disabled     = isActive || fainted || limitBlocked || submitting;
-                              let subLabel: string;
-                              if (isActive) subLabel = 'Active';
-                              else if (fainted) subLabel = 'Fainted';
-                              else if (limitBlocked) subLabel = 'Limit reached';
-                              else subLabel = `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`;
-                              return (
-                                <button
-                                  key={p._id}
-                                  onClick={() => !disabled && handleSubmitBatonPass(p._id)}
-                                  disabled={disabled}
-                                  className={[
-                                    'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                                    disabled ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
-                                  ].join(' ')}
-                                >
-                                  <span className="font-medium">{pokemonLabel(p)}</span>
-                                  <span className="text-muted-foreground text-xs">{subLabel}</span>
-                                </button>
-                              );
-                            })
+                            <PartyPicker party={party} myEntry={myEntry} submitting={submitting} onSelect={handleSubmitBatonPass} />
                           )}
                         </div>
                       ) : activePokemonDetail ? (
@@ -1237,36 +1239,7 @@ export default function BattlePage() {
                         <p className="text-sm text-muted-foreground mt-2">No Pokémon in your party.</p>
                       ) : (
                         <div className="flex flex-col gap-2 mt-2">
-                          {party.map(p => {
-                            const isActive      = p._id === myEntry?.activePokemonId;
-                            const fainted       = p.currentHp <= 0;
-                            const alreadyUsed   = myEntry?.usedPokemonIds.includes(p._id) ?? false;
-                            const limitBlocked  = !alreadyUsed && (myEntry?.pokemonLimitReached ?? false);
-                            const disabled      = isActive || fainted || limitBlocked || submitting;
-
-                            let subLabel: string;
-                            if (isActive)       subLabel = 'Active';
-                            else if (fainted)   subLabel = 'Fainted';
-                            else if (limitBlocked) subLabel = 'Limit reached';
-                            else subLabel = `HP ${p.currentHp}${p.maxHp != null ? `/${p.maxHp}` : ''}`;
-
-                            return (
-                              <button
-                                key={p._id}
-                                onClick={() => !disabled && handleSubmitSwitch(p._id)}
-                                disabled={disabled}
-                                className={[
-                                  'flex items-center justify-between rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                                  disabled
-                                    ? 'opacity-40 cursor-not-allowed bg-muted'
-                                    : 'hover:bg-accent cursor-pointer',
-                                ].join(' ')}
-                              >
-                                <span className="font-medium">{pokemonLabel(p)}</span>
-                                <span className="text-muted-foreground text-xs">{subLabel}</span>
-                              </button>
-                            );
-                          })}
+                          <PartyPicker party={party} myEntry={myEntry} submitting={submitting} onSelect={handleSubmitSwitch} />
                         </div>
                       )}
                     </TabsContent>
@@ -1893,33 +1866,7 @@ export default function BattlePage() {
             {battle.playerSide.length === 0 ? (
               <p className="text-sm text-muted-foreground">No players in this battle.</p>
             ) : (
-              <div className="flex flex-col gap-3">
-                {battle.playerSide.map(entry => {
-                  const submitted = battle.turnQueue.some(
-                    e => e.actorId === entry.userId && e.actorType === 'player'
-                  );
-                  return (
-                    <div key={entry.userId} className="flex flex-col gap-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium">{entry.username}</span>
-                        {battle.status === 'active' && battle.phase === 'move_submission' && (
-                          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                            submitted
-                              ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                              : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
-                          }`}>
-                            {submitted ? 'Submitted' : 'Pending'}
-                          </span>
-                        )}
-                      </div>
-                      {entry.activePokemonInfo
-                        ? <BattlePokemonCard info={entry.activePokemonInfo} />
-                        : <p className="text-xs text-muted-foreground">No Pokémon out</p>
-                      }
-                    </div>
-                  );
-                })}
-              </div>
+              <TrainerRosterList entries={battle.playerSide} battle={battle} />
             )}
           </CardContent>
         </Card>
@@ -1934,33 +1881,7 @@ export default function BattlePage() {
               </p>
             ) : battle.type === 'pvp' ? (
               // Pvp: enemySide is a roster of real trainers — render exactly like Player Side above.
-              <div className="flex flex-col gap-3">
-                {battle.enemySide.map(entry => {
-                  const submitted = battle.turnQueue.some(
-                    e => e.actorId === entry.userId && e.actorType === 'player'
-                  );
-                  return (
-                    <div key={entry.userId} className="flex flex-col gap-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium">{entry.username}</span>
-                        {battle.status === 'active' && battle.phase === 'move_submission' && (
-                          <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                            submitted
-                              ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                              : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
-                          }`}>
-                            {submitted ? 'Submitted' : 'Pending'}
-                          </span>
-                        )}
-                      </div>
-                      {entry.activePokemonInfo
-                        ? <BattlePokemonCard info={entry.activePokemonInfo} />
-                        : <p className="text-xs text-muted-foreground">No Pokémon out</p>
-                      }
-                    </div>
-                  );
-                })}
-              </div>
+              <TrainerRosterList entries={battle.enemySide} battle={battle} />
             ) : (
               <div className="flex flex-col gap-3">
                 {(() => {

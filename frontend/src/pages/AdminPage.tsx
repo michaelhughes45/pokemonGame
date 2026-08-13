@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
+import { formatName } from '../lib/formatName';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -33,9 +35,6 @@ const selectClass =
   'border border-input bg-background rounded-md px-2 py-1.5 text-sm min-h-9 ' +
   'focus:outline-none focus:ring-2 focus:ring-ring';
 
-function apiError(err: unknown, fallback: string) {
-  return axios.isAxiosError(err) ? (err.response?.data?.error ?? fallback) : fallback;
-}
 
 // ---------------------------------------------------------------------------
 // UsersCard
@@ -210,10 +209,6 @@ type PokedexEntry = {
   types: string[];
   cachedAt: string;
 };
-
-function formatName(name: string) {
-  return name.split('-').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
-}
 
 function PokedexCacheCard({ token }: { token: string | null }) {
   const [query,       setQuery]       = useState('');

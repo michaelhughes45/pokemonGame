@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -73,11 +74,7 @@ export default function StarterPage() {
       );
       navigate('/dashboard');
     } catch (err: unknown) {
-      if (axios.isAxiosError(err)) {
-        setConfirmError(err.response?.data?.error ?? 'Failed to choose starter');
-      } else {
-        setConfirmError('Failed to choose starter');
-      }
+      setConfirmError(apiError(err, 'Failed to choose starter'));
     } finally {
       setConfirming(false);
     }

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -25,11 +26,6 @@ type EncounterSummary = {
 
 type CampaignPlayer = { _id: string; username: string };
 
-function apiError(err: unknown, fallback: string) {
-  return axios.isAxiosError(err)
-    ? (err.response?.data?.error ?? fallback)
-    : fallback;
-}
 
 // ---------------------------------------------------------------------------
 // EncounterRow

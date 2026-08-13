@@ -19,6 +19,8 @@ import { CSS } from '@dnd-kit/utilities';
 import { GripVertical } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { TYPE_BG } from '../lib/typeColors';
+import { formatName } from '../lib/formatName';
+import { HpBar } from '../components/HpBar';
 import { Card, CardContent } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 
@@ -38,27 +40,7 @@ type PartyMember = {
   types: string[];
 };
 
-function formatName(name: string): string {
-  return name
-    .split('-')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
 
-function HpBar({ current, max }: { current: number; max: number | null }) {
-  const pct = max && max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
-  const color = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-yellow-400' : 'bg-red-500';
-  return (
-    <div className="flex items-center gap-2 mt-1">
-      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="text-xs font-mono text-muted-foreground">
-        {current}{max !== null ? `/${max}` : ''}
-      </span>
-    </div>
-  );
-}
 
 // ── SortableCard ─────────────────────────────────────────────────────────────
 // Each party member is wrapped in this component. It calls useSortable() which

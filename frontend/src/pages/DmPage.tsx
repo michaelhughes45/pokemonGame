@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -64,7 +65,7 @@ function CampaignCard({ token }: { token: string | null }) {
       setCreateName('');
       setFeedback('Campaign created.');
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to create campaign') : 'Failed to create campaign');
+      setError(apiError(err, 'Failed to create campaign'));
     } finally {
       setCreateLoading(false);
     }
@@ -82,7 +83,7 @@ function CampaignCard({ token }: { token: string | null }) {
       setInviteUsername('');
       setFeedback(`Invite sent to ${inviteUsername.trim()}.`);
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to send invite') : 'Failed to send invite');
+      setError(apiError(err, 'Failed to send invite'));
     } finally {
       setInviteLoading(false);
     }
@@ -96,7 +97,7 @@ function CampaignCard({ token }: { token: string | null }) {
       setCampaign(res.data.data);
       setFeedback(`Removed ${username} from campaign.`);
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to remove player') : 'Failed to remove player');
+      setError(apiError(err, 'Failed to remove player'));
     }
   }
 
@@ -116,7 +117,7 @@ function CampaignCard({ token }: { token: string | null }) {
         + (unlocked > 0 ? ` ${unlocked} Pokémon leveled up from banked EXP.` : ''),
       );
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to update level cap') : 'Failed to update level cap');
+      setError(apiError(err, 'Failed to update level cap'));
     } finally {
       setLevelCapLoading(false);
     }
@@ -134,7 +135,7 @@ function CampaignCard({ token }: { token: string | null }) {
       setCampaign({ ...campaign, fieldModeEnabled: res.data.data.fieldModeEnabled });
       setFeedback(`${res.data.data.fieldModeEnabled ? 'Field' : 'Town'} mode enabled.`);
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to update field mode') : 'Failed to update field mode');
+      setError(apiError(err, 'Failed to update field mode'));
     } finally {
       setFieldModeLoading(false);
     }
@@ -152,7 +153,7 @@ function CampaignCard({ token }: { token: string | null }) {
       setCampaign({ ...campaign, hiddenAbilitiesEnabled: res.data.data.hiddenAbilitiesEnabled });
       setFeedback(`Hidden abilities ${res.data.data.hiddenAbilitiesEnabled ? 'enabled' : 'disabled'} — applies to battles launched from now on.`);
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to update hidden abilities') : 'Failed to update hidden abilities');
+      setError(apiError(err, 'Failed to update hidden abilities'));
     } finally {
       setHiddenAbilitiesLoading(false);
     }
@@ -363,7 +364,7 @@ function ResetStarterCard({ token }: { token: string | null }) {
       );
       setUsername('');
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Reset failed') : 'Reset failed');
+      setError(apiError(err, 'Reset failed'));
     } finally {
       setLoading(false);
     }
@@ -432,7 +433,7 @@ function GivePokemonCard({ token }: { token: string | null }) {
       );
       setSpecies('');
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to give Pokémon') : 'Failed to give Pokémon');
+      setError(apiError(err, 'Failed to give Pokémon'));
     } finally {
       setLoading(false);
     }
@@ -598,7 +599,7 @@ function GiveItemCard({ token }: { token: string | null }) {
       setItemId('');
       setQuantity('1');
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to give item') : 'Failed to give item');
+      setError(apiError(err, 'Failed to give item'));
     } finally {
       setLoading(false);
     }
@@ -626,7 +627,7 @@ function GiveItemCard({ token }: { token: string | null }) {
       }
       setMoneyAmount('');
     } catch (err: unknown) {
-      setMoneyError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to give money') : 'Failed to give money');
+      setMoneyError(apiError(err, 'Failed to give money'));
     } finally {
       setMoneyLoading(false);
     }
@@ -878,7 +879,7 @@ function ShopCatalogCard({ token }: { token: string | null }) {
       setSelected(new Set<string>(res.data.data.shopItemIds ?? []));
       setFeedback(`Saved — ${res.data.data.shopItemIds.length} item(s) for sale.`);
     } catch (err: unknown) {
-      setError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to save shop items') : 'Failed to save shop items');
+      setError(apiError(err, 'Failed to save shop items'));
     } finally {
       setSaving(false);
     }
@@ -1007,7 +1008,7 @@ function NpcCard({ token }: { token: string | null }) {
       setNpcs(prev => [...prev, res.data.data]);
       setNewName('');
     } catch (err: unknown) {
-      setCreateError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to create NPC') : 'Failed to create NPC');
+      setCreateError(apiError(err, 'Failed to create NPC'));
     } finally {
       setCreating(false);
     }
@@ -1031,7 +1032,7 @@ function NpcCard({ token }: { token: string | null }) {
       setGpSpecies('');
       setNpcs(prev => prev.map(n => n._id === npcId ? { ...n, partyCount: n.partyCount + 1 } : n));
     } catch (err: unknown) {
-      setGpError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to add Pokémon') : 'Failed to add Pokémon');
+      setGpError(apiError(err, 'Failed to add Pokémon'));
     } finally {
       setGpLoading(false);
     }
@@ -1557,11 +1558,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
       const res = await axios.post(`${API}/api/battles`, body, { headers });
       navigate(`/battle/${res.data.data._id}`);
     } catch (err: unknown) {
-      setError(
-        axios.isAxiosError(err)
-          ? (err.response?.data?.error ?? 'Failed to create battle')
-          : 'Failed to create battle'
-      );
+      setError(apiError(err, 'Failed to create battle'));
       setLoading(false);
     }
   }

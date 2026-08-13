@@ -3,6 +3,9 @@ import { useAuth } from '../hooks/useAuth';
 import { useLocation, useNavigate, Link } from 'react-router-dom';
 import axios from 'axios';
 import { TYPE_BG } from '../lib/typeColors';
+import { apiError } from '../lib/apiError';
+import { formatName } from '../lib/formatName';
+import { HpBar } from '../components/HpBar';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -42,27 +45,6 @@ type PartyMember = {
   types: string[];
 };
 
-function formatName(name: string): string {
-  return name
-    .split('-')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-function HpBar({ current, max }: { current: number; max: number | null }) {
-  const pct = max && max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
-  const color = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-yellow-400' : 'bg-red-500';
-  return (
-    <div className="flex items-center gap-2 mt-1">
-      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="text-xs font-mono text-muted-foreground">
-        {current}{max !== null ? `/${max}` : ''}
-      </span>
-    </div>
-  );
-}
 
 // Same 6 stat keys the EV system uses — Trainer IV points (milestone 5.5) can
 // be freely split across any of them, one point at a time.
@@ -100,7 +82,7 @@ export default function DashboardPage() {
       );
       await refreshUser();
     } catch (err) {
-      setAllocateError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to allocate point') : 'Failed to allocate point');
+      setAllocateError(apiError(err, 'Failed to allocate point'));
     } finally {
       setAllocateBusy(false);
     }
@@ -164,7 +146,7 @@ export default function DashboardPage() {
       // Remove the invite from the list regardless of accept/decline
       setInvites(prev => prev.filter(i => i._id !== campaignId));
     } catch (err: unknown) {
-      setInviteError(axios.isAxiosError(err) ? (err.response?.data?.error ?? 'Failed to respond') : 'Failed to respond');
+      setInviteError(apiError(err, 'Failed to respond'));
     }
   }
 

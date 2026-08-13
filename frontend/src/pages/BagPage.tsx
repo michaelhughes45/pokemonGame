@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
+import { formatName as formatPokemonName, formatItemName } from '../lib/formatName';
+import { HpBar } from '../components/HpBar';
 import { Button } from '../components/ui/button';
 import { Card, CardContent } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
@@ -73,48 +76,10 @@ const DIRECT_USE_POCKETS: ItemPocket[] = ['escape'];
 const PP_ONE_ITEMS = new Set(['ether', 'max-ether', 'pp-up', 'pp-max']);
 const PP_UP_ITEMS = new Set(['pp-up', 'pp-max']);
 
-// Format a PokeAPI slug like "super-potion" → "Super Potion".
-// TM/HM items ("tm-flamethrower") are special-cased to "TM: Flamethrower"
-// rather than the naive "Tm Flamethrower" the generic split would produce.
-function formatItemName(slug: string): string {
-  if (slug.startsWith('tm-')) {
-    return `TM: ${formatItemName(slug.slice(3))}`;
-  }
-  if (slug.startsWith('mint-')) {
-    const nature = slug.slice(5);
-    return `${nature.charAt(0).toUpperCase() + nature.slice(1)} Mint`;
-  }
-  return slug
-    .split('-')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
-function formatPokemonName(name: string): string {
-  return name
-    .split('-')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
-}
-
 // ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function HpBar({ current, max }: { current: number; max: number | null }) {
-  const pct = max && max > 0 ? Math.min(100, Math.round((current / max) * 100)) : 0;
-  const color = pct > 50 ? 'bg-green-500' : pct > 20 ? 'bg-yellow-400' : 'bg-red-500';
-  return (
-    <div className="flex items-center gap-2 mt-1">
-      <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
-      </div>
-      <span className="text-xs font-mono text-muted-foreground">
-        {current}{max !== null ? `/${max}` : ''}
-      </span>
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // BagPage
@@ -236,10 +201,7 @@ export default function BagPage() {
       setFeedback({ ok: true, msg: res.data.data.message });
       await loadBag();
     } catch (err: unknown) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.error ?? 'Failed to use item.')
-        : 'Failed to use item.';
-      setFeedback({ ok: false, msg });
+      setFeedback({ ok: false, msg: apiError(err, 'Failed to use item.') });
     } finally {
       setUsing(false);
     }
@@ -267,10 +229,7 @@ export default function BagPage() {
       setSelectedItem(null);
       setTargetPokemon(null);
     } catch (err: unknown) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.error ?? 'Failed to use item.')
-        : 'Failed to use item.';
-      setFeedback({ ok: false, msg });
+      setFeedback({ ok: false, msg: apiError(err, 'Failed to use item.') });
     } finally {
       setUsing(false);
     }
@@ -295,10 +254,7 @@ export default function BagPage() {
       setSelectedItem(null);
       setTargetPokemon(null);
     } catch (err: unknown) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.error ?? 'Failed to teach move.')
-        : 'Failed to teach move.';
-      setFeedback({ ok: false, msg });
+      setFeedback({ ok: false, msg: apiError(err, 'Failed to teach move.') });
     } finally {
       setUsing(false);
     }
@@ -571,10 +527,7 @@ export default function BagPage() {
       setSelectedItem(null);
       setTargetPokemon(null);
     } catch (err: unknown) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.error ?? 'Failed to use item.')
-        : 'Failed to use item.';
-      setFeedback({ ok: false, msg });
+      setFeedback({ ok: false, msg: apiError(err, 'Failed to use item.') });
     } finally {
       setUsing(false);
     }

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useAuth } from '../hooks/useAuth';
+import { apiError } from '../lib/apiError';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -29,11 +30,7 @@ export default function RegisterPage() {
       await login(res.data.data.token);
       navigate('/dashboard');
     } catch (err: unknown) {
-      if (axios.isAxiosError(err)) {
-        setError(err.response?.data?.error ?? 'Registration failed');
-      } else {
-        setError('Registration failed');
-      }
+      setError(apiError(err, 'Registration failed'));
     } finally {
       setLoading(false);
     }
