@@ -160,6 +160,116 @@ function isHazardCondition(condition: string, side: 'playerSide' | 'enemySide'):
   return condSide === side && ENTRY_HAZARD_MOVES.has(moveId);
 }
 
+// Fetches a Pokémon (lean, projected to pokeFields) plus its species cache entry
+// (projected to cacheFields) and builds its display name in one call — collapses the
+// "fetch doc, fetch its cache, build the name" three-liner repeated throughout the
+// move-resolution code below.
+async function fetchDisplay(
+  id: mongoose.Types.ObjectId | string,
+  pokeFields: string,
+  cacheFields: string = 'name',
+): Promise<{ poke: any; cache: any; name: string }> {
+  const poke  = await Pokemon.findById(id, pokeFields).lean();
+  const cache = poke ? await PokedexCache.findOne({ pokeApiId: poke.speciesId }, cacheFields).lean() : null;
+  return { poke, cache, name: pokeDisplayName(poke, cache) };
+}
+
+// Shared tail of every submitMove/dmSubmitMove action branch: queue the action, let
+// checkAndAdvance move the battle along, persist, and report back to the caller.
+async function queueActionAndRespond(
+  battle: HydratedDocument<IBattle>,
+  entry: TurnQueueEntry,
+  res: Response,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  battle.turnQueue.push(entry);
+  await checkAndAdvance(battle);
+  battle.lastUpdatedAt = new Date();
+  await battle.save();
+  res.json({ data: { submitted: true, phase: battle.phase, ...extra }, error: null });
+}
+
+// True when switching in `pokemonId` would exceed the side's Pokémon limit for this
+// battle — a null limit means unlimited, and a Pokémon already counted as "used" never
+// re-consumes a limit slot.
+function pokemonLimitReached(
+  usedPokemonIds: mongoose.Types.ObjectId[], pokemonId: string, limit: number | null,
+): boolean {
+  if (limit === null) return false;
+  const alreadyUsed = usedPokemonIds.some(id => id.toString() === pokemonId);
+  return !alreadyUsed && usedPokemonIds.length >= limit;
+}
+
+// Validates a switchToPokemonId is a well-formed id distinct from the currently active
+// Pokémon. Shared by submitMove's switch/baton-pass branches and their dmSubmitMove
+// counterparts, which diverge only in how they check the target is a legal switch-in.
+function parseSwitchToId(
+  switchToPokemonId: string | undefined,
+  activePokemonId: mongoose.Types.ObjectId | null | undefined,
+  res: Response,
+  requiredMsg: string,
+): mongoose.Types.ObjectId | null {
+  if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) {
+    res.status(400).json({ data: null, error: requiredMsg }); return null;
+  }
+  if (activePokemonId?.toString() === switchToPokemonId) {
+    res.status(400).json({ data: null, error: 'That Pokémon is already active' }); return null;
+  }
+  return new mongoose.Types.ObjectId(switchToPokemonId);
+}
+
+// Player-side switch-in eligibility: owned, in-party, not fainted. Shared by
+// submitMove's switch and baton-pass branches.
+async function validatePlayerSwitchTarget(
+  userId: mongoose.Types.ObjectId, switchToId: mongoose.Types.ObjectId, res: Response,
+): Promise<boolean> {
+  const switchTarget = await Pokemon.findOne({ _id: switchToId, ownerId: userId, ownerType: 'player', isInParty: true }).lean();
+  if (!switchTarget)               { res.status(404).json({ data: null, error: 'Pokémon not found in your party' }); return false; }
+  if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'That Pokémon has fainted' }); return false; }
+  return true;
+}
+
+// NPC-side switch-in eligibility: in the NPC's party, not fainted. Shared by
+// dmSubmitMove's switch and baton-pass branches.
+async function validateNpcSwitchTarget(
+  npcId: string, switchToPokemonId: string, res: Response,
+): Promise<boolean> {
+  const npc = await Npc.findById(npcId, 'party').lean();
+  if (!npc || !npc.party.some((id: mongoose.Types.ObjectId) => id.toString() === switchToPokemonId)) {
+    res.status(400).json({ data: null, error: "That Pokémon is not in this NPC's party" }); return false;
+  }
+  const switchTarget = await Pokemon.findById(switchToPokemonId, 'currentHp').lean();
+  if (!switchTarget)               { res.status(404).json({ data: null, error: 'Switch target Pokémon not found' }); return false; }
+  if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'Cannot switch to a fainted Pokémon' }); return false; }
+  return true;
+}
+
+// Shared tail of sendOut/dmSendOut once the active Pokémon has been assigned: run
+// entry abilities/hazards/pending-wish, resolve any resulting faints/battle-end,
+// persist, and stamp activeSentOutOnTurn (a direct update since Mongoose subdocument
+// tracking doesn't reliably pick this field up).
+async function finishSendOut(
+  battle: HydratedDocument<IBattle>,
+  pokeId: mongoose.Types.ObjectId,
+  actorType: 'player' | 'enemy',
+  side: 'playerSide' | 'enemySide',
+  matchField: 'userId' | 'npcId',
+  matchValue: mongoose.Types.ObjectId,
+): Promise<void> {
+  const entryEvents  = await applyEntryAbilities(battle, pokeId, actorType);
+  const hazardEvents = await applyEntryHazards(battle, pokeId, actorType);
+  const wishEvents   = await applyPendingWish(battle, pokeId, actorType);
+  const faintEvents  = await applyFaints(battle);
+  const endEvents    = await checkBattleEnd(battle);
+  appendToLog(battle, ...entryEvents, ...hazardEvents, ...wishEvents, ...faintEvents, ...endEvents);
+  battle.lastUpdatedAt = new Date();
+  await battle.save();
+  await Battle.updateOne(
+    { _id: battle._id, [`${side}.${matchField}`]: matchValue },
+    { $set: { [`${side}.$.activeSentOutOnTurn`]: battle.turnNumber } },
+  );
+}
+
 export async function createBattle(req: Request, res: Response): Promise<void> {
   const {
     type, playerIds, npcIds = [], enemyPlayerIds = [], playerPokemonLimit = null, npcPokemonLimit = null,
@@ -560,9 +670,7 @@ export async function applyEntryAbilities(
       for (const entry of opposingSide) {
         if (!entry.activePokemonId) continue;
         const targetId = entry.activePokemonId.toString();
-        const target = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId hasHiddenAbility').lean();
-        const tgtCache = target ? await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name abilities').lean() : null;
-        const targetName = pokeDisplayName(target, tgtCache);
+        const { poke: target, cache: tgtCache, name: targetName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId hasHiddenAbility', 'name abilities');
         const tgtAbilities = target && tgtCache ? getEffectiveAbilitySlugs(battle, targetId, (tgtCache.abilities as CachedAbility[]) ?? [], target.hasHiddenAbility as boolean) : [];
         events.push(...applyStatStageEffects(stageMap, targetId, [{ stat: 'atk', stages: -1, target: 'foe' }], targetName, tgtAbilities));
         for (const reaction of ['competitive', 'defiant'] as const) {
@@ -581,8 +689,7 @@ export async function applyEntryAbilities(
     const candidates: { id: string; name: string; slug: string }[] = [];
     for (const entry of opposingSide) {
       if (!entry.activePokemonId) continue;
-      const tgt      = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId hasHiddenAbility').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name abilities').lean() : null;
+      const { poke: tgt, cache: tgtCache } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId hasHiddenAbility', 'name abilities');
       if (!tgt || !tgtCache) continue;
       const tgtSlugs = getEffectiveAbilitySlugs(battle, entry.activePokemonId.toString(), (tgtCache.abilities as CachedAbility[]) ?? [], tgt.hasHiddenAbility as boolean)
         .filter(s => !TRACE_BLOCKED_ABILITIES.has(s));
@@ -793,9 +900,7 @@ async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mong
   battle.markModified('consecutiveMoves');
   delete (battle.lockedMoves as Record<string, unknown>)[outgoingId.toString()];
   battle.markModified('lockedMoves');
-  const outgoing = await Pokemon.findById(outgoingId, 'ownerId ownerType nickname speciesId hasHiddenAbility statusCondition currentHp nature level evs').lean();
-  const outCache = outgoing ? await PokedexCache.findOne({ pokeApiId: outgoing.speciesId }, 'name abilities baseStats').lean() : null;
-  const outName = pokeDisplayName(outgoing, outCache);
+  const { poke: outgoing, cache: outCache, name: outName } = await fetchDisplay(outgoingId, 'ownerId ownerType nickname speciesId hasHiddenAbility statusCondition currentHp nature level evs', 'name abilities baseStats');
   const events = [`${outName} was recalled!`];
   events.push(...await releaseBoundTargets(battle, outgoingId));
   events.push(...await applySwitchOutAbilities(battle, outgoingId.toString(), outgoing, outCache, outName));
@@ -823,9 +928,7 @@ async function forceOpponentSwitch(
   const enemyEntry  = !playerEntry ? battle.enemySide.find(e => e.activePokemonId?.toString() === targetId) : undefined;
   if (!playerEntry && !enemyEntry) return;
 
-  const outgoingDoc   = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-  const outgoingCache = outgoingDoc ? await PokedexCache.findOne({ pokeApiId: outgoingDoc.speciesId }, 'name').lean() : null;
-  const outgoingName  = pokeDisplayName(outgoingDoc, outgoingCache);
+  const { poke: outgoingDoc, cache: outgoingCache, name: outgoingName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
 
   let candidates: mongoose.Types.ObjectId[] = [];
   let usedPokemonIds: mongoose.Types.ObjectId[] | null = null; // non-null => pokemon-limit tracking applies
@@ -875,8 +978,7 @@ async function forceOpponentSwitch(
   }
   battle.markModified(playerEntry ? 'playerSide' : 'enemySide');
 
-  const incoming      = await Pokemon.findById(chosenId, 'nickname speciesId').lean();
-  const incomingCache = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
+  const { poke: incoming, cache: incomingCache } = await fetchDisplay(chosenId, 'nickname speciesId', 'name');
   moveEvents.push(`${outgoingName} was dragged out! ${pokeDisplayName(incoming, incomingCache)} was sent out!`);
   moveEvents.push(...await applyEntryAbilities(battle, chosenId, playerEntry ? 'player' : 'enemy'));
   // Fainting from this is caught by submitTarget's own applyFaints/checkBattleEnd call
@@ -959,8 +1061,7 @@ async function resolveSwitch(battle: HydratedDocument<IBattle>, entry: TurnQueue
     sideLabel = own.side === 'playerSide' ? 'player' : 'enemy';
   }
 
-  const incoming = await Pokemon.findById(incomingId, 'nickname speciesId').lean();
-  const inCache = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
+  const { poke: incoming, cache: inCache } = await fetchDisplay(incomingId, 'nickname speciesId', 'name');
   events.push(`${pokeDisplayName(incoming, inCache)} was sent out!`);
   events.push(...await applyEntryAbilities(battle, incomingId, sideLabel));
   events.push(...await applyEntryHazards(battle, incomingId, sideLabel));
@@ -1048,8 +1149,7 @@ async function resolveBatonPass(battle: HydratedDocument<IBattle>, entry: TurnQu
     (ownEntry as PlayerSideEntry).usedPokemonIds.push(incomingId);
   }
 
-  const incoming = await Pokemon.findById(incomingId, 'nickname speciesId').lean();
-  const inCache  = incoming ? await PokedexCache.findOne({ pokeApiId: incoming.speciesId }, 'name').lean() : null;
+  const { poke: incoming, cache: inCache } = await fetchDisplay(incomingId, 'nickname speciesId', 'name');
   events.push(`${pokeDisplayName(incoming, inCache)} was sent out, inheriting the stat changes!`);
   events.push(...await applyEntryAbilities(battle, incomingId, sideLabel));
   events.push(...await applyEntryHazards(battle, incomingId, sideLabel));
@@ -1144,8 +1244,7 @@ async function autoSkipBlockedActors(battle: HydratedDocument<IBattle>): Promise
     }
 
     if (entry.actionType === 'run') {
-      const poke  = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-      const cache = poke ? await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name').lean() : null;
+      const { poke, cache } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
       appendToLog(battle, `${pokeDisplayName(poke, cache)} dashes away to reposition!`);
       battle.turnQueue[battle.currentTargetIndex].resolved = true;
       battle.currentTargetIndex++;
@@ -2174,9 +2273,7 @@ async function resolveWeatherMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry,
   weatherEffect: { weather: IBattle['weather']; startMessage: string }, moveEvents: string[],
 ): Promise<void> {
-  const attacker = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-  const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name').lean() : null;
-  const attackerName = pokeDisplayName(attacker, atkCache);
+  const { poke: attacker, cache: atkCache, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
   const moveName     = slugToDisplayName(entry.moveId);
 
   const moveMeta = attacker ? await fetchMoveMeta(attacker.speciesId, entry.moveId) : undefined;
@@ -2199,9 +2296,7 @@ async function resolveWeatherMove(
 async function resolveSelfTargetMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, moveEvents: string[],
 ): Promise<void> {
-  const attacker = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs moves heldItem consumedHeldItem').lean();
-  const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name baseStats abilities types').lean() : null;
-  const attackerName = pokeDisplayName(attacker, atkCache);
+  const { poke: attacker, cache: atkCache, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs moves heldItem consumedHeldItem', 'name baseStats abilities types');
   const attackerIvs = attacker ? await getIvsForOwner(attacker.ownerId, attacker.ownerType) : ZERO_IVS;
 
   const moveMeta = attacker ? await fetchMoveMeta(attacker.speciesId, entry.moveId) : undefined;
@@ -2574,9 +2669,7 @@ async function resolveSelfTargetMove(
 async function resolveAllyTargetMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, targetId: string, moveEvents: string[],
 ): Promise<void> {
-  const attacker = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-  const atkCache = attacker ? await PokedexCache.findOne({ pokeApiId: attacker.speciesId }, 'name').lean() : null;
-  const attackerName = pokeDisplayName(attacker, atkCache);
+  const { poke: attacker, cache: atkCache, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
 
   const target = await Pokemon.findById(
     targetId, 'ownerId ownerType nickname speciesId currentHp nature level evs hasHiddenAbility volatileStatus',
@@ -2638,8 +2731,7 @@ async function resolveDamagingMove(
     // mutating it — the PP-deduction call after this function returns still needs to
     // see the original 'metronome' to decrement the right move's PP.
     const rolledMoveId = METRONOME_POOL[Math.floor(Math.random() * METRONOME_POOL.length)];
-    const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-    const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
+    const { poke: atkDoc, cache: atkCache } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
     moveEvents.push(`${pokeDisplayName(atkDoc, atkCache)} waggled a finger... it became ${slugToDisplayName(rolledMoveId)}!`);
     // entry is actually a live Mongoose subdocument at the call site (cast to the
     // plain ActiveEntry type) — {...entry} does NOT reliably copy its fields, since
@@ -2654,9 +2746,7 @@ async function resolveDamagingMove(
     // recorded by submitTarget under the resolved moveId — so a Copycat chain, or copying a
     // Metronome roll, picks up the real move, not the wrapper name). Fails with nothing to
     // copy yet, or a self-referential/nonsensical source.
-    const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-    const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
-    const atkName  = pokeDisplayName(atkDoc, atkCache);
+    const { poke: atkDoc, cache: atkCache, name: atkName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
     const lastMove = battle.globalLastMoveUsed;
     if (!lastMove || lastMove === 'copycat' || lastMove === 'sketch' || lastMove === 'struggle') {
       moveEvents.push(`${atkName} used Copycat, but it failed!`);
@@ -2676,9 +2766,7 @@ async function resolveDamagingMove(
     // target with no queue entry to peek at), a non-move action, or a non-damaging move
     // (no cached base power) — matches the real restriction that Me First only works on
     // an opponent's about-to-be-used damaging move.
-    const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-    const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
-    const atkName  = pokeDisplayName(atkDoc, atkCache);
+    const { poke: atkDoc, cache: atkCache, name: atkName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
     const targetId = targets[0];
     const targetQueueEntry = targetId
       ? battle.turnQueue.find(e => e.activePokemonId?.toString() === targetId && e.actionType === 'move' && !e.resolved && e.moveId)
@@ -2705,25 +2793,20 @@ async function resolveDamagingMove(
     const sideEntry = battle.playerSide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString())
       ?? battle.enemySide.find(e => e.activePokemonId?.toString() === entry.activePokemonId.toString());
     if (!sideEntry || sideEntry.activeSentOutOnTurn !== battle.turnNumber) {
-      const atkDoc   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId').lean();
-      const atkCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name').lean() : null;
+      const { poke: atkDoc, cache: atkCache } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
       moveEvents.push(`${pokeDisplayName(atkDoc, atkCache)} used Fake Out! But it failed!`);
       return;
     }
   }
 
   if (entry.moveId === 'curse') {
-    const atkDoc      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level hasHiddenAbility evs').lean();
-    const atkDocCache = atkDoc ? await PokedexCache.findOne({ pokeApiId: atkDoc.speciesId }, 'name baseStats types abilities').lean() : null;
-    const atkName     = pokeDisplayName(atkDoc, atkDocCache);
+    const { poke: atkDoc, cache: atkDocCache, name: atkName } = await fetchDisplay(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level hasHiddenAbility evs', 'name baseStats types abilities');
     moveEvents.push(`${atkName} used Curse!`);
     const isGhost = ((atkDocCache?.types as string[]) ?? []).includes('ghost');
     if (isGhost && atkDoc && atkDocCache?.baseStats) {
       const targetId = targets[0];
       if (targetId) {
-        const tgtPoke  = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
-        const tgtCache = tgtPoke ? await PokedexCache.findOne({ pokeApiId: (tgtPoke as any).speciesId }, 'name').lean() : null;
-        const tgtName  = pokeDisplayName(tgtPoke, tgtCache);
+        const { poke: tgtPoke, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId volatileStatus', 'name');
         if (((tgtPoke?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'cursed')) {
           moveEvents.push(`${tgtName} is already cursed!`);
         } else {
@@ -2859,8 +2942,7 @@ async function resolveDamagingMove(
       }
       const protectCondition = protectingTargets.get(targetId);
       if (protectCondition) {
-        const tgtDoc = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-        const tgtC   = tgtDoc ? await PokedexCache.findOne({ pokeApiId: (tgtDoc as any).speciesId }, 'name').lean() : null;
+        const { poke: tgtDoc, cache: tgtC } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
         moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}!`);
         moveEvents.push(`${pokeDisplayName(tgtDoc, tgtC)} protected itself!`);
         continue;
@@ -2881,9 +2963,7 @@ async function resolveDamagingMove(
 
     if (OHKO_MOVES.has(entry.moveId) && atkSnap && atkSnapCache) {
       const atkName = pokeDisplayName(atkSnap, atkSnapCache);
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId level hasHiddenAbility').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types abilities').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId level hasHiddenAbility', 'name types abilities');
       if (!tgt || !tgtCache) { moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)}, but it failed!`); continue; }
 
       const moveType = moveMeta?.type?.toLowerCase();
@@ -2918,8 +2998,7 @@ async function resolveDamagingMove(
       const targetEvaStage   = stageMap[targetId]?.eva ?? 0;
       const hitChance = (moveAccuracy / 100) * accuracyStageMultiplier(attackerAccStage, targetEvaStage);
       if (Math.random() >= hitChance) {
-        const tgtDoc   = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-        const tgtCache = tgtDoc ? await PokedexCache.findOne({ pokeApiId: (tgtDoc as any).speciesId }, 'name').lean() : null;
+        const { poke: tgtDoc, cache: tgtCache } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
         const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
         moveEvents.push(`${atkName} used ${slugToDisplayName(entry.moveId)} on ${pokeDisplayName(tgtDoc, tgtCache)}, but it missed!`);
         continue;
@@ -2930,9 +3009,7 @@ async function resolveDamagingMove(
     // the TARGET's type, Reflect Type copies the TARGET's type onto the USER. Neither
     // deals damage, same "custom branch + continue" shape as leech-seed/pain-split above.
     if (entry.moveId === 'soak') {
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const currentTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
       if (currentTypes.length === 1 && currentTypes[0] === 'water') {
@@ -2946,9 +3023,7 @@ async function resolveDamagingMove(
     }
 
     if (entry.moveId === 'reflect-type') {
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const targetTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
       (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()] = targetTypes;
@@ -3013,8 +3088,7 @@ async function resolveDamagingMove(
     }
 
     if (entry.moveId === 'pain-split' && atkSnap && atkSnapCache?.baseStats) {
-      const tgt      = await Pokemon.findById(targetId, 'ownerId ownerType currentHp nickname speciesId level nature evs').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name baseStats').lean() : null;
+      const { poke: tgt, cache: tgtCache } = await fetchDisplay(targetId, 'ownerId ownerType currentHp nickname speciesId level nature evs', 'name baseStats');
       if (tgt && tgtCache?.baseStats) {
         const tgtIvs   = await getIvsForOwner((tgt as any).ownerId, (tgt as any).ownerType);
         const atkMaxHp = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs, atkIvs).hp;
@@ -3030,8 +3104,7 @@ async function resolveDamagingMove(
     }
 
     if (entry.moveId === 'strength-sap' && atkSnap && atkSnapCache?.baseStats) {
-      const tgt      = await Pokemon.findById(targetId, 'ownerId ownerType nickname speciesId level nature evs hasHiddenAbility').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name baseStats abilities').lean() : null;
+      const { poke: tgt, cache: tgtCache } = await fetchDisplay(targetId, 'ownerId ownerType nickname speciesId level nature evs hasHiddenAbility', 'name baseStats abilities');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       if (tgt && tgtCache?.baseStats) {
         const tgtIvs = await getIvsForOwner((tgt as any).ownerId, (tgt as any).ownerType);
@@ -3056,9 +3129,7 @@ async function resolveDamagingMove(
     }
 
     if (entry.moveId === 'leech-seed') {
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name types').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId volatileStatus', 'name types');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       if (((tgtCache?.types as string[]) ?? []).includes('grass')) {
         moveEvents.push(`${atkName} used Leech Seed! It had no effect on ${tgtName}!`);
@@ -3072,9 +3143,7 @@ async function resolveDamagingMove(
     }
 
     if (NO_DAMAGE_TRAP_MOVES.has(entry.moveId)) {
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId volatileStatus').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId volatileStatus', 'name');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const alreadyBound = ((tgt?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
       if (alreadyBound) {
@@ -3120,9 +3189,7 @@ async function resolveDamagingMove(
     }
 
     if (entry.moveId === 'attract') {
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId gender volatileStatus hasHiddenAbility').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name abilities').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId gender volatileStatus hasHiddenAbility', 'name abilities');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const oppositeGenders = !!tgt && !!atkSnap
         && tgt.gender !== 'none' && tgt.gender != null
@@ -3152,9 +3219,7 @@ async function resolveDamagingMove(
       // same tracking Copycat reads globally). Never consumes the copied move's PP; the normal
       // PP-deduction call after this function returns finds no 'sketch' slot left to decrement
       // once the swap below has happened, which is exactly the desired no-op.
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const lastMoveMap  = (battle.lastMoveByPokemon ?? {}) as Record<string, string>;
       const copiedMoveId = lastMoveMap[targetId];
@@ -3180,9 +3245,7 @@ async function resolveDamagingMove(
       // permanent. battle.mimicState snapshots the ORIGINAL Mimic slot's own data
       // (moveId/PP/ppUps) so it can be restored later, keyed by slotIndex since the
       // copied move's PP will drift independently while it's active.
-      const tgt      = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean() : null;
-      const tgtName  = pokeDisplayName(tgt, tgtCache);
+      const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
       const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
       const lastMoveMap  = (battle.lastMoveByPokemon ?? {}) as Record<string, string>;
       const copiedMoveId = lastMoveMap[targetId];
@@ -3236,8 +3299,7 @@ async function resolveDamagingMove(
 
       const protectCondition = protectingTargets.get(targetId);
       if (protectCondition) {
-        const tgtDoc  = await Pokemon.findById(targetId, 'nickname speciesId').lean();
-        const tgtC    = tgtDoc ? await PokedexCache.findOne({ pokeApiId: (tgtDoc as any).speciesId }, 'name').lean() : null;
+        const { poke: tgtDoc, cache: tgtC } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
         moveEvents.push(`${pokeDisplayName(tgtDoc, tgtC)} protected itself!`);
         if (CONTACT_MOVES.has(entry.moveId) && atkSnap && atkSnapCache) {
           const atkName = pokeDisplayName(atkSnap, atkSnapCache);
@@ -3331,8 +3393,7 @@ async function resolveDamagingMove(
     if (hitCount > 1) moveEvents.push(`Hit ${actualHits} time(s)!`);
 
     if (anyCrit) {
-      const apTgt   = await Pokemon.findById(targetId, 'nickname speciesId hasHiddenAbility').lean();
-      const apCache = apTgt ? await PokedexCache.findOne({ pokeApiId: apTgt.speciesId }, 'name abilities').lean() : null;
+      const { poke: apTgt, cache: apCache } = await fetchDisplay(targetId, 'nickname speciesId hasHiddenAbility', 'name abilities');
       const apAbilities = apTgt && apCache ? getEffectiveAbilitySlugs(battle, targetId, (apCache.abilities as CachedAbility[]) ?? [], (apTgt.hasHiddenAbility as boolean) ?? false) : [];
       if (apAbilities.includes('anger-point')) {
         const apName = pokeDisplayName(apTgt, apCache);
@@ -3362,9 +3423,7 @@ async function resolveDamagingMove(
         }
       }
       if (foeEffects.length > 0) {
-        const tgt      = await Pokemon.findById(targetId, 'nickname speciesId hasHiddenAbility').lean();
-        const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name abilities').lean() : null;
-        const tgtName  = pokeDisplayName(tgt, tgtCache);
+        const { poke: tgt, cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId hasHiddenAbility', 'name abilities');
         const tgtAbilities = tgt && tgtCache ? getEffectiveAbilitySlugs(battle, targetId, (tgtCache.abilities as CachedAbility[]) ?? [], tgt.hasHiddenAbility as boolean) : [];
         moveEvents.push(...applyStatStageEffects(stageMap, targetId, foeEffects, tgtName, tgtAbilities));
         battle.markModified('statStages');
@@ -3537,8 +3596,7 @@ async function resolveDamagingMove(
     let koAtkName      = atkSnap ? pokeDisplayName(atkSnap, atkSnapCache) : null;
 
     if (koAbilitySlugs.length === 0) {
-      const fetchedAtk   = await Pokemon.findById(entry.activePokemonId, 'nickname speciesId hasHiddenAbility').lean();
-      const fetchedCache = fetchedAtk ? await PokedexCache.findOne({ pokeApiId: fetchedAtk.speciesId }, 'name abilities baseStats').lean() : null;
+      const { poke: fetchedAtk, cache: fetchedCache } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId hasHiddenAbility', 'name abilities baseStats');
       koAbilitySlugs = fetchedAtk && fetchedCache ? getEffectiveAbilitySlugs(battle, entry.activePokemonId.toString(), (fetchedCache.abilities as CachedAbility[]) ?? [], (fetchedAtk.hasHiddenAbility as boolean) ?? false) : [];
       koAtkCache = fetchedCache; koAtkName = pokeDisplayName(fetchedAtk, fetchedCache);
     }
@@ -3627,10 +3685,8 @@ export async function sendOut(req: Request, res: Response): Promise<void> {
   if (pokemon.currentHp <= 0) { res.status(400).json({ data: null, error: 'That Pokémon has fainted' }); return; }
 
   const alreadyUsed = playerEntry.usedPokemonIds.some(id => id.toString() === pokemonId);
-  if (!alreadyUsed && battle.playerPokemonLimit !== null) {
-    if (playerEntry.usedPokemonIds.length >= battle.playerPokemonLimit) {
-      res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' }); return;
-    }
+  if (pokemonLimitReached(playerEntry.usedPokemonIds, pokemonId, battle.playerPokemonLimit)) {
+    res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' }); return;
   }
 
   const outgoingId = playerEntry.activePokemonId;
@@ -3642,19 +3698,7 @@ export async function sendOut(req: Request, res: Response): Promise<void> {
   battle.markModified(side);
   if (!alreadyUsed) playerEntry.usedPokemonIds.push(pokeId);
 
-  const entryEvents = await applyEntryAbilities(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy');
-  const hazardEvents = await applyEntryHazards(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy');
-  const wishEvents = await applyPendingWish(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy');
-  const faintEvents = await applyFaints(battle);
-  const endEvents = await checkBattleEnd(battle);
-  appendToLog(battle, ...entryEvents, ...hazardEvents, ...wishEvents, ...faintEvents, ...endEvents);
-  battle.lastUpdatedAt = new Date();
-  await battle.save();
-  // Direct update for activeSentOutOnTurn — bypasses Mongoose subdocument tracking.
-  await Battle.updateOne(
-    { _id: battle._id, [`${side}.userId`]: userId },
-    { $set: { [`${side}.$.activeSentOutOnTurn`]: battle.turnNumber } },
-  );
+  await finishSendOut(battle, pokeId, side === 'playerSide' ? 'player' : 'enemy', side, 'userId', userId);
 
   res.json({ data: { activePokemonId: pokemonId }, error: null });
 }
@@ -3692,11 +3736,11 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
     if (actionType !== 'move') {
       res.status(400).json({ data: null, error: `Your Pokémon is locked into ${slugToDisplayName(playerLock.moveId)} and cannot do anything else!` }); return;
     }
-    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId!, actionType: 'move', moveId: playerLock.moveId, targets: [], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase, lockedMove: playerLock.moveId }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId!, actionType: 'move', moveId: playerLock.moveId, targets: [], resolved: false },
+      res, { lockedMove: playerLock.moveId },
+    );
     return;
   }
 
@@ -3718,20 +3762,20 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
     const targetPokemon = await Pokemon.findOne({ _id: targetObjId, ownerId: userId, isInParty: true }).lean();
     if (!targetPokemon) { res.status(400).json({ data: null, error: 'Target Pokémon not found in your party' }); return; }
 
-    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'item', moveId: '', itemId, targets: [targetObjId], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'item', moveId: '', itemId, targets: [targetObjId], resolved: false },
+      res,
+    );
     return;
   }
 
   if (actionType === 'run') {
-    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'run', moveId: '', targets: [], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'run', moveId: '', targets: [], resolved: false },
+      res,
+    );
     return;
   }
 
@@ -3749,38 +3793,28 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
       : battle.enemySide.find(e => !e.npcId && e.activePokemonId != null);
     if (!wildEntry?.activePokemonId) { res.status(400).json({ data: null, error: 'No active wild Pokémon to catch' }); return; }
 
-    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'catch', moveId: '', itemId, targets: [wildEntry.activePokemonId], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'catch', moveId: '', itemId, targets: [wildEntry.activePokemonId], resolved: false },
+      res,
+    );
     return;
   }
 
   if (actionType === 'switch') {
-    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) {
-      res.status(400).json({ data: null, error: 'A valid switchToPokemonId is required for switch actions' }); return;
-    }
-    const switchToId = new mongoose.Types.ObjectId(switchToPokemonId);
-    if (playerEntry.activePokemonId?.toString() === switchToPokemonId) {
-      res.status(400).json({ data: null, error: 'That Pokémon is already active' }); return;
-    }
-    const switchTarget = await Pokemon.findOne({ _id: switchToId, ownerId: userId, ownerType: 'player', isInParty: true }).lean();
-    if (!switchTarget)               { res.status(404).json({ data: null, error: 'Pokémon not found in your party' }); return; }
-    if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'That Pokémon has fainted' }); return; }
+    const switchToId = parseSwitchToId(switchToPokemonId, playerEntry.activePokemonId, res, 'A valid switchToPokemonId is required for switch actions');
+    if (!switchToId) return;
+    if (!await validatePlayerSwitchTarget(userId, switchToId, res)) return;
 
-    const alreadyUsedSwitch = playerEntry.usedPokemonIds.some(id => id.toString() === switchToPokemonId);
-    if (!alreadyUsedSwitch && battle.playerPokemonLimit !== null) {
-      if (playerEntry.usedPokemonIds.length >= battle.playerPokemonLimit) {
-        res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' }); return;
-      }
+    if (pokemonLimitReached(playerEntry.usedPokemonIds, switchToPokemonId!, battle.playerPokemonLimit)) {
+      res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' }); return;
     }
 
-    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId!, actionType: 'switch', moveId: '', switchToPokemonId: switchToId, targets: [], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId!, actionType: 'switch', moveId: '', switchToPokemonId: switchToId, targets: [], resolved: false },
+      res,
+    );
     return;
   }
 
@@ -3796,38 +3830,27 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
   // unlike every other move, it never enters the interactive targeting phase; it
   // auto-resolves in autoSkipBlockedActors exactly like item/switch actions do.
   if (moveId === 'baton-pass') {
-    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) {
-      res.status(400).json({ data: null, error: 'Baton Pass requires a valid switchToPokemonId (who to pass to)' }); return;
-    }
-    const switchToId = new mongoose.Types.ObjectId(switchToPokemonId);
-    if (playerEntry.activePokemonId?.toString() === switchToPokemonId) {
-      res.status(400).json({ data: null, error: 'That Pokémon is already active' }); return;
-    }
-    const switchTarget = await Pokemon.findOne({ _id: switchToId, ownerId: userId, ownerType: 'player', isInParty: true }).lean();
-    if (!switchTarget)               { res.status(404).json({ data: null, error: 'Pokémon not found in your party' }); return; }
-    if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'That Pokémon has fainted' }); return; }
+    const switchToId = parseSwitchToId(switchToPokemonId, playerEntry.activePokemonId, res, 'Baton Pass requires a valid switchToPokemonId (who to pass to)');
+    if (!switchToId) return;
+    if (!await validatePlayerSwitchTarget(userId, switchToId, res)) return;
 
-    const alreadyUsedBP = playerEntry.usedPokemonIds.some(id => id.toString() === switchToPokemonId);
-    if (!alreadyUsedBP && battle.playerPokemonLimit !== null) {
-      if (playerEntry.usedPokemonIds.length >= battle.playerPokemonLimit) {
-        res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' }); return;
-      }
+    if (pokemonLimitReached(playerEntry.usedPokemonIds, switchToPokemonId!, battle.playerPokemonLimit)) {
+      res.status(400).json({ data: null, error: 'Pokémon limit reached for this battle' }); return;
     }
 
-    battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'move', moveId, switchToPokemonId: switchToId, targets: [], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'move', moveId, switchToPokemonId: switchToId, targets: [], resolved: false },
+      res,
+    );
     return;
   }
 
-  battle.turnQueue.push({ actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'move', moveId, targets: [], resolved: false });
-  await checkAndAdvance(battle);
-  battle.lastUpdatedAt = new Date();
-  await battle.save();
-
-  res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+  await queueActionAndRespond(
+    battle,
+    { actorId: userId, actorType: 'player', activePokemonId: playerEntry.activePokemonId, actionType: 'move', moveId, targets: [], resolved: false },
+    res,
+  );
 }
 
 export async function submitTarget(req: Request, res: Response): Promise<void> {
@@ -4164,18 +4187,7 @@ export async function dmSendOut(req: Request, res: Response): Promise<void> {
   }
 
   npcEntry.activePokemonId = pokeId;
-  const npcEntryEvents = await applyEntryAbilities(battle, pokeId, 'enemy');
-  const npcHazardEvents = await applyEntryHazards(battle, pokeId, 'enemy');
-  const npcWishEvents = await applyPendingWish(battle, pokeId, 'enemy');
-  const npcFaintEvents = await applyFaints(battle);
-  const npcEndEvents = await checkBattleEnd(battle);
-  appendToLog(battle, ...npcEntryEvents, ...npcHazardEvents, ...npcWishEvents, ...npcFaintEvents, ...npcEndEvents);
-  battle.lastUpdatedAt = new Date();
-  await battle.save();
-  await Battle.updateOne(
-    { _id: battle._id, 'enemySide.npcId': new mongoose.Types.ObjectId(npcId) },
-    { $set: { 'enemySide.$.activeSentOutOnTurn': battle.turnNumber } },
-  );
+  await finishSendOut(battle, pokeId, 'enemy', 'enemySide', 'npcId', new mongoose.Types.ObjectId(npcId));
 
   res.json({ data: { activePokemonId: pokemonId }, error: null });
 }
@@ -4218,11 +4230,11 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
       res.status(400).json({ data: null, error: `This Pokémon is locked into ${slugToDisplayName(npcLock.moveId)} and cannot do anything else!` }); return;
     }
     if (!npcEntry.activePokemonId) { res.status(400).json({ data: null, error: 'NPC has not sent out a Pokémon' }); return; }
-    battle.turnQueue.push({ actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId: npcLock.moveId, targets: [], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase, lockedMove: npcLock.moveId }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId: npcLock.moveId, targets: [], resolved: false },
+      res, { lockedMove: npcLock.moveId },
+    );
     return;
   }
 
@@ -4243,32 +4255,25 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
     const bagItem  = await Item.findOne({ ownerId: npcObjId, itemId }).lean();
     if (!bagItem || bagItem.quantity < 1) { res.status(400).json({ data: null, error: 'Item not found in NPC bag' }); return; }
 
-    battle.turnQueue.push({ actorId: npcObjId, actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'item', itemId, targets: [new mongoose.Types.ObjectId(targetPokemonId)], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: npcObjId, actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'item', itemId, targets: [new mongoose.Types.ObjectId(targetPokemonId)], resolved: false },
+      res,
+    );
     return;
   }
 
   if (actionType === 'switch') {
-    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) { res.status(400).json({ data: null, error: 'A valid switchToPokemonId is required for switch actions' }); return; }
-    if (npcEntry.activePokemonId?.toString() === switchToPokemonId)                { res.status(400).json({ data: null, error: 'That Pokémon is already active' }); return; }
+    const switchToId = parseSwitchToId(switchToPokemonId, npcEntry.activePokemonId, res, 'A valid switchToPokemonId is required for switch actions');
+    if (!switchToId) return;
+    if (!await validateNpcSwitchTarget(npcId, switchToPokemonId!, res)) return;
 
-    const npc = await Npc.findById(npcId, 'party').lean();
-    if (!npc || !npc.party.some((id: mongoose.Types.ObjectId) => id.toString() === switchToPokemonId)) {
-      res.status(400).json({ data: null, error: "That Pokémon is not in this NPC's party" }); return;
-    }
-    const switchTarget = await Pokemon.findById(switchToPokemonId, 'currentHp').lean();
-    if (!switchTarget)               { res.status(404).json({ data: null, error: 'Switch target Pokémon not found' }); return; }
-    if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'Cannot switch to a fainted Pokémon' }); return; }
-
-    const activePokemonId = npcEntry.activePokemonId ?? new mongoose.Types.ObjectId(switchToPokemonId);
-    battle.turnQueue.push({ actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId, actionType: 'switch', switchToPokemonId: new mongoose.Types.ObjectId(switchToPokemonId), targets: [], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    const activePokemonId = npcEntry.activePokemonId ?? switchToId;
+    await queueActionAndRespond(
+      battle,
+      { actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId, actionType: 'switch', switchToPokemonId: switchToId, targets: [], resolved: false },
+      res,
+    );
     return;
   }
 
@@ -4284,31 +4289,23 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
   // See submitMove — Baton Pass needs its incoming Pokémon chosen up front and
   // auto-resolves like a switch, never entering the interactive targeting phase.
   if (moveId === 'baton-pass') {
-    if (!switchToPokemonId || !mongoose.Types.ObjectId.isValid(switchToPokemonId)) { res.status(400).json({ data: null, error: 'Baton Pass requires a valid switchToPokemonId (who to pass to)' }); return; }
-    if (npcEntry.activePokemonId?.toString() === switchToPokemonId)                { res.status(400).json({ data: null, error: 'That Pokémon is already active' }); return; }
+    const switchToId = parseSwitchToId(switchToPokemonId, npcEntry.activePokemonId, res, 'Baton Pass requires a valid switchToPokemonId (who to pass to)');
+    if (!switchToId) return;
+    if (!await validateNpcSwitchTarget(npcId, switchToPokemonId!, res)) return;
 
-    const npc = await Npc.findById(npcId, 'party').lean();
-    if (!npc || !npc.party.some((id: mongoose.Types.ObjectId) => id.toString() === switchToPokemonId)) {
-      res.status(400).json({ data: null, error: "That Pokémon is not in this NPC's party" }); return;
-    }
-    const switchTarget = await Pokemon.findById(switchToPokemonId, 'currentHp').lean();
-    if (!switchTarget)               { res.status(404).json({ data: null, error: 'Switch target Pokémon not found' }); return; }
-    if (switchTarget.currentHp <= 0) { res.status(400).json({ data: null, error: 'Cannot switch to a fainted Pokémon' }); return; }
-
-    battle.turnQueue.push({ actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId, switchToPokemonId: new mongoose.Types.ObjectId(switchToPokemonId), targets: [], resolved: false });
-    await checkAndAdvance(battle);
-    battle.lastUpdatedAt = new Date();
-    await battle.save();
-    res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+    await queueActionAndRespond(
+      battle,
+      { actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId, switchToPokemonId: switchToId, targets: [], resolved: false },
+      res,
+    );
     return;
   }
 
-  battle.turnQueue.push({ actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId, targets: [], resolved: false });
-  await checkAndAdvance(battle);
-  battle.lastUpdatedAt = new Date();
-  await battle.save();
-
-  res.json({ data: { submitted: true, phase: battle.phase }, error: null });
+  await queueActionAndRespond(
+    battle,
+    { actorId: new mongoose.Types.ObjectId(npcId), actorType: 'npc', activePokemonId: npcEntry.activePokemonId, actionType: 'move', moveId, targets: [], resolved: false },
+    res,
+  );
 }
 
 async function estimateDamage(
