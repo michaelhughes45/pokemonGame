@@ -421,6 +421,31 @@ export default function BattlePage() {
   // Which wild Pokémon the player has chosen to throw a ball at.
   // null = nothing selected yet (only relevant in multi-wild battles).
   const [catchTarget,         setCatchTarget]         = useState<string | null>(null);
+  // Battle Log mode: 'live' is the existing newest-first view; 'replay' steps
+  // through turnLog chronologically from turn 1. replayIndex is 0-based into
+  // battle.turnLog (already stored in ascending turn order) — turns up to and
+  // including this index are revealed.
+  const [logMode,             setLogMode]             = useState<'live' | 'replay'>('live');
+  const [replayIndex,         setReplayIndex]         = useState(0);
+  const [replayPlaying,       setReplayPlaying]       = useState(false);
+
+  // Replay autoplay — advances one turn every 2s while playing; auto-pauses
+  // on reaching the last turn. Re-created whenever the log grows so a battle
+  // that's still live can keep autoplaying into newly-arrived turns.
+  useEffect(() => {
+    if (logMode !== 'replay' || !replayPlaying || !battle) return;
+    const maxIndex = battle.turnLog.length - 1;
+    const timer = setInterval(() => {
+      setReplayIndex(i => {
+        if (i >= maxIndex) {
+          setReplayPlaying(false);
+          return i;
+        }
+        return i + 1;
+      });
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [logMode, replayPlaying, battle?.turnLog.length]);
 
   // Polling loop — fetches full battle state every 3 seconds
   useEffect(() => {
@@ -956,7 +981,7 @@ export default function BattlePage() {
     return (
       <div className="min-h-screen bg-background flex flex-col items-center justify-center gap-4 p-4">
         <p className="text-sm text-destructive">{error || 'Battle not found.'}</p>
-        <Link to={isDm ? '/dm' : '/dashboard'} className="text-sm underline text-muted-foreground">
+        <Link to={isDm ? '/dm' : '/dashboard'} className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
           ← {isDm ? 'DM Panel' : 'Dashboard'}
         </Link>
       </div>
@@ -1126,7 +1151,7 @@ export default function BattlePage() {
                           <div className="flex items-center gap-2 mb-1">
                             <button
                               onClick={() => setPendingBatonPass(false)}
-                              className="text-xs text-muted-foreground hover:text-foreground min-h-11 pr-2"
+                              className="text-xs text-muted-foreground hover:text-foreground min-h-11 min-w-11 pr-2"
                             >
                               ← Back
                             </button>
@@ -1197,7 +1222,7 @@ export default function BattlePage() {
                           <div className="flex items-center gap-2 mb-1">
                             <button
                               onClick={() => setSelectedItemId(null)}
-                              className="text-xs text-muted-foreground hover:text-foreground min-h-11 pr-2"
+                              className="text-xs text-muted-foreground hover:text-foreground min-h-11 min-w-11 pr-2"
                             >
                               ← Back
                             </button>
@@ -1259,7 +1284,7 @@ export default function BattlePage() {
                                   catchTarget === entry.activePokemonId ? null : entry.activePokemonId!
                                 )}
                                 className={[
-                                  'flex items-center justify-between rounded-md border px-3 py-2 text-sm text-left transition-colors min-h-9',
+                                  'flex items-center justify-between rounded-md border px-3 py-2 text-sm text-left transition-colors min-h-11',
                                   catchTarget === entry.activePokemonId
                                     ? 'bg-primary text-primary-foreground border-primary'
                                     : 'hover:bg-accent cursor-pointer',
@@ -1793,7 +1818,7 @@ export default function BattlePage() {
                       <select
                         value={weatherInput}
                         onChange={e => setWeatherInput(e.target.value)}
-                        className="flex-1 rounded-md border px-3 py-2 text-sm bg-background"
+                        className="flex-1 h-11 md:h-9 rounded-md border px-3 py-2 text-base md:text-sm bg-background"
                       >
                         <option value="">— clear —</option>
                         <option value="rain">Rain</option>
@@ -1808,7 +1833,7 @@ export default function BattlePage() {
                         placeholder="turns"
                         value={weatherTurns}
                         onChange={e => setWeatherTurns(e.target.value)}
-                        className="w-20 rounded-md border px-3 py-2 text-sm bg-background"
+                        className="w-20 h-11 md:h-9 rounded-md border px-3 py-2 text-base md:text-sm bg-background"
                       />
                       <Button
                         onClick={handleSetWeather}
@@ -1834,27 +1859,102 @@ export default function BattlePage() {
         {/* Battle Log — visible to everyone once events exist, including after battle ends */}
         {battle.status !== 'waiting' && battle.turnLog.length > 0 && (
           <Card>
-            <CardHeader><CardTitle className="text-base">Battle Log</CardTitle></CardHeader>
-            <CardContent>
-              <div className="flex flex-col gap-4 max-h-64 overflow-y-auto pr-1">
-                {[...battle.turnLog].reverse().map((entry, idx) => (
-                  <div key={entry.turn}>
-                    <p className={`text-xs font-semibold mb-1 ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}>
-                      Turn {entry.turn}
-                    </p>
-                    <ul className="flex flex-col gap-1">
-                      {entry.events.map((event, i) => (
-                        <li
-                          key={i}
-                          className={`text-sm ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}
-                        >
-                          {event}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
+            <CardHeader>
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-base">Battle Log</CardTitle>
+                <Tabs
+                  value={logMode}
+                  onValueChange={v => {
+                    setLogMode(v as 'live' | 'replay');
+                    setReplayIndex(0);
+                    setReplayPlaying(false);
+                  }}
+                >
+                  <TabsList>
+                    <TabsTrigger value="live">Live</TabsTrigger>
+                    <TabsTrigger value="replay">Replay</TabsTrigger>
+                  </TabsList>
+                </Tabs>
               </div>
+            </CardHeader>
+            <CardContent>
+              {logMode === 'live' ? (
+                <div className="flex flex-col gap-4 max-h-64 overflow-y-auto pr-1">
+                  {[...battle.turnLog].reverse().map((entry, idx) => (
+                    <div key={entry.turn}>
+                      <p className={`text-xs font-semibold mb-1 ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}>
+                        Turn {entry.turn}
+                      </p>
+                      <ul className="flex flex-col gap-1">
+                        {entry.events.map((event, i) => (
+                          <li
+                            key={i}
+                            className={`text-sm ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}
+                          >
+                            {event}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between gap-2 mb-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={replayIndex === 0}
+                      onClick={() => { setReplayPlaying(false); setReplayIndex(i => Math.max(0, i - 1)); }}
+                    >
+                      ← Prev
+                    </Button>
+                    <div className="flex flex-col items-center gap-1">
+                      <p className="text-xs text-muted-foreground">
+                        Turn {battle.turnLog[replayIndex]?.turn ?? 1} of {battle.turnLog[battle.turnLog.length - 1]?.turn ?? 1}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={replayIndex >= battle.turnLog.length - 1 && !replayPlaying}
+                        onClick={() => setReplayPlaying(p => !p)}
+                      >
+                        {replayPlaying ? 'Pause' : 'Play'}
+                      </Button>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={replayIndex >= battle.turnLog.length - 1}
+                      onClick={() => { setReplayPlaying(false); setReplayIndex(i => Math.min(battle.turnLog.length - 1, i + 1)); }}
+                    >
+                      Next →
+                    </Button>
+                  </div>
+                  <div className="flex flex-col gap-4 max-h-64 overflow-y-auto pr-1">
+                    {battle.turnLog.slice(0, replayIndex + 1).map((entry, idx, visible) => {
+                      const isCurrent = idx === visible.length - 1;
+                      return (
+                        <div key={entry.turn}>
+                          <p className={`text-xs font-semibold mb-1 ${isCurrent ? 'text-foreground' : 'text-muted-foreground'}`}>
+                            Turn {entry.turn}
+                          </p>
+                          <ul className="flex flex-col gap-1">
+                            {entry.events.map((event, i) => (
+                              <li
+                                key={i}
+                                className={`text-sm ${isCurrent ? 'text-foreground' : 'text-muted-foreground'}`}
+                              >
+                                {event}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         )}
