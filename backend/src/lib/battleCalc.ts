@@ -141,8 +141,12 @@ export function resolveActiveAbilitySlugs(
 // matching this project's "abilities stack" model — real Trace fully replaces the
 // user's ability, but that doesn't map cleanly onto a Pokémon that already has more
 // than one ability active at once.
+// Narrowed to just the fields actually read — lets read-only call sites (e.g.
+// getBattleState's .lean() read, or the AI move/target scoring in lib/npcAi.ts)
+// pass a plain lean object instead of a full HydratedDocument, which they don't
+// have and don't need one just to read two fields.
 export function getEffectiveAbilitySlugs(
-  battle: HydratedDocument<IBattle>,
+  battle: Pick<IBattle, 'hiddenAbilitiesEnabled' | 'tracedAbility'>,
   pokemonId: string,
   abilities: CachedAbility[],
   hasHiddenAbility: boolean,

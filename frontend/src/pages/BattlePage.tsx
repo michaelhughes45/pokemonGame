@@ -130,6 +130,10 @@ type BattleState = {
   currentMoveTargetCategory: 'single' | 'auto' | null;
   currentMoveAllyTarget: 'ally-only' | 'ally-or-foe' | null;
   currentMoveAllyIds: string[];
+  // Milestone 6.6 — fresh-computed suggestion for the current NPC/wild actor's
+  // single-target foe move; null for player turns, no-target/auto/ally moves, or
+  // when there's simply nothing left to target.
+  currentMoveSuggestedTargetId: string | null;
   playerPokemonLimit: number | null;
   wildCatchable: boolean;
   turnLog: TurnLogEntry[];
@@ -558,11 +562,17 @@ export default function BattlePage() {
     return () => { cancelled = true; };
   }, [activePokemonId, token, battle?.turnNumber]);
 
-  // Reset target selection whenever it becomes a new actor's turn
+  // Reset target selection whenever it becomes a new actor's turn — milestone 6.6:
+  // pre-select the fresh-computed NPC/wild suggestion (if any) instead of leaving
+  // it empty, so the DM can one-click "Confirm Target" or click a different
+  // Pokémon to override. Deliberately NOT in the dependency array below — this
+  // should only re-run when the actor turn actually changes, not on every 3s poll
+  // (which would wipe out a DM's manual override mid-turn).
   const currentTargetIndex = battle?.currentTargetIndex;
   useEffect(() => {
-    setSelectedTargets([]);
+    setSelectedTargets(battle?.currentMoveSuggestedTargetId ? [battle.currentMoveSuggestedTargetId] : []);
     setActionError('');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTargetIndex]);
 
   // Fetch (and refresh each round) all NPC parties in this battle so HP and PP stay current.

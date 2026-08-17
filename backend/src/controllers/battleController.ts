@@ -13,7 +13,7 @@ import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem,
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
 import { ivsFromSpread, getIvsForOwner } from '../lib/trainerIv';
-import { chooseNpcMoveId, NpcAiStrategy, AI_STRATEGIES } from '../lib/npcAi';
+import { chooseNpcMoveId, chooseNpcTargetId, NpcAiStrategy, AI_STRATEGIES } from '../lib/npcAi';
 import {
   NO_TARGET_MOVE_IDS,
   getMoveTargetCategory,
@@ -4188,7 +4188,7 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
   ].filter((pid): pid is mongoose.Types.ObjectId => pid != null);
 
   const activePokemons = allActivePokemonIds.length > 0
-    ? await Pokemon.find({ _id: { $in: allActivePokemonIds } }, 'ownerId ownerType nickname speciesId currentHp level nature statusCondition volatileStatus moves evs').lean()
+    ? await Pokemon.find({ _id: { $in: allActivePokemonIds } }, 'ownerId ownerType nickname speciesId currentHp level nature statusCondition volatileStatus moves evs heldItem hasHiddenAbility').lean()
     : [];
 
   const speciesIds = [...new Set(activePokemons.map(p => p.speciesId))];
@@ -4261,6 +4261,14 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
   let currentMoveTargetCategory: 'single' | 'auto' | null = null;
   let currentMoveAllyTarget: 'ally-only' | 'ally-or-foe' | null = null;
   let currentMoveAllyIds: string[] = [];
+  // Milestone 6.6 — a fresh target suggestion for whichever NPC/wild actor is up
+  // next in the targeting phase, computed against CURRENT board state on every
+  // poll (never precomputed/stale). Only meaningful for single-target foe-picking
+  // moves — auto moves already hit everyone with no picker, and ally-only/
+  // ally-or-foe moves are a separate, rarer picker shape this milestone doesn't
+  // cover (matches the "Worst/Random/Highest-Damage tiers' target selection" scope
+  // from the Key Decision this was designed against).
+  let currentMoveSuggestedTargetId: string | null = null;
   if (battle.phase === 'targeting' && battle.currentTargetIndex < battle.turnQueue.length) {
     const currentEntry = battle.turnQueue[battle.currentTargetIndex];
     if (currentEntry.moveId && currentEntry.activePokemonId) {
@@ -4286,6 +4294,15 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
           .filter(e => e.activePokemonId != null && e.activePokemonId.toString() !== currentEntry.activePokemonId!.toString())
           .map(e => e.activePokemonId!.toString());
       }
+
+      if (currentEntry.actorType === 'npc' && currentMoveTargetCategory === 'single' && !currentMoveAllyTarget && actorPoke) {
+        // The acting Pokémon's own enemySide slot — actorId is the npcId for real
+        // NPCs but the wild Pokémon's own activePokemonId for wild, so matching by
+        // activePokemonId resolves both uniformly (mirrors dmAutoSubmit's convention).
+        const actingSlot = battle.enemySide.find(e => e.activePokemonId?.toString() === currentEntry.activePokemonId!.toString());
+        const strategy: NpcAiStrategy = actingSlot?.aiStrategy ?? 'random';
+        currentMoveSuggestedTargetId = await chooseNpcTargetId(battle, actorPoke, currentEntry.moveId, strategy);
+      }
     }
   }
 
@@ -4298,6 +4315,7 @@ export async function getBattleState(req: Request, res: Response): Promise<void>
       currentMoveTargetCategory,
       currentMoveAllyTarget,
       currentMoveAllyIds,
+      currentMoveSuggestedTargetId,
       wildCatchable:             battle.wildCatchable,
     },
     error: null,
