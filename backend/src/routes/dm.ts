@@ -10,6 +10,7 @@ import {
   getTmHmCatalog,
   getNpcs,
   createNpc,
+  setNpcAiStrategy,
   giveNpcPokemon,
   getNpcParty,
   blockEvolution,
@@ -65,6 +66,7 @@ router.get('/tm-hm-moves',                    getTmHmCatalog);
 // --- NPCs ---
 router.get('/npcs',                           getNpcs);
 router.post('/npcs',                          createNpc);
+router.patch('/npcs/:npcId/ai-strategy',      setNpcAiStrategy);
 router.post('/npcs/:npcId/pokemon',           giveNpcPokemon);
 router.get('/npcs/:npcId/party',              getNpcParty);
 router.post('/npcs/:npcId/heal',              healNpc);

@@ -8,6 +8,7 @@ import { formatName as formatMove } from '../lib/formatName';
 import { HpBar } from '../components/HpBar';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
+import { Label } from '../components/ui/label';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs';
 
 const API = import.meta.env.VITE_API_URL;
@@ -39,6 +40,13 @@ type BagItem = {
 const EV_BERRIES = new Set([
   'pomeg-berry', 'kelpsy-berry', 'qualot-berry', 'hondew-berry', 'grepa-berry', 'tamato-berry',
 ]);
+
+// Milestone 6.5 — battle-local AI tier override options. 'smartest' behaves
+// identically to 'highest-damage' until 6.7 gives it real tactics.
+const AI_STRATEGY_OPTIONS = ['worst', 'random', 'highest-damage', 'smartest'] as const;
+const AI_STRATEGY_LABELS: Record<string, string> = {
+  worst: 'Worst', random: 'Random', 'highest-damage': 'Highest Damage', smartest: 'Smartest',
+};
 
 type StatStages = {
   atk: number; def: number; spa: number; spd: number;
@@ -85,6 +93,9 @@ type EnemySideEntry = {
   activePokemonId: string | null;
   fainted: string[];
   activePokemonInfo: ActivePokemonInfo | null;
+  // Battle-local AI tier override (milestone 6.5) — undefined for pvp entries
+  // (real trainers, never AI-controlled).
+  aiStrategy?: 'worst' | 'random' | 'highest-damage' | 'smartest';
 };
 
 // Returned by GET /api/dm/npcs/:npcId/party
@@ -408,6 +419,12 @@ export default function BattlePage() {
   const [npcBags,             setNpcBags]             = useState<Record<string, BagItem[]>>({});
   const [npcBagLoading,       setNpcBagLoading]       = useState<string | null>(null);
   const [npcSelectedItem,     setNpcSelectedItem]     = useState<Record<string, string | null>>({});
+  // Milestone 6.5 — Move tab is now select-then-confirm like the Item tab already
+  // was, so "Auto NPCs" suggestions and manual move picks alike sit here until a
+  // bulk "Submit All" commits them. Keyed by the wild Pokémon's own activePokemonId
+  // for wild slots, or `${npcId}:${slotIndex}` (matching npcActionTab's slotKey
+  // convention) for NPC slots.
+  const [npcSelectedMove,     setNpcSelectedMove]     = useState<Record<string, string>>({});
   const [weatherInput,        setWeatherInput]        = useState('');
   const [weatherTurns,        setWeatherTurns]        = useState('');
   const [weatherActionError,  setWeatherActionError]  = useState('');
@@ -503,6 +520,7 @@ export default function BattlePage() {
     setActionTab('move');
     setSelectedItemId(null);
     setRunConfirmPending(false);
+    setNpcSelectedMove({});
   }, [battle?.turnNumber]);
 
   // Fetch active Pokémon detail (moves, type data) when activePokemonId becomes known.
@@ -818,19 +836,6 @@ export default function BattlePage() {
     } finally { setSubmitting(false); }
   }
 
-  // slotPokemonId scopes the submission to the specific NPC slot (multi-slot battles)
-  async function handleDmSubmitMove(npcId: string, moveId: string, slotPokemonId?: string) {
-    if (!id) return;
-    setSubmitting(true); setActionError('');
-    try {
-      await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
-        { npcId, moveId, ...(slotPokemonId ? { activePokemonId: slotPokemonId } : {}) },
-        { headers: { Authorization: `Bearer ${token}` } },
-      );
-    } catch (err: unknown) {
-      setActionError(apiError(err, 'Failed to submit move.'));
-    } finally { setSubmitting(false); }
-  }
 
   async function handleDmSubmitSwitch(npcId: string, switchToPokemonId: string, slotPokemonId?: string) {
     if (!id) return;
@@ -871,16 +876,101 @@ export default function BattlePage() {
     } finally { setSubmitting(false); }
   }
 
-  async function handleDmAutoSubmit() {
+  // Battle-local AI tier override (milestone 6.5) — npcId is the wild Pokémon's own
+  // activePokemonId for wild slots (same overloaded convention dm-submit-move already
+  // uses). Updates local state optimistically so the dropdown reflects the choice
+  // immediately instead of waiting for the next 3s poll; a failed request just gets
+  // corrected by that same next poll rather than an explicit revert.
+  async function handleChangeNpcAiStrategy(npcId: string, aiStrategy: string, slotIndex?: number) {
+    if (!id) return;
+    setBattle(prev => {
+      if (!prev) return prev;
+      let idx = -1;
+      return {
+        ...prev,
+        enemySide: prev.enemySide.map(e => {
+          const matches = prev.type === 'wild' ? e.activePokemonId === npcId : e.npcId === npcId;
+          if (!matches) return e;
+          idx++;
+          const isTarget = slotIndex === undefined || idx === slotIndex;
+          return isTarget ? { ...e, aiStrategy: aiStrategy as EnemySideEntry['aiStrategy'] } : e;
+        }),
+      };
+    });
+    try {
+      await axios.patch(`${API}/api/battles/${id}/npc-ai-strategy`,
+        { npcId, aiStrategy, ...(slotIndex !== undefined ? { slotIndex } : {}) },
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+    } catch (err: unknown) {
+      setActionError(apiError(err, 'Failed to change AI strategy.'));
+    }
+  }
+
+  // Milestone 6.5 — "Auto NPCs" is now suggest-and-review, not instant-submit:
+  // fetches a suggested move per unsubmitted NPC/wild slot and pre-fills each into
+  // npcSelectedMove (the same select-then-confirm state the Move tab's buttons now
+  // use, mirroring how the Item tab already worked), replacing any prior selection.
+  // The DM can still click a different move on any slot to override before
+  // committing everything at once via handleSubmitAllNpcMoves.
+  async function handleAutoNpcSuggest() {
     if (!id) return;
     setSubmitting(true); setActionError('');
     try {
-      await axios.post(`${API}/api/battles/${id}/dm-auto-submit`, {}, {
+      const res = await axios.post(`${API}/api/battles/${id}/dm-auto-submit`, {}, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      const suggestions: { npcId: string; slotIndex: number; moveId: string }[] = res.data.data?.suggestions ?? [];
+      setNpcSelectedMove(prev => {
+        const next = { ...prev };
+        for (const s of suggestions) {
+          const isWild = battle?.enemySide.some(e => !e.npcId && e.activePokemonId === s.npcId) ?? false;
+          next[isWild ? s.npcId : `${s.npcId}:${s.slotIndex}`] = s.moveId;
+        }
+        return next;
+      });
     } catch (err: unknown) {
-      setActionError(apiError(err, 'Failed to auto-submit NPC moves.'));
+      setActionError(apiError(err, 'Failed to suggest NPC moves.'));
     } finally { setSubmitting(false); }
+  }
+
+  // Commits every currently-selected Move-tab pick (auto-suggested or manually-
+  // picked alike) — sequential awaits since these all mutate the same battle
+  // document. Each slot's selection is cleared as soon as ITS OWN submission
+  // succeeds (not all at once at the end) so one slot failing — e.g. a stale
+  // selection for a Pokémon that fainted to a faster attacker earlier this same
+  // batch — doesn't block or desync the rest of the batch.
+  async function handleSubmitAllNpcMoves() {
+    if (!id || !battle) return;
+    const entries = Object.entries(npcSelectedMove).filter(([, moveId]) => moveId);
+    if (entries.length === 0) return;
+    setSubmitting(true); setActionError('');
+    let lastError = '';
+    for (const [key, moveId] of entries) {
+      try {
+        if (key.includes(':')) {
+          const [npcId, slotIdxStr] = key.split(':');
+          const slot = battle.enemySide.filter(e => e.npcId === npcId)[Number(slotIdxStr)];
+          if (slot?.activePokemonId) {
+            await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
+              { npcId, moveId, activePokemonId: slot.activePokemonId },
+              { headers: { Authorization: `Bearer ${token}` } },
+            );
+          }
+        } else {
+          // Wild — key is the wild Pokémon's own activePokemonId (no slot index needed).
+          await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
+            { npcId: key, moveId },
+            { headers: { Authorization: `Bearer ${token}` } },
+          );
+        }
+        setNpcSelectedMove(prev => { const next = { ...prev }; delete next[key]; return next; });
+      } catch (err: unknown) {
+        lastError = apiError(err, 'Failed to submit one or more NPC moves.');
+      }
+    }
+    if (lastError) setActionError(lastError);
+    setSubmitting(false);
   }
 
   async function handleAdvanceRound() {
@@ -1376,27 +1466,38 @@ export default function BattlePage() {
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
                 <CardTitle className="text-base">NPC Actions</CardTitle>
-                {(() => {
-                  const npcSlotsWithPokemon = battle.enemySide.filter(e => e.activePokemonId);
-                  const allSubmitted = npcSlotsWithPokemon.length > 0 && npcSlotsWithPokemon.every(e => {
-                    const actorId = e.npcId ?? e.activePokemonId!;
-                    return battle.turnQueue.some(
-                      q => q.actorId === actorId && q.actorType === 'npc'
-                        && q.activePokemonId === e.activePokemonId,
+                <div className="flex items-center gap-2">
+                  {(() => {
+                    const npcSlotsWithPokemon = battle.enemySide.filter(e => e.activePokemonId);
+                    const allSubmitted = npcSlotsWithPokemon.length > 0 && npcSlotsWithPokemon.every(e => {
+                      const actorId = e.npcId ?? e.activePokemonId!;
+                      return battle.turnQueue.some(
+                        q => q.actorId === actorId && q.actorType === 'npc'
+                          && q.activePokemonId === e.activePokemonId,
+                      );
+                    });
+                    return (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleAutoNpcSuggest}
+                        disabled={submitting || allSubmitted || npcSlotsWithPokemon.length === 0}
+                        className="min-h-9 text-xs"
+                      >
+                        Suggest Moves
+                      </Button>
                     );
-                  });
-                  return (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleDmAutoSubmit}
-                      disabled={submitting || allSubmitted || npcSlotsWithPokemon.length === 0}
-                      className="min-h-9 text-xs"
-                    >
-                      Auto NPCs
-                    </Button>
-                  );
-                })()}
+                  })()}
+                  <Button
+                    variant="default"
+                    size="sm"
+                    onClick={handleSubmitAllNpcMoves}
+                    disabled={submitting || Object.values(npcSelectedMove).every(v => !v)}
+                    className="min-h-9 text-xs"
+                  >
+                    Submit All
+                  </Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="flex flex-col gap-4">
@@ -1420,6 +1521,19 @@ export default function BattlePage() {
                         <p className="text-sm font-medium">
                           Wild {entry.activePokemonInfo?.speciesName ?? entry.npcName}
                         </p>
+                        {entry.activePokemonId && (
+                          <div className="flex items-center gap-2">
+                            <Label htmlFor={`ai-${actorId}`} className="text-xs text-muted-foreground shrink-0">AI</Label>
+                            <select
+                              id={`ai-${actorId}`}
+                              value={entry.aiStrategy ?? 'random'}
+                              onChange={e => handleChangeNpcAiStrategy(actorId, e.target.value)}
+                              className="h-9 md:h-8 rounded-md border px-2 py-1 text-sm md:text-xs bg-background"
+                            >
+                              {AI_STRATEGY_OPTIONS.map(s => <option key={s} value={s}>{AI_STRATEGY_LABELS[s]}</option>)}
+                            </select>
+                          </div>
+                        )}
                         {!entry.activePokemonId ? (
                           <p className="text-xs text-muted-foreground">Fainted</p>
                         ) : wildMoveSubmitted ? (
@@ -1432,14 +1546,15 @@ export default function BattlePage() {
                           <div className="grid grid-cols-2 gap-2">
                             {wildMoves.map((m: MoveSlot) => {
                               const noPP = m.currentPP <= 0;
+                              const isSelected = npcSelectedMove[actorId] === m.moveId;
                               return (
                                 <button
                                   key={m.moveId}
-                                  onClick={() => !noPP && !submitting && handleDmSubmitMove(actorId, m.moveId)}
-                                  disabled={noPP || submitting}
+                                  onClick={() => !noPP && setNpcSelectedMove(prev => ({ ...prev, [actorId]: m.moveId }))}
+                                  disabled={noPP}
                                   className={[
                                     'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                                    noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                    noPP ? 'opacity-40 cursor-not-allowed bg-muted' : isSelected ? 'bg-accent border-primary' : 'hover:bg-accent cursor-pointer',
                                   ].join(' ')}
                                 >
                                   <span className="font-medium">{formatMove(m.moveId)}</span>
@@ -1483,6 +1598,20 @@ export default function BattlePage() {
                           >
                             {slotLabel && (
                               <p className="text-xs text-muted-foreground font-medium">{slotLabel}</p>
+                            )}
+
+                            {slot.activePokemonId && (
+                              <div className="flex items-center gap-2">
+                                <Label htmlFor={`ai-${slotKey}`} className="text-xs text-muted-foreground shrink-0">AI</Label>
+                                <select
+                                  id={`ai-${slotKey}`}
+                                  value={slot.aiStrategy ?? 'random'}
+                                  onChange={e => handleChangeNpcAiStrategy(npcId, e.target.value, slotIdx)}
+                                  className="h-9 md:h-8 rounded-md border px-2 py-1 text-sm md:text-xs bg-background"
+                                >
+                                  {AI_STRATEGY_OPTIONS.map(s => <option key={s} value={s}>{AI_STRATEGY_LABELS[s]}</option>)}
+                                </select>
+                              </div>
                             )}
 
                             {!slot.activePokemonId ? (
@@ -1553,14 +1682,15 @@ export default function BattlePage() {
                                   <div className="grid grid-cols-2 gap-2">
                                     {(slot.activePokemonInfo?.moves ?? activePokemon.moves).map((m: MoveSlot) => {
                                       const noPP = m.currentPP <= 0;
+                                      const isSelected = npcSelectedMove[slotKey] === m.moveId;
                                       return (
                                         <button
                                           key={m.moveId}
-                                          onClick={() => !noPP && !submitting && handleDmSubmitMove(npcId, m.moveId, slot.activePokemonId!)}
-                                          disabled={noPP || submitting}
+                                          onClick={() => !noPP && setNpcSelectedMove(prev => ({ ...prev, [slotKey]: m.moveId }))}
+                                          disabled={noPP}
                                           className={[
                                             'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
-                                            noPP ? 'opacity-40 cursor-not-allowed bg-muted' : 'hover:bg-accent cursor-pointer',
+                                            noPP ? 'opacity-40 cursor-not-allowed bg-muted' : isSelected ? 'bg-accent border-primary' : 'hover:bg-accent cursor-pointer',
                                           ].join(' ')}
                                         >
                                           <span className="font-medium">{formatMove(m.moveId)}</span>

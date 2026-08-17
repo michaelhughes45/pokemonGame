@@ -337,7 +337,7 @@ const NATURES = [
 ];
 
 // Tailwind classes shared across all native <select> elements on this page
-const selectClass = 'w-full border border-input bg-background rounded-md px-3 py-2 text-sm min-h-11 focus:outline-none focus:ring-2 focus:ring-ring';
+const selectClass = 'w-full border border-input bg-background rounded-md px-3 py-2 text-base md:text-sm min-h-11 focus:outline-none focus:ring-2 focus:ring-ring';
 
 // ── Reset starter card ───────────────────────────────────────────────────────
 
@@ -639,7 +639,7 @@ function GiveItemCard({ token }: { token: string | null }) {
       <CardContent>
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
 
-          <label className="flex items-center gap-2 text-sm">
+          <label className="flex items-center gap-2 text-sm min-h-11">
             <input
               type="checkbox"
               checked={giveToAll}
@@ -917,7 +917,7 @@ function ShopCatalogCard({ token }: { token: string | null }) {
           const allSelected = items.every(e => selected.has(e.itemId));
           return (
             <div key={pocket} className="flex flex-col gap-2">
-              <label className="flex items-center gap-2 text-sm font-medium">
+              <label className="flex items-center gap-2 text-sm font-medium min-h-11 md:min-h-8">
                 <input
                   type="checkbox"
                   checked={allSelected}
@@ -928,7 +928,7 @@ function ShopCatalogCard({ token }: { token: string | null }) {
               </label>
               <div className="flex flex-col gap-1 pl-6">
                 {items.map(entry => (
-                  <label key={entry.itemId} className="flex items-center justify-between gap-2 text-sm">
+                  <label key={entry.itemId} className="flex items-center justify-between gap-2 text-sm min-h-11 md:min-h-8">
                     <span className="flex items-center gap-2">
                       <input
                         type="checkbox"
@@ -960,15 +960,25 @@ function ShopCatalogCard({ token }: { token: string | null }) {
 // ── NPC card ─────────────────────────────────────────────────────────────────
 // Lists the DM's NPCs, lets them create new ones, and gives Pokémon to each.
 
-type NpcSummary = { _id: string; name: string; type: string; partyCount: number };
+type AiStrategy = 'worst' | 'random' | 'highest-damage' | 'smartest';
+type NpcSummary = { _id: string; name: string; type: string; partyCount: number; aiStrategy: AiStrategy };
+
+// Milestone 6.5 — 'smartest' behaves identically to 'highest-damage' until 6.7
+// gives it real tactics; still offered here since it's part of the redefined tier set.
+const AI_STRATEGY_LABELS: Record<AiStrategy, string> = {
+  worst: 'Worst', random: 'Random', 'highest-damage': 'Highest Damage', smartest: 'Smartest',
+};
+const AI_STRATEGY_OPTIONS: AiStrategy[] = ['worst', 'random', 'highest-damage', 'smartest'];
 
 function NpcCard({ token }: { token: string | null }) {
   const [npcs,         setNpcs]         = useState<NpcSummary[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [newName,      setNewName]      = useState('');
   const [newType,      setNewType]      = useState<'trainer' | 'wild'>('trainer');
+  const [newAiStrategy, setNewAiStrategy] = useState<AiStrategy>('random');
   const [creating,     setCreating]     = useState(false);
   const [createError,  setCreateError]  = useState('');
+  const [aiSaving,     setAiSaving]     = useState<string | null>(null);
   // Which NPC's give-pokemon form is expanded
   const [expandedNpc,  setExpandedNpc]  = useState<string | null>(null);
   // Give-pokemon form fields (shared across all NPCs — only one open at a time)
@@ -1004,13 +1014,29 @@ function NpcCard({ token }: { token: string | null }) {
     if (!newName.trim()) return;
     setCreateError(''); setCreating(true);
     try {
-      const res = await axios.post(`${API}/api/dm/npcs`, { name: newName.trim(), type: newType }, { headers });
+      const res = await axios.post(`${API}/api/dm/npcs`, { name: newName.trim(), type: newType, aiStrategy: newAiStrategy }, { headers });
       setNpcs(prev => [...prev, res.data.data]);
       setNewName('');
+      setNewAiStrategy('random');
     } catch (err: unknown) {
       setCreateError(apiError(err, 'Failed to create NPC'));
     } finally {
       setCreating(false);
+    }
+  }
+
+  // Edits an existing NPC's permanent default AI tier — does not touch any
+  // battle already in progress (those use their own battle-local override).
+  async function handleChangeAiStrategy(npcId: string, aiStrategy: AiStrategy) {
+    setAiSaving(npcId);
+    const prev = npcs;
+    setNpcs(p => p.map(n => n._id === npcId ? { ...n, aiStrategy } : n));
+    try {
+      await axios.patch(`${API}/api/dm/npcs/${npcId}/ai-strategy`, { aiStrategy }, { headers });
+    } catch {
+      setNpcs(prev); // revert on failure
+    } finally {
+      setAiSaving(null);
     }
   }
 
@@ -1042,7 +1068,7 @@ function NpcCard({ token }: { token: string | null }) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>NPCs</CardTitle>
-        <Button variant="ghost" size="sm" onClick={loadNpcs} disabled={loading} className="h-8 text-xs">
+        <Button variant="ghost" size="sm" onClick={loadNpcs} disabled={loading} className="h-11 md:h-8 text-xs">
           {loading ? 'Refreshing…' : 'Refresh'}
         </Button>
       </CardHeader>
@@ -1062,6 +1088,20 @@ function NpcCard({ token }: { token: string | null }) {
                   <span className="text-muted-foreground text-xs capitalize">
                     {npc.type} · {npc.partyCount} Pokémon
                   </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Label htmlFor={`ai-strategy-${npc._id}`} className="text-xs text-muted-foreground shrink-0">
+                    Default AI
+                  </Label>
+                  <select
+                    id={`ai-strategy-${npc._id}`}
+                    value={npc.aiStrategy}
+                    onChange={e => handleChangeAiStrategy(npc._id, e.target.value as AiStrategy)}
+                    disabled={aiSaving === npc._id}
+                    className={`${selectClass} h-9 text-xs`}
+                  >
+                    {AI_STRATEGY_OPTIONS.map(s => <option key={s} value={s}>{AI_STRATEGY_LABELS[s]}</option>)}
+                  </select>
                 </div>
                 {expandedNpc === npc._id ? (
                   <div className="flex flex-col gap-3 pt-1">
@@ -1153,6 +1193,17 @@ function NpcCard({ token }: { token: string | null }) {
             >
               <option value="trainer">Trainer</option>
               <option value="wild">Wild</option>
+            </select>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="npc-ai-strategy">Default AI</Label>
+            <select
+              id="npc-ai-strategy"
+              value={newAiStrategy}
+              onChange={e => setNewAiStrategy(e.target.value as AiStrategy)}
+              className={selectClass}
+            >
+              {AI_STRATEGY_OPTIONS.map(s => <option key={s} value={s}>{AI_STRATEGY_LABELS[s]}</option>)}
             </select>
           </div>
           {createError && <p className="text-sm text-destructive">{createError}</p>}
@@ -1778,7 +1829,7 @@ export default function DmPage() {
       <div className="max-w-lg mx-auto flex flex-col gap-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">DM Panel</h1>
-          <Link to="/dashboard" className="text-sm underline text-muted-foreground">
+          <Link to="/dashboard" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             ← Dashboard
           </Link>
         </div>

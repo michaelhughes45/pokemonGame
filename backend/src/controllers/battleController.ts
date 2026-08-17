@@ -13,6 +13,7 @@ import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem,
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
 import { ivsFromSpread, getIvsForOwner } from '../lib/trainerIv';
+import { chooseNpcMoveId, NpcAiStrategy, AI_STRATEGIES } from '../lib/npcAi';
 import {
   NO_TARGET_MOVE_IDS,
   getMoveTargetCategory,
@@ -371,6 +372,7 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
     activePokemonId: mongoose.Types.ObjectId | null;
     usedPokemonIds?: mongoose.Types.ObjectId[];
     fainted: mongoose.Types.ObjectId[];
+    aiStrategy?: 'worst' | 'random' | 'highest-damage' | 'smartest';
   };
   let enemySide: EnemySlot[];
 
@@ -426,7 +428,10 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
       evolutionOverrides: [], isInParty: false, partySlot: null,
       caughtAt: null, caughtByPlayerId: null,
     });
-    enemySide = [{ activePokemonId: wildPoke._id as mongoose.Types.ObjectId, fainted: [] }];
+    // Wild Pokémon have no backing Npc doc and no send-out step of their own —
+    // they're already "active" the instant the battle is created — so the
+    // battle-local AI tier (milestone 6.5) seeds straight to 'random' here.
+    enemySide = [{ activePokemonId: wildPoke._id as mongoose.Types.ObjectId, fainted: [], aiStrategy: 'random' }];
   } else if (type === 'pvp') {
     enemySide = enemyPlayerIds.map((id: string) => ({
       userId: new mongoose.Types.ObjectId(id), activePokemonId: null, usedPokemonIds: [], fainted: [],
@@ -4336,6 +4341,15 @@ export async function dmSendOut(req: Request, res: Response): Promise<void> {
     await Pokemon.updateOne({ _id: outgoingNpcId }, { $set: { volatileStatus: [] } });
   }
 
+  // Battle-local AI tier (milestone 6.5) — seeded from the NPC's own default only
+  // the first time this slot sends anything out; a DM-set live override (changed
+  // via the dedicated slot-override endpoint) persists across later switches
+  // within the same slot rather than resetting to the NPC's default each time.
+  if (!npcEntry.aiStrategy) {
+    const npcDoc = await Npc.findById(npcId, 'aiStrategy').lean();
+    npcEntry.aiStrategy = npcDoc?.aiStrategy ?? 'random';
+  }
+
   npcEntry.activePokemonId = pokeId;
   await finishSendOut(battle, pokeId, 'enemy', 'enemySide', 'npcId', new mongoose.Types.ObjectId(npcId));
 
@@ -4458,48 +4472,35 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
   );
 }
 
-async function estimateDamage(
-  attacker: { currentHp: number; nature: string; level: number; evs: BaseStats; heldItem?: string | null },
-  attackerCache: { name: unknown },
-  attackerAbilitySlug: string | null,
-  moveId: string,
-  target: { currentHp: number; nature: string; level: number; evs: BaseStats; heldItem?: string | null },
-  targetCache: { name: unknown },
-  targetAbilitySlug: string | null,
-  weather: string | null,
-  attackerIvs: BaseStats = ZERO_IVS,
-  targetIvs: BaseStats = ZERO_IVS,
-): Promise<number> {
-  try {
-    const calcAtk = new CalcPokemon(GEN9, slugToDisplayName(attackerCache.name as string), {
-      level: attacker.level, nature: cap(attacker.nature) as any, evs: toCalcEvs(attacker.evs), ivs: toCalcIvs(attackerIvs),
-      curHP: attacker.currentHp, ability: attackerAbilitySlug ? slugToDisplayName(attackerAbilitySlug) as any : undefined,
-      item: toCalcItem(attacker.heldItem) as any,
-    });
-    const calcTgt = new CalcPokemon(GEN9, slugToDisplayName(targetCache.name as string), {
-      level: target.level, nature: cap(target.nature) as any, evs: toCalcEvs(target.evs), ivs: toCalcIvs(targetIvs),
-      curHP: target.currentHp, ability: targetAbilitySlug ? slugToDisplayName(targetAbilitySlug) as any : undefined,
-      item: toCalcItem(target.heldItem) as any,
-    });
-    const result = calculate(GEN9, calcAtk, calcTgt, new CalcMove(GEN9, slugToDisplayName(moveId)), new Field({ weather: toCalcWeather(weather as any) as any }));
-    const rolls  = Array.isArray(result.damage) ? (result.damage as number[]) : [result.damage as number];
-    return rolls.reduce((s, r) => s + r, 0) / rolls.length;
-  } catch {
-    return 0;
-  }
-}
-
+// Milestone 6.5 — reworked from instant-submit into suggest-and-review: this
+// endpoint now only COMPUTES a suggested move per unsubmitted NPC/wild slot and
+// returns them; it never touches turnQueue or calls checkAndAdvance. The DM
+// reviews/edits the pre-filled suggestions in the frontend's Move-tab picker (now
+// select-then-confirm, same as the Item tab already was) and a separate bulk
+// submit action — just a loop of the existing dm-submit-move calls the DM could
+// already make one at a time — actually commits them.
+//
+// npcId in each suggestion is the wild Pokémon's own activePokemonId for wild
+// slots (same overloaded convention dm-submit-move/dm-send-out already use);
+// slotIndex is 0-based WITHIN that npcId's own slots (matches the frontend's
+// existing `${npcId}:${slotIdx}` slotKey convention for multi-slot NPCs) and is
+// always 0 for wild, which never has more than one slot per Pokémon.
 export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
   const battle = await Battle.findById(req.params.id);
   if (!battle)                                                          { res.status(404).json({ data: null, error: 'Battle not found' }); return; }
   if (battle.status !== 'active' || battle.phase !== 'move_submission') { res.status(400).json({ data: null, error: 'Battle is not in move submission phase' }); return; }
 
-  let submitted = 0;
+  const suggestions: { npcId: string; slotIndex: number; moveId: string }[] = [];
+  const npcSlotCounts = new Map<string, number>();
 
   for (const slot of battle.enemySide) {
+    const isWild  = !slot.npcId;
+    const groupKey = isWild ? slot.activePokemonId?.toString() ?? '' : slot.npcId!.toString();
+    const slotIndex = npcSlotCounts.get(groupKey) ?? 0;
+    npcSlotCounts.set(groupKey, slotIndex + 1);
+
     if (!slot.activePokemonId) continue;
 
-    const isWild  = !slot.npcId;
     const actorId = isWild ? slot.activePokemonId : slot.npcId!;
 
     const alreadySubmitted = battle.turnQueue.some(
@@ -4515,77 +4516,51 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
     const movesWithPP = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[]).filter(m => m.currentPP > 0);
     if (movesWithPP.length === 0) continue;
 
-    type AiStrategy = 'random' | 'optimal' | 'defensive' | 'custom';
-    const npcDoc = (!isWild && slot.npcId) ? await Npc.findById(slot.npcId, 'aiStrategy').lean() : null;
-    const strategy: AiStrategy = (npcDoc?.aiStrategy as AiStrategy | undefined) ?? 'random';
-    const actorObjId = new mongoose.Types.ObjectId(actorId.toString());
+    // Battle-local override (milestone 6.5) takes precedence over the slot's NPC's
+    // permanent default; 'random' for wild, which has neither a backing Npc doc nor
+    // an override until the DM sets one via the dedicated slot-override endpoint.
+    const strategy: NpcAiStrategy = slot.aiStrategy ?? 'random';
+    const chosenMoveId = await chooseNpcMoveId(battle, poke, movesWithPP, strategy);
 
-    if (strategy === 'defensive') {
-      const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'baseStats').lean();
-      const maxHp = cache ? computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, ZERO_IVS).hp : poke.currentHp;
-
-      if (poke.currentHp < Math.floor(maxHp * 0.3)) {
-        const healItem = await Item.findOne({ ownerId: actorObjId, ownerType: 'npc', pocket: 'healing', quantity: { $gt: 0 } }).lean();
-        if (healItem) {
-          battle.turnQueue.push({ actorId: actorObjId, actorType: 'npc', activePokemonId: slot.activePokemonId!, actionType: 'item', itemId: healItem.itemId, targets: [slot.activePokemonId!], resolved: false });
-          submitted++; continue;
-        }
-        const restSlot = movesWithPP.find(m => m.moveId === 'rest');
-        if (restSlot) {
-          battle.turnQueue.push({ actorId: actorObjId, actorType: 'npc', activePokemonId: slot.activePokemonId!, actionType: 'move', moveId: 'rest', targets: [], resolved: false });
-          submitted++; continue;
-        }
-      }
-    }
-
-    let chosenMoveId: string;
-
-    if (strategy === 'optimal') {
-      const activePlayerIds = battle.playerSide.filter(e => e.activePokemonId != null).map(e => e.activePokemonId!);
-      const atkCache  = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name abilities').lean();
-      // estimateDamage only ever applies one ability — a reasonable simplification for
-      // an approximate AI move-choice heuristic, not the real damage-calc path.
-      const atkAbility = atkCache ? (getEffectiveAbilitySlugs(battle, poke._id.toString(), atkCache.abilities as CachedAbility[], poke.hasHiddenAbility ?? false)[0] ?? null) : null;
-
-      const targetPokes = activePlayerIds.length > 0
-        ? await Pokemon.find({ _id: { $in: activePlayerIds } }, 'currentHp nature level speciesId hasHiddenAbility evs heldItem').lean()
-        : [];
-      const tCaches = targetPokes.length > 0
-        ? await PokedexCache.find({ pokeApiId: { $in: targetPokes.map(t => t.speciesId) } }, 'pokeApiId name abilities').lean()
-        : [];
-      const cacheBySpecies = new Map(tCaches.map(c => [c.pokeApiId as number, c]));
-
-      // NPC/wild attacker never carries a Trainer IV bonus, but its player targets do —
-      // batch the owners once per NPC decision (keyed via playerSide, no extra Pokemon field needed).
-      const pokeIdToUserId = new Map(battle.playerSide.filter(e => e.activePokemonId != null).map(e => [e.activePokemonId!.toString(), e.userId.toString()]));
-      const targetUserIds  = [...new Set(targetPokes.map(t => pokeIdToUserId.get(t._id.toString())).filter((id): id is string => !!id))];
-      const targetOwners   = targetUserIds.length > 0 ? await User.find({ _id: { $in: targetUserIds } }, 'trainerStats').lean() : [];
-      const targetIvsMap   = new Map(targetOwners.map(u => [u._id.toString(), ivsFromSpread(u.trainerStats)]));
-
-      let bestScore = -1;
-      for (const mv of movesWithPP) {
-        if (NO_TARGET_MOVE_IDS.has(mv.moveId)) continue;
-        for (const tgt of targetPokes) {
-          const tCache = cacheBySpecies.get(tgt.speciesId);
-          if (!tCache) continue;
-          const tAbility = getEffectiveAbilitySlugs(battle, tgt._id.toString(), tCache.abilities as CachedAbility[], tgt.hasHiddenAbility ?? false)[0] ?? null;
-          const targetIvs = targetIvsMap.get(pokeIdToUserId.get(tgt._id.toString()) ?? '') ?? ZERO_IVS;
-          const score = await estimateDamage(poke, atkCache ?? { name: poke.speciesId }, atkAbility, mv.moveId, tgt, tCache, tAbility, battle.weather as string | null, ZERO_IVS, targetIvs);
-          if (score > bestScore) { bestScore = score; chosenMoveId = mv.moveId; }
-        }
-      }
-      chosenMoveId ??= movesWithPP[Math.floor(Math.random() * movesWithPP.length)].moveId;
-    } else {
-      chosenMoveId = movesWithPP[Math.floor(Math.random() * movesWithPP.length)].moveId;
-    }
-
-    battle.turnQueue.push({ actorId: actorObjId, actorType: 'npc', activePokemonId: slot.activePokemonId!, actionType: 'move', moveId: chosenMoveId, targets: [], resolved: false });
-    submitted++;
+    suggestions.push({ npcId: actorId.toString(), slotIndex, moveId: chosenMoveId });
   }
 
-  if (submitted > 0) await checkAndAdvance(battle);
+  res.json({ data: { suggestions }, error: null });
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/battles/:id/npc-ai-strategy
+// DM-only, milestone 6.5. Sets ONE enemySide slot's battle-local AI tier
+// override — live-changeable at any point mid-battle, without touching the
+// underlying NPC's permanent default (that's setNpcAiStrategy in
+// dmController.ts). Slot identification mirrors dmSendOut/dmSubmitMove's
+// existing convention: npcId + slotIndex for a real NPC's multi-slot battles,
+// or the wild Pokémon's own activePokemonId (passed as npcId) for wild slots,
+// which never have more than one slot per Pokémon.
+// Body: { npcId, slotIndex?, aiStrategy }
+// ---------------------------------------------------------------------------
+export async function setNpcSlotAiStrategy(req: Request, res: Response): Promise<void> {
+  const { npcId, slotIndex = 0, aiStrategy } = req.body as { npcId?: string; slotIndex?: number; aiStrategy?: string };
+
+  if (!npcId) { res.status(400).json({ data: null, error: 'npcId is required' }); return; }
+  if (!aiStrategy || !(AI_STRATEGIES as string[]).includes(aiStrategy)) {
+    res.status(400).json({ data: null, error: `aiStrategy must be one of: ${AI_STRATEGIES.join(', ')}` }); return;
+  }
+
+  const battle = await Battle.findById(req.params.id);
+  if (!battle) { res.status(404).json({ data: null, error: 'Battle not found' }); return; }
+
+  const slotEntries = battle.type === 'wild'
+    ? battle.enemySide.filter(e => e.activePokemonId?.toString() === npcId)
+    : battle.enemySide.filter(e => e.npcId?.toString() === npcId);
+  if (slotEntries.length === 0) { res.status(404).json({ data: null, error: 'NPC/wild slot not found in this battle' }); return; }
+  if (slotIndex < 0 || slotIndex >= slotEntries.length) {
+    res.status(400).json({ data: null, error: `slotIndex must be between 0 and ${slotEntries.length - 1}` }); return;
+  }
+
+  slotEntries[slotIndex].aiStrategy = aiStrategy as NpcAiStrategy;
   battle.lastUpdatedAt = new Date();
   await battle.save();
 
-  res.json({ data: { submitted, phase: battle.phase }, error: null });
+  res.json({ data: { aiStrategy: slotEntries[slotIndex].aiStrategy }, error: null });
 }

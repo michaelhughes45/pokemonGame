@@ -16,6 +16,7 @@ import {
   dmSendOut,
   dmSubmitMove,
   dmAutoSubmit,
+  setNpcSlotAiStrategy,
 } from '../controllers/battleController';
 
 const router = Router();
@@ -49,6 +50,9 @@ router.post('/:id/dm-submit-move', requireDm, dmSubmitMove);
 
 // POST /api/battles/:id/dm-auto-submit — DM auto-submits moves for all unsubmitted NPC/wild slots using their AI strategy
 router.post('/:id/dm-auto-submit', requireDm, dmAutoSubmit);
+
+// PATCH /api/battles/:id/npc-ai-strategy — DM sets one enemySide slot's battle-local AI tier override
+router.patch('/:id/npc-ai-strategy', requireDm, setNpcSlotAiStrategy);
 
 // GET /api/battles/dm — DM fetches all active battles for their campaign
 router.get('/dm',                  getDmBattles);

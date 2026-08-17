@@ -21,6 +21,7 @@ import { BADGE_CATALOG } from '../lib/badgeData';
 import { EV_STAT_CAP, EV_TOTAL_CAP, EV_STAT_DISPLAY_NAMES } from '../lib/evData';
 import { ivsFromSpread, getUnspentTrainerIv, getIvsForOwner } from '../lib/trainerIv';
 import { fixAllPokemonExp } from '../lib/fixPokemonExp';
+import { AI_STRATEGIES } from '../lib/npcAi';
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -652,7 +653,7 @@ export async function getNpcs(req: Request, res: Response): Promise<void> {
   }
 
   const npcs = await Npc.find({ campaignId: campaign._id })
-    .select('name type party')
+    .select('name type party aiStrategy')
     .lean();
 
   sendOk(res, npcs.map(n => ({
@@ -660,22 +661,26 @@ export async function getNpcs(req: Request, res: Response): Promise<void> {
     name:       n.name,
     type:       n.type,
     partyCount: n.party.length,
+    aiStrategy: n.aiStrategy,
   })));
 }
 
 // ---------------------------------------------------------------------------
 // POST /api/dm/npcs
 // Creates a new NPC in the DM's active campaign.
-// Body: { name, type? }
+// Body: { name, type?, aiStrategy? }
 // ---------------------------------------------------------------------------
 export async function createNpc(req: Request, res: Response): Promise<void> {
-  const { name, type = 'trainer' } = req.body as { name?: string; type?: string };
+  const { name, type = 'trainer', aiStrategy = 'random' } = req.body as { name?: string; type?: string; aiStrategy?: string };
 
   if (!name?.trim()) {
     return sendError(res, 400, 'name is required');
   }
   if (!['trainer', 'wild'].includes(type)) {
     return sendError(res, 400, "type must be 'trainer' or 'wild'");
+  }
+  if (!(AI_STRATEGIES as string[]).includes(aiStrategy)) {
+    return sendError(res, 400, `aiStrategy must be one of: ${AI_STRATEGIES.join(', ')}`);
   }
 
   const campaign = await assertDmCampaign(req.user!.userId, res);
@@ -687,10 +692,39 @@ export async function createNpc(req: Request, res: Response): Promise<void> {
     name:        name.trim(),
     type,
     party:       [],
-    aiStrategy:  'random',
+    aiStrategy,
   });
 
-  sendOk(res, { _id: npc._id, name: npc.name, type: npc.type, partyCount: 0 }, 201);
+  sendOk(res, { _id: npc._id, name: npc.name, type: npc.type, partyCount: 0, aiStrategy: npc.aiStrategy }, 201);
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/dm/npcs/:npcId/ai-strategy
+// Updates an existing NPC's default AI tier (milestone 6.5). This is the NPC's
+// permanent default only — it does not touch any battle already in progress,
+// where the DM controls each slot's tier independently via a battle-local
+// override (see setNpcSlotAiStrategy in battleController.ts).
+// Body: { aiStrategy }
+// ---------------------------------------------------------------------------
+export async function setNpcAiStrategy(req: Request, res: Response): Promise<void> {
+  const { npcId } = req.params;
+  const { aiStrategy } = req.body as { aiStrategy?: string };
+
+  if (!aiStrategy || !(AI_STRATEGIES as string[]).includes(aiStrategy)) {
+    return sendError(res, 400, `aiStrategy must be one of: ${AI_STRATEGIES.join(', ')}`);
+  }
+
+  const campaign = await assertDmCampaign(req.user!.userId, res);
+  if (!campaign) return;
+
+  const npc = await Npc.findOneAndUpdate(
+    { _id: npcId, campaignId: campaign._id },
+    { $set: { aiStrategy } },
+    { new: true },
+  ).lean();
+  if (!npc) return sendError(res, 404, 'NPC not found in your campaign');
+
+  sendOk(res, { _id: npc._id, aiStrategy: npc.aiStrategy });
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,6 +1208,7 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
     npcId?: mongoose.Types.ObjectId;
     activePokemonId: mongoose.Types.ObjectId | null;
     fainted: mongoose.Types.ObjectId[];
+    aiStrategy?: 'worst' | 'random' | 'highest-damage' | 'smartest';
   };
 
   let enemySide: EnemySlot[] = [];
@@ -1253,7 +1288,9 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
         caughtByPlayerId:   null,
       });
 
-      enemySide.push({ activePokemonId: wildPoke._id as mongoose.Types.ObjectId, fainted: [] });
+      // No send-out step for wild Pokémon — active the instant the battle launches,
+      // so the battle-local AI tier (milestone 6.5) has to seed straight to 'random' here.
+      enemySide.push({ activePokemonId: wildPoke._id as mongoose.Types.ObjectId, fainted: [], aiStrategy: 'random' });
     }
   }
 

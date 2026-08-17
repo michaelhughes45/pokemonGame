@@ -26,6 +26,12 @@ export type EnemySideEntry = {
   // Only populated for pvp battles (npc/wild entries don't enforce a Pokémon limit this way).
   usedPokemonIds: mongoose.Types.ObjectId[];
   fainted: mongoose.Types.ObjectId[];
+  // Battle-local AI tier override (milestone 6.5) — seeded from the NPC's own
+  // default aiStrategy at send-out (or 'random' for wild, which has no backing
+  // Npc doc), and live-changeable by the DM mid-battle via a dedicated endpoint
+  // without touching the NPC's permanent default. undefined for pvp entries
+  // (real trainers, never AI-controlled).
+  aiStrategy?: 'worst' | 'random' | 'highest-damage' | 'smartest';
 };
 
 export type TurnQueueEntry = {
@@ -238,6 +244,7 @@ const BattleSchema = new Schema<IBattle>(
         activeSentOutOnTurn: { type: Number, default: null },
         usedPokemonIds:      [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
         fainted:             [{ type: Schema.Types.ObjectId, ref: 'Pokemon' }],
+        aiStrategy:          { type: String, enum: ['worst', 'random', 'highest-damage', 'smartest', null], default: null },
         _id:                 false,
       },
     ],
