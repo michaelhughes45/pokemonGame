@@ -422,7 +422,7 @@ export async function createBattle(req: Request, res: Response): Promise<void> {
       speciesId: species.pokeApiId, ownerId: new mongoose.Types.ObjectId(req.user!.userId),
       ownerType: 'wild', nickname: null, level,
       exp: expForLevel(level, (species.expGroup as string) || 'medium-fast'),
-      currentHp: stats.hp, nature, gender, heldItem: rollHeldItem(true), moves,
+      currentHp: stats.hp, nature, gender, heldItem: rollHeldItem(true, campaign.randomHeldItemIds), moves,
       evs: { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 },
       statusCondition: null, statusCounter: null, volatileStatus: [],
       evolutionOverrides: [], isInParty: false, partySlot: null,

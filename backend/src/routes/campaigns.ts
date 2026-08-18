@@ -13,6 +13,8 @@ import {
   setHiddenAbilitiesEnabled,
   getShopCatalog,
   setShopItems,
+  getHeldItemCatalog,
+  setRandomHeldItems,
 } from '../controllers/campaignController';
 
 const router = Router();
@@ -53,5 +55,11 @@ router.get('/shop-catalog', getShopCatalog);
 
 // PATCH /api/campaigns/shop-items       — DM sets which items are for sale
 router.patch('/shop-items', requireDm, setShopItems);
+
+// GET  /api/campaigns/held-item-catalog — full random-held-item pool (34 held_type + 25 mints)
+router.get('/held-item-catalog', getHeldItemCatalog);
+
+// PATCH /api/campaigns/random-held-items — DM sets which items can randomly be held
+router.patch('/random-held-items', requireDm, setRandomHeldItems);
 
 export default router;

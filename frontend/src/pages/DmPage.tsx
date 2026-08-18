@@ -957,6 +957,166 @@ function ShopCatalogCard({ token }: { token: string | null }) {
   );
 }
 
+// ── Random Held Items card (milestone 6.8) ────────────────────────────────────
+// Same shape as ShopCatalogCard above, reusing its POCKET_LABELS/
+// formatShopItemName — DM curates which items from rollHeldItem's full pool
+// (held_type + mint) can actually be randomly rolled for wild/NPC Pokémon.
+// The one real difference from the shop card: null selected means "uncurated
+// — everything eligible" (opposite default polarity from the shop, which
+// defaults to nothing for sale), so every checkbox reads as checked until the
+// DM actually saves a narrower selection.
+
+type HeldItemCatalogEntry = { itemId: string; pocket: string | null };
+
+function RandomHeldItemsCard({ token }: { token: string | null }) {
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const [catalog,     setCatalog]     = useState<HeldItemCatalogEntry[]>([]);
+  // null = uncurated (every item eligible); a Set (possibly empty) = the DM's saved selection.
+  const [selected,    setSelected]    = useState<Set<string> | null>(null);
+  const [hasCampaign, setHasCampaign] = useState(true);
+  const [loading,     setLoading]     = useState(true);
+  const [saving,      setSaving]      = useState(false);
+  const [feedback,    setFeedback]    = useState('');
+  const [error,       setError]       = useState('');
+
+  useEffect(() => {
+    Promise.all([
+      axios.get(`${API}/api/campaigns/held-item-catalog`, { headers }),
+      axios.get(`${API}/api/campaigns/mine`, { headers }),
+    ])
+      .then(([catalogRes, campaignRes]) => {
+        setCatalog(catalogRes.data.data ?? []);
+        const campaign = campaignRes.data.data;
+        if (!campaign) {
+          setHasCampaign(false);
+        } else {
+          const ids = campaign.randomHeldItemIds as string[] | null | undefined;
+          setSelected(ids == null ? null : new Set<string>(ids));
+        }
+      })
+      .catch(() => setError('Failed to load held item catalog'))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  const grouped = catalog.reduce<Record<string, HeldItemCatalogEntry[]>>((acc, entry) => {
+    const key = entry.pocket ?? 'other';
+    (acc[key] ??= []).push(entry);
+    return acc;
+  }, {});
+
+  const isChecked = (itemId: string) => selected === null || selected.has(itemId);
+
+  function toggleItem(itemId: string) {
+    setSelected(prev => {
+      // First edit away from the uncurated default starts from "everything
+      // selected" (matching what's currently displayed), not an empty set.
+      const next = new Set(prev ?? catalog.map(e => e.itemId));
+      if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
+      return next;
+    });
+  }
+
+  function togglePocket(pocketItems: HeldItemCatalogEntry[]) {
+    const allSelected = pocketItems.every(e => isChecked(e.itemId));
+    setSelected(prev => {
+      const next = new Set(prev ?? catalog.map(e => e.itemId));
+      for (const e of pocketItems) {
+        if (allSelected) next.delete(e.itemId); else next.add(e.itemId);
+      }
+      return next;
+    });
+  }
+
+  async function handleSave() {
+    setSaving(true); setFeedback(''); setError('');
+    try {
+      const itemIds = selected === null ? catalog.map(e => e.itemId) : [...selected];
+      const res = await axios.patch(
+        `${API}/api/campaigns/random-held-items`,
+        { itemIds },
+        { headers },
+      );
+      const savedIds: string[] = res.data.data.randomHeldItemIds ?? [];
+      setSelected(new Set<string>(savedIds));
+      setFeedback(`Saved — ${savedIds.length} item(s) eligible.`);
+    } catch (err: unknown) {
+      setError(apiError(err, 'Failed to save held item selection'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (loading) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Random Held Items</CardTitle></CardHeader>
+        <CardContent><p className="text-sm text-muted-foreground">Loading…</p></CardContent>
+      </Card>
+    );
+  }
+
+  if (!hasCampaign) {
+    return (
+      <Card>
+        <CardHeader><CardTitle>Random Held Items</CardTitle></CardHeader>
+        <CardContent><p className="text-sm text-muted-foreground">Create a campaign first.</p></CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Random Held Items</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <p className="text-sm text-muted-foreground">
+          Choose which items wild and NPC Pokémon can randomly hold. All {catalog.length} items are eligible until you save a narrower selection.
+        </p>
+
+        {Object.entries(grouped).map(([pocket, items]) => {
+          const allSelected = items.every(e => isChecked(e.itemId));
+          return (
+            <div key={pocket} className="flex flex-col gap-2">
+              <label className="flex items-center gap-2 text-sm font-medium min-h-11 md:min-h-8">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  onChange={() => togglePocket(items)}
+                  className="h-4 w-4"
+                />
+                {POCKET_LABELS[pocket] ?? pocket} ({items.length})
+              </label>
+              <div className="flex flex-col gap-1 pl-6">
+                {items.map(entry => (
+                  <label key={entry.itemId} className="flex items-center gap-2 text-sm min-h-11 md:min-h-8">
+                    <input
+                      type="checkbox"
+                      checked={isChecked(entry.itemId)}
+                      onChange={() => toggleItem(entry.itemId)}
+                      className="h-4 w-4"
+                    />
+                    {formatShopItemName(entry.itemId)}
+                  </label>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        {error    && <p className="text-sm text-destructive">{error}</p>}
+        {feedback && <p className="text-sm text-muted-foreground">{feedback}</p>}
+
+        <Button onClick={handleSave} disabled={saving} className="min-h-11">
+          {saving ? 'Saving…' : 'Save Held Item Selection'}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── NPC card ─────────────────────────────────────────────────────────────────
 // Lists the DM's NPCs, lets them create new ones, and gives Pokémon to each.
 
@@ -1864,6 +2024,7 @@ export default function DmPage() {
         <GivePokemonCard token={token} />
         <GiveItemCard token={token} />
         <ShopCatalogCard token={token} />
+        <RandomHeldItemsCard token={token} />
         <ResetStarterCard token={token} />
       </div>
     </div>

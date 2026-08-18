@@ -4,7 +4,7 @@ import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
 import { getEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
 import { SHOP_PRICES, getSellPrice } from '../lib/shopData';
-import { getPocket } from '../lib/itemData';
+import { getPocket, HELD_TYPE_ITEMS, MINT_ITEMS } from '../lib/itemData';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -122,6 +122,7 @@ export async function getMine(req: Request, res: Response): Promise<void> {
     fieldModeEnabled: campaign.fieldModeEnabled,
     hiddenAbilitiesEnabled: campaign.hiddenAbilitiesEnabled,
     shopItemIds:      campaign.shopItemIds,
+    randomHeldItemIds: campaign.randomHeldItemIds,
   });
 }
 
@@ -402,4 +403,53 @@ export async function setShopItems(req: Request, res: Response): Promise<void> {
   await campaign.save();
 
   sendOk(res, { shopItemIds: campaign.shopItemIds });
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/campaigns/held-item-catalog
+// Milestone 6.8. Any authenticated user, same reasoning as getShopCatalog —
+// not campaign-specific. Returns the full pool rollHeldItem (lib/itemData.ts)
+// draws from: every held_type item (34, including the Arceus Plates) plus all
+// 25 mints. The DM curates a subset of this against Campaign.randomHeldItemIds
+// client-side, same flow as the Pokémart catalog.
+// ---------------------------------------------------------------------------
+export async function getHeldItemCatalog(_req: Request, res: Response): Promise<void> {
+  const catalog = [...HELD_TYPE_ITEMS, ...MINT_ITEMS].map(itemId => ({
+    itemId,
+    pocket: getPocket(itemId),
+  }));
+
+  sendOk(res, catalog);
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/campaigns/random-held-items
+// Milestone 6.8. DM sets which items wild/NPC Pokémon in their campaign can
+// randomly hold. Body: { itemIds: string[] | null } — full replace, not
+// incremental. null resets to "uncurated" (every eligible item in play, this
+// project's pre-6.8 behavior); an empty array is a real, distinct choice —
+// the DM deliberately wants nothing to ever be rolled. Anything not a real
+// item in the pool (stale client state, typo, etc.) is silently dropped from
+// a non-null array.
+// ---------------------------------------------------------------------------
+export async function setRandomHeldItems(req: Request, res: Response): Promise<void> {
+  const { userId } = req.user!;
+  const { itemIds } = req.body as { itemIds?: string[] | null };
+
+  if (itemIds !== null && !Array.isArray(itemIds)) {
+    return sendError(res, 400, 'itemIds must be an array or null');
+  }
+
+  const campaign = await findActiveCampaignByDm(userId);
+  if (!campaign) {
+    return sendError(res, 400, 'You do not have an active campaign');
+  }
+
+  const fullPool = new Set([...HELD_TYPE_ITEMS, ...MINT_ITEMS]);
+  campaign.randomHeldItemIds = itemIds === null
+    ? null
+    : [...new Set(itemIds)].filter(id => fullPool.has(id));
+  await campaign.save();
+
+  sendOk(res, { randomHeldItemIds: campaign.randomHeldItemIds });
 }

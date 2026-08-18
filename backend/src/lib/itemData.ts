@@ -96,8 +96,8 @@ export const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
   // Expert Belt's 1.2x) need no project code at all beyond this registration —
   // @smogon/calc already applies them internally once heldItem reaches
   // CalcPokemon (5.17a). DM-give-only, like Master Ball — not in the wild/NPC
-  // random-drop pool (rollHeldItem below), which stays scoped to the original
-  // 17 held_type items + mints.
+  // random-drop pool (rollHeldItem below), which stays scoped to the held_type
+  // pocket (34 items as of 5.17a's Plates) + mints.
   'leftovers':      'held_battle',
   'black-sludge':   'held_battle',
   'choice-band':    'held_battle',
@@ -251,11 +251,14 @@ export function natureFromMintItem(itemId: string): string | null {
 // in the pool for sources that can actually drop — never for trainer NPCs.
 // ---------------------------------------------------------------------------
 
-const HELD_TYPE_ITEMS: string[] = Object.entries(ITEM_POCKET_MAP)
+// Exported in milestone 6.8 so campaignController's held-item-catalog endpoint
+// can list the same pool this function draws from, without redriving the
+// ITEM_POCKET_MAP filter a second time.
+export const HELD_TYPE_ITEMS: string[] = Object.entries(ITEM_POCKET_MAP)
   .filter(([, pocket]) => pocket === 'held_type')
   .map(([itemId]) => itemId);
 
-const MINT_ITEMS: string[] = NATURES.map(mintItemId);
+export const MINT_ITEMS: string[] = NATURES.map(mintItemId);
 
 // Half the time a wild/NPC Pokémon holds nothing at all, matching the real
 // games' held-item rates loosely without needing a per-species table.
@@ -267,10 +270,19 @@ const NO_ITEM_CHANCE = 0.5;
  * actually drop its held item (wild-type NPCs, standalone wild spawns) and
  * false for trainer-type NPCs, whose held items are flavor-only and never
  * transfer to a player.
+ *
+ * `eligibleIds` (milestone 6.8) is the DM-curated subset from
+ * Campaign.randomHeldItemIds — undefined/null (the uncurated default) uses
+ * the full pool unfiltered, matching every pre-6.8 call site's behavior
+ * exactly; an explicit array (including an empty one) filters the pool down
+ * to it, so a DM who's curated the pool down to nothing correctly gets
+ * nothing rather than falling back to "unfiltered."
  */
-export function rollHeldItem(includeMints: boolean): string | null {
+export function rollHeldItem(includeMints: boolean, eligibleIds?: string[] | null): string | null {
   if (Math.random() < NO_ITEM_CHANCE) return null;
-  const pool = includeMints ? [...HELD_TYPE_ITEMS, ...MINT_ITEMS] : HELD_TYPE_ITEMS;
+  const fullPool = includeMints ? [...HELD_TYPE_ITEMS, ...MINT_ITEMS] : HELD_TYPE_ITEMS;
+  const pool = eligibleIds == null ? fullPool : fullPool.filter(id => eligibleIds.includes(id));
+  if (pool.length === 0) return null;
   return pool[Math.floor(Math.random() * pool.length)];
 }
 

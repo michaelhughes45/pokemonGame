@@ -762,6 +762,11 @@ export async function giveNpcPokemon(req: Request, res: Response): Promise<void>
   const resolvedGender = resolveGender(speciesDoc.genderRatio as number, gender);
   const moves          = deriveStartingMoves(speciesDoc, level);
 
+  // assertDmNpc only returns the npc doc, not its campaign (unlike
+  // assertDmEncounter's { encounter, campaign } pair) — one extra lean lookup
+  // for the DM's curated random-held-item pool (milestone 6.8).
+  const npcCampaign = await Campaign.findById(npc.campaignId, 'randomHeldItemIds').lean();
+
   const pokemon = await Pokemon.create({
     speciesId: speciesDoc.pokeApiId,
     ownerId:   npc._id,
@@ -772,7 +777,7 @@ export async function giveNpcPokemon(req: Request, res: Response): Promise<void>
     currentHp: maxHp,
     nature,
     gender:    resolvedGender,
-    heldItem:  rollHeldItem(npc.type === 'wild'),
+    heldItem:  rollHeldItem(npc.type === 'wild', npcCampaign?.randomHeldItemIds),
     moves,
     isInParty: true,
     partySlot: null,
@@ -1275,7 +1280,7 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
         currentHp:          stats.hp,
         nature,
         gender,
-        heldItem:           rollHeldItem(true),
+        heldItem:           rollHeldItem(true, campaign.randomHeldItemIds as string[] | null),
         moves,
         evs:                { hp: 0, atk: 0, def: 0, spatk: 0, spdef: 0, speed: 0 },
         statusCondition:    null,
