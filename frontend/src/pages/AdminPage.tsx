@@ -32,7 +32,7 @@ const roleBadgeVariant: Record<string, 'default' | 'secondary' | 'destructive'> 
 
 // Matches the native <select> style used throughout DmPage/DmPlayersPage
 const selectClass =
-  'border border-input bg-background rounded-md px-2 py-1.5 text-sm min-h-9 ' +
+  'border border-input bg-background rounded-md px-2 py-1.5 text-base md:text-sm min-h-11 md:min-h-9 ' +
   'focus:outline-none focus:ring-2 focus:ring-ring';
 
 
@@ -431,7 +431,7 @@ export default function AdminPage() {
       <div className="max-w-lg mx-auto flex flex-col gap-6">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Admin Panel</h1>
-          <Link to="/dashboard" className="text-sm underline text-muted-foreground">
+          <Link to="/dashboard" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             ← Dashboard
           </Link>
         </div>

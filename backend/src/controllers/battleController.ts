@@ -13,7 +13,7 @@ import { BATTLE_ITEM_EFFECTS, BALL_MODIFIERS, statusCatchModifier, rollHeldItem,
 import { applyEvGain } from '../lib/evData';
 import { applyLevelUpLoop, getEffectiveLevelCap } from '../lib/levelCap';
 import { ivsFromSpread, getIvsForOwner } from '../lib/trainerIv';
-import { chooseNpcMoveId, chooseNpcTargetId, NpcAiStrategy, AI_STRATEGIES } from '../lib/npcAi';
+import { chooseNpcTargetId, chooseNpcAction, NpcAiStrategy, AI_STRATEGIES } from '../lib/npcAi';
 import {
   NO_TARGET_MOVE_IDS,
   getMoveTargetCategory,
@@ -4508,7 +4508,17 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
   if (!battle)                                                          { res.status(404).json({ data: null, error: 'Battle not found' }); return; }
   if (battle.status !== 'active' || battle.phase !== 'move_submission') { res.status(400).json({ data: null, error: 'Battle is not in move submission phase' }); return; }
 
-  const suggestions: { npcId: string; slotIndex: number; moveId: string }[] = [];
+  // 6.7.3/6.7.4 — a suggestion is now a move, item action, or switch action
+  // (trainer NPCs only, 'smartest' only for the latter two), so the shape
+  // gained an actionType discriminator plus each variant's own fields. Wild
+  // slots always pass npcId: null into chooseNpcAction (no bag or bench exists
+  // for them), which degrades that call to exactly chooseNpcMoveId's move-only
+  // choice.
+  const suggestions: ({ npcId: string; slotIndex: number } & (
+    | { actionType: 'move'; moveId: string }
+    | { actionType: 'item'; itemId: string; targetPokemonId: string }
+    | { actionType: 'switch'; switchToPokemonId: string }
+  ))[] = [];
   const npcSlotCounts = new Map<string, number>();
 
   for (const slot of battle.enemySide) {
@@ -4528,7 +4538,7 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
     );
     if (alreadySubmitted) continue;
 
-    const poke = await Pokemon.findById(slot.activePokemonId, 'moves currentHp nature level speciesId hasHiddenAbility evs heldItem').lean();
+    const poke = await Pokemon.findById(slot.activePokemonId, 'moves currentHp nature level speciesId hasHiddenAbility evs heldItem statusCondition').lean();
     if (!poke) continue;
 
     const movesWithPP = (poke.moves as { moveId: string; currentPP: number; maxPP: number }[]).filter(m => m.currentPP > 0);
@@ -4538,9 +4548,15 @@ export async function dmAutoSubmit(req: Request, res: Response): Promise<void> {
     // permanent default; 'random' for wild, which has neither a backing Npc doc nor
     // an override until the DM sets one via the dedicated slot-override endpoint.
     const strategy: NpcAiStrategy = slot.aiStrategy ?? 'random';
-    const chosenMoveId = await chooseNpcMoveId(battle, poke, movesWithPP, strategy);
+    const action = await chooseNpcAction(battle, isWild ? null : slot.npcId!, poke, movesWithPP, strategy);
 
-    suggestions.push({ npcId: actorId.toString(), slotIndex, moveId: chosenMoveId });
+    if (action.type === 'item') {
+      suggestions.push({ npcId: actorId.toString(), slotIndex, actionType: 'item', itemId: action.itemId, targetPokemonId: action.targetPokemonId });
+    } else if (action.type === 'switch') {
+      suggestions.push({ npcId: actorId.toString(), slotIndex, actionType: 'switch', switchToPokemonId: action.switchToPokemonId });
+    } else {
+      suggestions.push({ npcId: actorId.toString(), slotIndex, actionType: 'move', moveId: action.moveId });
+    }
   }
 
   res.json({ data: { suggestions }, error: null });

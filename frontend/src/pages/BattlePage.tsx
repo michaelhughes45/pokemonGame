@@ -427,8 +427,15 @@ export default function BattlePage() {
   // was, so "Auto NPCs" suggestions and manual move picks alike sit here until a
   // bulk "Submit All" commits them. Keyed by the wild Pokémon's own activePokemonId
   // for wild slots, or `${npcId}:${slotIndex}` (matching npcActionTab's slotKey
-  // convention) for NPC slots.
-  const [npcSelectedMove,     setNpcSelectedMove]     = useState<Record<string, string>>({});
+  // convention) for NPC slots. 6.7.3/6.7.4 — a suggestion can now be an item or
+  // switch action (trainer NPCs only, 'smartest' only), not just a move, hence
+  // the discriminated value type; manual clicks in the Move tab always store the
+  // 'move' variant.
+  type NpcSelectedAction =
+    | { type: 'move'; moveId: string }
+    | { type: 'item'; itemId: string; targetPokemonId: string }
+    | { type: 'switch'; switchToPokemonId: string };
+  const [npcSelectedMove,     setNpcSelectedMove]     = useState<Record<string, NpcSelectedAction>>({});
   const [weatherInput,        setWeatherInput]        = useState('');
   const [weatherTurns,        setWeatherTurns]        = useState('');
   const [weatherActionError,  setWeatherActionError]  = useState('');
@@ -922,7 +929,13 @@ export default function BattlePage() {
   // npcSelectedMove (the same select-then-confirm state the Move tab's buttons now
   // use, mirroring how the Item tab already worked), replacing any prior selection.
   // The DM can still click a different move on any slot to override before
-  // committing everything at once via handleSubmitAllNpcMoves.
+  // committing everything at once via handleSubmitAllNpcMoves. 6.7.3/6.7.4 — a
+  // suggestion can now be an item or switch action (trainer NPCs only, 'smartest'
+  // only for either); actionType discriminates the three shapes coming back from
+  // the endpoint. A switch suggestion also lazily loads that NPC's party (if not
+  // already cached) so the Move-tab banner can show the replacement's real name
+  // instead of just an id — fetchNpcParty's setExpandedSendOut side effect is a
+  // harmless no-op here since this slot already has an active Pokémon.
   async function handleAutoNpcSuggest() {
     if (!id) return;
     setSubmitting(true); setActionError('');
@@ -930,12 +943,24 @@ export default function BattlePage() {
       const res = await axios.post(`${API}/api/battles/${id}/dm-auto-submit`, {}, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const suggestions: { npcId: string; slotIndex: number; moveId: string }[] = res.data.data?.suggestions ?? [];
+      const suggestions: ({ npcId: string; slotIndex: number } & (
+        | { actionType: 'move'; moveId: string }
+        | { actionType: 'item'; itemId: string; targetPokemonId: string }
+        | { actionType: 'switch'; switchToPokemonId: string }
+      ))[] = res.data.data?.suggestions ?? [];
       setNpcSelectedMove(prev => {
         const next = { ...prev };
         for (const s of suggestions) {
           const isWild = battle?.enemySide.some(e => !e.npcId && e.activePokemonId === s.npcId) ?? false;
-          next[isWild ? s.npcId : `${s.npcId}:${s.slotIndex}`] = s.moveId;
+          const key = isWild ? s.npcId : `${s.npcId}:${s.slotIndex}`;
+          if (s.actionType === 'item') {
+            next[key] = { type: 'item', itemId: s.itemId, targetPokemonId: s.targetPokemonId };
+          } else if (s.actionType === 'switch') {
+            next[key] = { type: 'switch', switchToPokemonId: s.switchToPokemonId };
+            if (!isWild) fetchNpcParty(s.npcId, key);
+          } else {
+            next[key] = { type: 'move', moveId: s.moveId };
+          }
         }
         return next;
       });
@@ -949,30 +974,39 @@ export default function BattlePage() {
   // document. Each slot's selection is cleared as soon as ITS OWN submission
   // succeeds (not all at once at the end) so one slot failing — e.g. a stale
   // selection for a Pokémon that fainted to a faster attacker earlier this same
-  // batch — doesn't block or desync the rest of the batch.
+  // batch — doesn't block or desync the rest of the batch. 6.7.3/6.7.4 — a
+  // selection can be an item or switch action (auto-suggested only, never
+  // manually picked from this tab), so the payload branches on action.type; the
+  // item variant is always self-targeted (targetPokemonId is this same slot's
+  // own active Pokémon). Wild slots never get an item or switch suggestion (no
+  // bag or bench), so action there is always the 'move' variant in practice.
+  function buildNpcActionBody(npcId: string, action: NpcSelectedAction, activePokemonId?: string) {
+    if (action.type === 'item') {
+      return { npcId, actionType: 'item', itemId: action.itemId, targetPokemonId: action.targetPokemonId, ...(activePokemonId ? { activePokemonId } : {}) };
+    }
+    if (action.type === 'switch') {
+      return { npcId, actionType: 'switch', switchToPokemonId: action.switchToPokemonId, ...(activePokemonId ? { activePokemonId } : {}) };
+    }
+    return { npcId, moveId: action.moveId, ...(activePokemonId ? { activePokemonId } : {}) };
+  }
+
   async function handleSubmitAllNpcMoves() {
     if (!id || !battle) return;
-    const entries = Object.entries(npcSelectedMove).filter(([, moveId]) => moveId);
+    const entries = Object.entries(npcSelectedMove).filter(([, action]) => action);
     if (entries.length === 0) return;
     setSubmitting(true); setActionError('');
     let lastError = '';
-    for (const [key, moveId] of entries) {
+    for (const [key, action] of entries) {
       try {
         if (key.includes(':')) {
           const [npcId, slotIdxStr] = key.split(':');
           const slot = battle.enemySide.filter(e => e.npcId === npcId)[Number(slotIdxStr)];
           if (slot?.activePokemonId) {
-            await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
-              { npcId, moveId, activePokemonId: slot.activePokemonId },
-              { headers: { Authorization: `Bearer ${token}` } },
-            );
+            await axios.post(`${API}/api/battles/${id}/dm-submit-move`, buildNpcActionBody(npcId, action, slot.activePokemonId), { headers: { Authorization: `Bearer ${token}` } });
           }
         } else {
           // Wild — key is the wild Pokémon's own activePokemonId (no slot index needed).
-          await axios.post(`${API}/api/battles/${id}/dm-submit-move`,
-            { npcId: key, moveId },
-            { headers: { Authorization: `Bearer ${token}` } },
-          );
+          await axios.post(`${API}/api/battles/${id}/dm-submit-move`, buildNpcActionBody(key, action), { headers: { Authorization: `Bearer ${token}` } });
         }
         setNpcSelectedMove(prev => { const next = { ...prev }; delete next[key]; return next; });
       } catch (err: unknown) {
@@ -1553,14 +1587,21 @@ export default function BattlePage() {
                         ) : wildMoves.length === 0 ? (
                           <p className="text-sm text-muted-foreground">No moves available.</p>
                         ) : (
-                          <div className="grid grid-cols-2 gap-2">
+                          <div className="flex flex-col gap-2">
+                            {npcSelectedMove[actorId]?.type === 'item' && (
+                              <div className="rounded-md border border-primary bg-accent px-4 py-3 text-sm">
+                                <span className="font-medium">Suggested: use {formatMove(npcSelectedMove[actorId].itemId)}</span>
+                                <span className="text-muted-foreground text-xs block mt-0.5">Submit All will use this item instead of a move. Click a move below to override.</span>
+                              </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-2">
                             {wildMoves.map((m: MoveSlot) => {
                               const noPP = m.currentPP <= 0;
-                              const isSelected = npcSelectedMove[actorId] === m.moveId;
+                              const isSelected = npcSelectedMove[actorId]?.type === 'move' && npcSelectedMove[actorId].moveId === m.moveId;
                               return (
                                 <button
                                   key={m.moveId}
-                                  onClick={() => !noPP && setNpcSelectedMove(prev => ({ ...prev, [actorId]: m.moveId }))}
+                                  onClick={() => !noPP && setNpcSelectedMove(prev => ({ ...prev, [actorId]: { type: 'move', moveId: m.moveId } }))}
                                   disabled={noPP}
                                   className={[
                                     'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',
@@ -1572,6 +1613,7 @@ export default function BattlePage() {
                                 </button>
                               );
                             })}
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1589,6 +1631,10 @@ export default function BattlePage() {
 
                       {npcSlots.map((slot, slotIdx) => {
                         const slotKey        = `${npcId}:${slotIdx}`;
+                        // Captured once so TypeScript can narrow it by .type below —
+                        // narrowing doesn't carry across repeated npcSelectedMove[slotKey]
+                        // indexed-access expressions, only a plain local variable.
+                        const selectedAction = npcSelectedMove[slotKey];
                         const slotLabel      = npcSlots.length > 1 ? `Slot ${slotIdx + 1}` : null;
                         const activePokemon  = slot.activePokemonId
                           ? party.find((p: NpcPartyPokemon) => p._id === slot.activePokemonId)
@@ -1689,14 +1735,29 @@ export default function BattlePage() {
                                   <p className="text-sm text-muted-foreground mb-2">
                                     {slot.activePokemonInfo?.name ?? activePokemon.nickname ?? activePokemon.speciesName} — choose a move:
                                   </p>
+                                  {selectedAction?.type === 'item' && (
+                                    <div className="rounded-md border border-primary bg-accent px-4 py-3 text-sm mb-2">
+                                      <span className="font-medium">Suggested: use {formatMove(selectedAction.itemId)}</span>
+                                      <span className="text-muted-foreground text-xs block mt-0.5">Submit All will use this item instead of a move. Click a move below to override.</span>
+                                    </div>
+                                  )}
+                                  {selectedAction?.type === 'switch' && (() => {
+                                    const switchTo = party.find((p: NpcPartyPokemon) => p._id === selectedAction.switchToPokemonId);
+                                    return (
+                                      <div className="rounded-md border border-primary bg-accent px-4 py-3 text-sm mb-2">
+                                        <span className="font-medium">Suggested: switch to {switchTo?.nickname ?? switchTo?.speciesName ?? 'another Pokémon'} (bad matchup)</span>
+                                        <span className="text-muted-foreground text-xs block mt-0.5">Submit All will switch instead of using a move. Click a move below to override.</span>
+                                      </div>
+                                    );
+                                  })()}
                                   <div className="grid grid-cols-2 gap-2">
                                     {(slot.activePokemonInfo?.moves ?? activePokemon.moves).map((m: MoveSlot) => {
                                       const noPP = m.currentPP <= 0;
-                                      const isSelected = npcSelectedMove[slotKey] === m.moveId;
+                                      const isSelected = selectedAction?.type === 'move' && selectedAction.moveId === m.moveId;
                                       return (
                                         <button
                                           key={m.moveId}
-                                          onClick={() => !noPP && setNpcSelectedMove(prev => ({ ...prev, [slotKey]: m.moveId }))}
+                                          onClick={() => !noPP && setNpcSelectedMove(prev => ({ ...prev, [slotKey]: { type: 'move', moveId: m.moveId } }))}
                                           disabled={noPP}
                                           className={[
                                             'flex flex-col items-start rounded-md border px-4 py-3 text-sm text-left transition-colors min-h-11',

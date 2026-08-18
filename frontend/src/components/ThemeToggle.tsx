@@ -11,7 +11,7 @@ export function ThemeToggle() {
       size="icon"
       onClick={toggleTheme}
       aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      className="fixed bottom-4 right-4 z-50 min-h-11 min-w-11 rounded-full shadow-sm"
+      className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-[calc(1rem+env(safe-area-inset-right))] z-50 min-h-11 min-w-11 rounded-full shadow-sm"
     >
       {theme === 'dark' ? <Sun /> : <Moon />}
     </Button>

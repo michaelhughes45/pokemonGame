@@ -193,31 +193,31 @@ export default function DashboardPage() {
         {/* ── Navigation links ── */}
         <div className="flex flex-col gap-1">
           {party.length === 0 && !partyLoading && (
-            <Link to="/starter" className="text-sm underline text-muted-foreground">
+            <Link to="/starter" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
               Pick your starter Pokémon →
             </Link>
           )}
           {party.length > 0 && (
-            <Link to="/party" className="text-sm underline text-muted-foreground">
+            <Link to="/party" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
               Manage Party →
             </Link>
           )}
-          <Link to="/pc" className="text-sm underline text-muted-foreground">
+          <Link to="/pc" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             PC Storage →
           </Link>
-          <Link to="/bag" className="text-sm underline text-muted-foreground">
+          <Link to="/bag" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             Bag →
           </Link>
-          <Link to="/town" className="text-sm underline text-muted-foreground">
+          <Link to="/town" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             Town →
           </Link>
           {(user.role === 'dm' || user.role === 'admin') && (
-            <Link to="/dm" className="text-sm underline text-muted-foreground">
+            <Link to="/dm" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
               DM Panel →
             </Link>
           )}
           {user.role === 'admin' && (
-            <Link to="/admin" className="text-sm underline text-muted-foreground">
+            <Link to="/admin" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
               Admin Panel →
             </Link>
           )}

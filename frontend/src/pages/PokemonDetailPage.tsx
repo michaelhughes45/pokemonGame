@@ -276,7 +276,7 @@ export default function PokemonDetailPage() {
     return (
       <div className="min-h-screen bg-background p-4">
         <p className="text-destructive">{error || 'Pokémon not found.'}</p>
-        <Link to="/dashboard" className="text-sm underline text-muted-foreground mt-2 inline-block">
+        <Link to="/dashboard" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground mt-2">
           ← Back to dashboard
         </Link>
       </div>
@@ -418,7 +418,7 @@ export default function PokemonDetailPage() {
       <div className="max-w-lg mx-auto flex flex-col gap-5">
 
         {/* ── Back link ── */}
-        <Link to="/dashboard" className="text-sm underline text-muted-foreground">
+        <Link to="/dashboard" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
           ← Back to dashboard
         </Link>
 
@@ -572,7 +572,7 @@ export default function PokemonDetailPage() {
                         <Button
                           size="sm"
                           variant="outline"
-                          className="ml-auto h-7 px-2 text-xs shrink-0"
+                          className="ml-auto h-11 md:h-7 px-2 text-xs shrink-0"
                           onClick={() => {
                             setReminderSlot(idx);
                             setReminderError('');

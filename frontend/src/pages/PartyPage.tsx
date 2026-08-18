@@ -200,7 +200,7 @@ export default function PartyPage() {
       <div className="max-w-lg mx-auto flex flex-col gap-6">
 
         <div className="flex items-center gap-3">
-          <Link to="/dashboard" className="text-sm text-muted-foreground underline">
+          <Link to="/dashboard" className="inline-flex items-center min-h-11 text-sm text-muted-foreground underline">
             ← Dashboard
           </Link>
           <h1 className="text-2xl font-bold">Party</h1>

@@ -132,7 +132,7 @@ function EncounterRow({ encounter, players, headers, onDelete }: EncounterRowPro
           ) : (
             <div className="flex flex-col gap-2">
               {players.map(p => (
-                <label key={p._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-9">
+                <label key={p._id} className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
                   <input
                     type="checkbox"
                     checked={selectedPlayers.has(p._id)}
@@ -251,7 +251,7 @@ export default function EncountersPage() {
         {/* Page header */}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Encounters</h1>
-          <Link to="/dm" className="text-sm underline text-muted-foreground">
+          <Link to="/dm" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             ← DM Panel
           </Link>
         </div>

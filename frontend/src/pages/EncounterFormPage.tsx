@@ -12,7 +12,7 @@ const API = import.meta.env.VITE_API_URL;
 
 // Matches the native <select> style used throughout DmPage
 const selectClass =
-  'w-full border border-input bg-background rounded-md px-3 py-2 text-sm min-h-11 ' +
+  'w-full border border-input bg-background rounded-md px-3 py-2 text-base md:text-sm min-h-11 ' +
   'focus:outline-none focus:ring-2 focus:ring-ring';
 
 // ---------------------------------------------------------------------------
@@ -393,7 +393,7 @@ export default function EncounterFormPage() {
       <div className="min-h-screen bg-background p-4 md:p-8">
         <div className="max-w-lg mx-auto flex flex-col gap-4">
           <p className="text-sm text-destructive">{pageError}</p>
-          <Link to="/dm/encounters" className="text-sm underline">← Back to encounters</Link>
+          <Link to="/dm/encounters" className="inline-flex items-center min-h-11 text-sm underline">← Back to encounters</Link>
         </div>
       </div>
     );
@@ -408,7 +408,7 @@ export default function EncounterFormPage() {
           <h1 className="text-2xl font-bold">
             {isEdit ? 'Edit Encounter' : 'New Encounter'}
           </h1>
-          <Link to="/dm/encounters" className="text-sm underline text-muted-foreground">
+          <Link to="/dm/encounters" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             ← Encounters
           </Link>
         </div>
@@ -462,7 +462,7 @@ export default function EncounterFormPage() {
                         const slotValue  = npcSlotCounts.get(npc._id) ?? null;
                         return (
                           <div key={npc._id} className="flex flex-col gap-1.5">
-                            <label className="flex items-center gap-2 text-sm cursor-pointer min-h-9">
+                            <label className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
                               <input
                                 type="checkbox"
                                 checked={isChecked}
@@ -615,13 +615,13 @@ export default function EncounterFormPage() {
                   onChange={e => setNotes(e.target.value)}
                   className={
                     'w-full border border-input bg-background rounded-md px-3 py-2 ' +
-                    'text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none'
+                    'text-base md:text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none'
                   }
                 />
               </div>
 
               {/* Active toggle ─────────────────────────────────────────── */}
-              <label className="flex items-center gap-2 text-sm cursor-pointer min-h-9">
+              <label className="flex items-center gap-2 text-sm cursor-pointer min-h-11">
                 <input
                   type="checkbox"
                   checked={isActive}

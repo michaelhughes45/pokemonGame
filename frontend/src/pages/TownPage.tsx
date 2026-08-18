@@ -39,7 +39,7 @@ export default function TownPage() {
     <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="max-w-lg mx-auto flex flex-col gap-5">
 
-        <Link to="/dashboard" className="text-sm underline text-muted-foreground">
+        <Link to="/dashboard" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
           ← Back to dashboard
         </Link>
 

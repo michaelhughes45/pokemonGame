@@ -302,7 +302,7 @@ export default function BagPage() {
         {/* ── Header ── */}
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Bag</h1>
-          <Link to="/dashboard" className="text-sm underline text-muted-foreground">
+          <Link to="/dashboard" className="inline-flex items-center min-h-11 text-sm underline text-muted-foreground">
             ← Dashboard
           </Link>
         </div>
@@ -332,7 +332,7 @@ export default function BagPage() {
           >
             <TabsList className="flex flex-wrap h-auto gap-1">
               {occupiedPockets.map((pocket) => (
-                <TabsTrigger key={pocket} value={pocket} className="text-xs">
+                <TabsTrigger key={pocket} value={pocket} className="text-xs min-h-11 md:min-h-8">
                   {POCKET_LABEL[pocket]}
                 </TabsTrigger>
               ))}

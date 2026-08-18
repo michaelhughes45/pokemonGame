@@ -68,7 +68,7 @@ type Roster = {
 
 // Matches the native <select> style used throughout DmPage
 const selectClass =
-  'w-full border border-input bg-background rounded-md px-3 py-2 text-sm min-h-11 ' +
+  'w-full border border-input bg-background rounded-md px-3 py-2 text-base md:text-sm min-h-11 ' +
   'focus:outline-none focus:ring-2 focus:ring-ring';
 
 // ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ export function PokemonCard({ poke, actions }: PokemonCardProps) {
       />
       <div className="flex-1 min-w-0 space-y-1.5">
         <div className="flex items-center gap-2 flex-wrap">
-          <Link to={`/pokemon/${poke._id}`} className="font-semibold hover:underline truncate">
+          <Link to={`/pokemon/${poke._id}`} className="inline-flex items-center min-h-11 font-semibold hover:underline truncate">
             {displayName}
           </Link>
           <Badge variant="secondary" className="text-xs shrink-0">Lv {poke.level}</Badge>
@@ -305,7 +305,7 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
           onChange={e => setExpInput(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && handleAwardExp()}
           placeholder="EXP amount"
-          className="flex-1 h-9 rounded-md border border-input bg-background px-3 py-1 text-sm min-w-0"
+          className="flex-1 h-11 md:h-9 rounded-md border border-input bg-background px-3 py-1 text-base md:text-sm min-w-0"
           disabled={busy}
         />
         <Button size="sm" onClick={handleAwardExp} disabled={busy || !expInput} className="shrink-0">
@@ -326,7 +326,7 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
       )}
 
       {!evOpen ? (
-        <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={openEvEditor}>
+        <Button size="sm" variant="ghost" className="h-11 md:h-7 px-2 text-xs" onClick={openEvEditor}>
           Edit EVs
         </Button>
       ) : (
@@ -342,7 +342,7 @@ function ActionControls({ poke, headers, onRefresh }: ActionControlsProps) {
                   value={evInputs[k]}
                   onChange={e => setEvInputs(prev => ({ ...prev, [k]: e.target.value }))}
                   disabled={evBusy}
-                  className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+                  className="h-11 md:h-8 rounded-md border border-input bg-background px-2 text-base md:text-sm"
                 />
               </div>
             ))}
@@ -380,9 +380,9 @@ function BadgeTile({ badge, onRevoke }: { badge: PlayerBadge; onRevoke?: () => v
             type="button"
             onClick={onRevoke}
             title={`Revoke ${badge.name}`}
-            className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-red-500 text-white text-xs leading-none flex items-center justify-center"
+            className="absolute -top-3 -right-3 w-11 h-11 flex items-center justify-center"
           >
-            ×
+            <span className="w-5 h-5 rounded-full bg-red-500 text-white text-xs leading-none flex items-center justify-center">×</span>
           </button>
         )}
       </div>
@@ -671,14 +671,14 @@ function CustomBadgesCard({ customBadges, headers, onRefresh }: CustomBadgesCard
             value={name}
             onChange={e => setName(e.target.value)}
             placeholder="Badge name"
-            className="flex-1 h-11 rounded-md border border-input bg-background px-3 py-1 text-sm min-w-0"
+            className="flex-1 h-11 rounded-md border border-input bg-background px-3 py-1 text-base md:text-sm min-w-0"
             disabled={busy}
           />
           <input
             value={imageUrl}
             onChange={e => setImageUrl(e.target.value)}
             placeholder="Image URL"
-            className="flex-1 h-11 rounded-md border border-input bg-background px-3 py-1 text-sm min-w-0"
+            className="flex-1 h-11 rounded-md border border-input bg-background px-3 py-1 text-base md:text-sm min-w-0"
             disabled={busy}
           />
           <Button size="sm" onClick={handleCreate} disabled={busy} className="shrink-0">
@@ -755,7 +755,7 @@ export default function DmPlayersPage() {
   return (
     <div className="max-w-3xl mx-auto p-4 space-y-6">
       <div className="flex items-center gap-3">
-        <Link to="/dm" className="text-sm text-muted-foreground hover:underline">← DM Panel</Link>
+        <Link to="/dm" className="inline-flex items-center min-h-11 text-sm text-muted-foreground hover:underline">← DM Panel</Link>
         <h1 className="text-2xl font-bold">Player Pokémon</h1>
       </div>
 
