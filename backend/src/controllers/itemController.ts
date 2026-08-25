@@ -10,6 +10,8 @@ import { getPlayerEffectiveLevelCap } from '../lib/levelCap';
 import { EV_STAT_DISPLAY_NAMES, applyEvGain } from '../lib/evData';
 import { getIvsForOwner } from '../lib/trainerIv';
 import { natureFromMintItem, getPocket } from '../lib/itemData';
+import { getAutoLearnedMoves } from '../lib/moveLearning';
+import { slugToDisplayName } from '../lib/battleCalc';
 
 // ---------------------------------------------------------------------------
 // Item effect table
@@ -390,6 +392,14 @@ export async function useItem(req: Request, res: Response): Promise<void> {
     pokemon.currentHp += (newMaxHp - oldMaxHp);
 
     message = `Grew to level ${pokemon.level}!`;
+
+    const learnedMoves = await getAutoLearnedMoves(
+      pokemon.speciesId, pokemon.level, pokemon.moves.map(m => m.moveId), pokemon.moves.length,
+    );
+    for (const learned of learnedMoves) {
+      pokemon.moves.push(learned);
+      message += ` ${pokemon.nickname ?? 'It'} learned ${slugToDisplayName(learned.moveId)}!`;
+    }
 
     const evolveIntoId = await canEvolve({
       speciesId:          pokemon.speciesId,

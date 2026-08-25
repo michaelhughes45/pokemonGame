@@ -8,6 +8,7 @@ import {
   healParty,
   replaceMoveSlot,
   teachTmMove,
+  setNickname,
   getPokemon,
   releasePokemon,
 } from '../controllers/pokemonController';
@@ -39,6 +40,9 @@ router.patch('/:id/moves',     replaceMoveSlot);
 
 // PATCH /api/pokemon/:id/teach-tm   — replace a move slot by teaching a TM/HM
 router.patch('/:id/teach-tm',  teachTmMove);
+
+// PATCH /api/pokemon/:id/nickname   — set (or clear) a Pokémon's nickname
+router.patch('/:id/nickname',  setNickname);
 
 // GET  /api/pokemon/:id             — full detail for one pokemon
 router.get('/:id',             getPokemon);

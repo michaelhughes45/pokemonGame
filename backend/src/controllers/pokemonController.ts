@@ -315,6 +315,34 @@ export async function replaceMoveSlot(req: Request, res: Response): Promise<void
   sendOk(res, { moves: newMoves });
 }
 
+const MAX_NICKNAME_LENGTH = 20;
+
+// ---------------------------------------------------------------------------
+// PATCH /api/pokemon/:id/nickname
+// Sets (or clears, with an empty/null body) a Pokémon's nickname.
+// Players can only rename their own; DM/admin can rename any.
+// ---------------------------------------------------------------------------
+export async function setNickname(req: Request, res: Response): Promise<void> {
+  const { userId, role } = req.user!;
+  const { nickname } = req.body as { nickname: unknown };
+
+  if (nickname !== null && nickname !== undefined && typeof nickname !== 'string') {
+    return sendError(res, 400, 'nickname must be a string or null');
+  }
+
+  const trimmed = typeof nickname === 'string' ? nickname.trim() : null;
+  if (trimmed && trimmed.length > MAX_NICKNAME_LENGTH) {
+    return sendError(res, 400, `nickname must be ${MAX_NICKNAME_LENGTH} characters or fewer`);
+  }
+
+  const pokemon = await assertPokemonAccess(String(req.params.id), userId, role, res);
+  if (!pokemon) return;
+
+  const newNickname = trimmed || null;
+  await Pokemon.updateOne({ _id: pokemon._id }, { nickname: newNickname });
+  sendOk(res, { nickname: newNickname });
+}
+
 // ---------------------------------------------------------------------------
 // PATCH /api/pokemon/:id/teach-tm
 // Replace one move slot by teaching a TM/HM from the trainer's own bag.

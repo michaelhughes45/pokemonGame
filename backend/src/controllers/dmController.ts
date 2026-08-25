@@ -17,6 +17,7 @@ import { resolveEvolvedSpecies } from '../lib/evolutionResolve';
 import { healPartyPokemon } from '../lib/healParty';
 import { slugToDisplayName } from '../lib/battleCalc';
 import { applyLevelUpLoop, getPlayerEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
+import { getAutoLearnedMoves } from '../lib/moveLearning';
 import { BADGE_CATALOG } from '../lib/badgeData';
 import { EV_STAT_CAP, EV_TOTAL_CAP, EV_STAT_DISPLAY_NAMES } from '../lib/evData';
 import { ivsFromSpread, getUnspentTrainerIv, getIvsForOwner } from '../lib/trainerIv';
@@ -1317,6 +1318,7 @@ export async function launchEncounter(req: Request, res: Response): Promise<void
     playerPokemonLimit: encounter.playerPokemonLimit ?? null,
     npcPokemonLimit:    encounter.npcPokemonLimit    ?? null,
     moneyReward:        encounter.type === 'pve' ? (encounter.moneyReward ?? 0) : 0,
+    expMultiplier:      encounter.expMultiplier ?? 1,
     encounterId:        encounter._id,
     lastUpdatedAt:      new Date(),
   });
@@ -1357,7 +1359,7 @@ export async function awardExp(req: Request, res: Response): Promise<void> {
   const cap       = await getPlayerEffectiveLevelCap(pokemon.ownerId);
   const ivs       = await getIvsForOwner(pokemon.ownerId, 'player');
 
-  const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, events: levelEvents, cappedOut } = await applyLevelUpLoop({
+  const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, moves: newMoves, events: levelEvents, cappedOut } = await applyLevelUpLoop({
     displayName,
     level: pokemon.level as number,
     exp: newExp,
@@ -1370,13 +1372,14 @@ export async function awardExp(req: Request, res: Response): Promise<void> {
     evs: pokemon.evs as BaseStats,
     ivs,
     cap,
+    moves: (pokemon.moves as unknown as { moveId: string; currentPP: number; maxPP: number; ppUps: number }[]) ?? [],
   });
   events.push(...levelEvents);
   if (cappedOut) events.push(`${displayName} has reached the level cap and cannot grow further!`);
 
   await Pokemon.updateOne(
     { _id: pokemon._id },
-    { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId } },
+    { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId, moves: newMoves } },
   );
 
   sendOk(res, { events, level: newLevel, exp: newExp, speciesId: newSpeciesId });
@@ -1421,6 +1424,15 @@ export async function levelUp(req: Request, res: Response): Promise<void> {
   }
 
   events.push(`${displayName} grew to level ${pokemon.level}!`);
+
+  const learnedMoves = await getAutoLearnedMoves(
+    pokemon.speciesId as number, pokemon.level as number,
+    pokemon.moves.map(m => m.moveId), pokemon.moves.length,
+  );
+  for (const learned of learnedMoves) {
+    pokemon.moves.push(learned);
+    events.push(`${displayName} learned ${slugToDisplayName(learned.moveId)}!`);
+  }
 
   const overrides    = (pokemon.evolutionOverrides ?? []) as { condition: string; value: string }[];
   const evolveIntoId = await canEvolve({

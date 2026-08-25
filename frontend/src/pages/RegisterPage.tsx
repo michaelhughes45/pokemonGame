@@ -17,6 +17,7 @@ export default function RegisterPage() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [role, setRole] = useState<'player' | 'dm'>('player');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -26,7 +27,7 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      const res = await axios.post(`${API}/api/auth/register`, { username, email, password });
+      const res = await axios.post(`${API}/api/auth/register`, { username, email, password, role });
       await login(res.data.data.token);
       navigate('/dashboard');
     } catch (err: unknown) {
@@ -75,6 +76,28 @@ export default function RegisterPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
               />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <Label>Role</Label>
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant={role === 'player' ? 'default' : 'outline'}
+                  className="flex-1"
+                  onClick={() => setRole('player')}
+                >
+                  Player
+                </Button>
+                <Button
+                  type="button"
+                  variant={role === 'dm' ? 'default' : 'outline'}
+                  className="flex-1"
+                  onClick={() => setRole('dm')}
+                >
+                  Dungeon Master
+                </Button>
+              </div>
             </div>
 
             {error && <p className="text-sm text-destructive">{error}</p>}

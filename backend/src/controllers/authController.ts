@@ -27,18 +27,24 @@ function signToken(userId: string, role: string): string {
 // ---------------------------------------------------------------------------
 // POST /api/auth/register
 // ---------------------------------------------------------------------------
+const SELF_SERVE_ROLES = ['player', 'dm'] as const;
+
 export async function register(req: Request, res: Response): Promise<void> {
-  const { username, email, password } = req.body;
+  const { username, email, password, role } = req.body;
 
   if (!username || !email || !password) {
     return sendError(res, 400, 'username, email, and password are required');
   }
 
-  // Role is never accepted from the client — every new account starts as
-  // 'player'. Elevating to 'dm'/'admin' only ever happens via an existing
+  // Players can self-select 'player' or 'dm' at signup. 'admin' is never
+  // accepted from the client — that only ever happens via an existing
   // admin's PATCH /api/admin/users/:id/role (see adminController.ts).
+  if (role !== undefined && !SELF_SERVE_ROLES.includes(role)) {
+    return sendError(res, 400, `role must be one of: ${SELF_SERVE_ROLES.join(', ')}`);
+  }
+
   const passwordHash = await bcrypt.hash(password, 12);
-  const user         = await User.create({ username, email, passwordHash, role: 'player' });
+  const user         = await User.create({ username, email, passwordHash, role: role ?? 'player' });
   const token        = signToken(user._id.toString(), user.role);
 
   sendOk(res, { token, user: { id: user._id, username: user.username, role: user.role } }, 201);

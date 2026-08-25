@@ -146,6 +146,10 @@ export type IBattle = {
   // Set by the DM at creation, or copied from Encounter.moneyReward at launch. Always
   // 0 for wild/pvp battles (wild has no trainer to pay it out, pvp deliberately excluded).
   moneyReward: number;
+  // Multiplies all EXP awards after the battle. 1 = normal. Copied from
+  // Encounter.expMultiplier at launch; defaults to 1 for battles not launched
+  // from an encounter (e.g. pvp).
+  expMultiplier: number;
   // Snapshotted from Campaign.hiddenAbilitiesEnabled at battle creation. Toggling the
   // campaign setting mid-battle doesn't retroactively change an in-progress fight —
   // only battles launched after the toggle pick up the new value.
@@ -341,6 +345,7 @@ const BattleSchema = new Schema<IBattle>(
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },
     moneyReward:        { type: Number, default: 0 },
+    expMultiplier:      { type: Number, default: 1 },
     hiddenAbilitiesEnabled: { type: Boolean, default: true },
     expAwarded:         { type: Boolean, default: false },
     moneyAwarded:       { type: Boolean, default: false },

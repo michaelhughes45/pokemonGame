@@ -7,6 +7,7 @@ import { apiError } from '../lib/apiError';
 import { formatItemName as formatName } from '../lib/formatName';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import {
   Sheet,
@@ -251,6 +252,12 @@ export default function PokemonDetailPage() {
   const [releaseStep, setReleaseStep] = useState<ReleaseStep>('idle');
   const [releaseError, setReleaseError] = useState('');
 
+  // Nickname editing state
+  const [nicknameEditing, setNicknameEditing] = useState(false);
+  const [nicknameDraft, setNicknameDraft]     = useState('');
+  const [nicknameBusy, setNicknameBusy]       = useState(false);
+  const [nicknameError, setNicknameError]     = useState('');
+
   useEffect(() => {
     if (!id) return;
     axios
@@ -328,6 +335,35 @@ export default function PokemonDetailPage() {
   }
 
   // ---------------------------------------------------------------------------
+  // Nickname handler
+  // ---------------------------------------------------------------------------
+  function startEditingNickname() {
+    if (!pokemon) return;
+    setNicknameDraft(pokemon.nickname ?? '');
+    setNicknameError('');
+    setNicknameEditing(true);
+  }
+
+  async function saveNickname() {
+    if (!pokemon) return;
+    setNicknameBusy(true);
+    setNicknameError('');
+    try {
+      const res = await axios.patch(
+        `${API}/api/pokemon/${pokemon._id}/nickname`,
+        { nickname: nicknameDraft.trim() || null },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setPokemon(prev => prev ? { ...prev, nickname: res.data.data.nickname } : prev);
+      setNicknameEditing(false);
+    } catch (err) {
+      setNicknameError(apiError(err, 'Failed to update nickname'));
+    } finally {
+      setNicknameBusy(false);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Hidden ability toggle handler (DM only)
   // ---------------------------------------------------------------------------
   async function toggleHiddenAbility() {
@@ -394,6 +430,10 @@ export default function PokemonDetailPage() {
   const canRelease =
     user?.id === pokemon.ownerId || user?.role === 'dm' || user?.role === 'admin';
 
+  // Can the logged-in user rename (nickname) this Pokémon?
+  const canRename =
+    user?.id === pokemon.ownerId || user?.role === 'dm' || user?.role === 'admin';
+
   const isDm         = user?.role === 'dm' || user?.role === 'admin';
   const isPrevented  = pokemon.evolutionOverrides.some(o => o.condition === 'prevent');
 
@@ -433,15 +473,52 @@ export default function PokemonDetailPage() {
               className="pixelated shrink-0"
             />
             <div className="flex flex-col gap-2 min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h1 className="text-xl font-bold leading-tight">{displayName}</h1>
-                {species.isLegendary && (
-                  <Badge variant="destructive">Legendary</Badge>
-                )}
-                {species.isMythical && (
-                  <Badge variant="destructive">Mythical</Badge>
-                )}
-              </div>
+              {nicknameEditing ? (
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      value={nicknameDraft}
+                      onChange={e => setNicknameDraft(e.target.value)}
+                      maxLength={20}
+                      placeholder={formatName(species.name)}
+                      autoFocus
+                      className="max-w-56"
+                    />
+                    <Button size="sm" onClick={saveNickname} disabled={nicknameBusy}>
+                      {nicknameBusy ? 'Saving…' : 'Save'}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setNicknameEditing(false)}
+                      disabled={nicknameBusy}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                  {nicknameError && (
+                    <p className="text-sm text-destructive">{nicknameError}</p>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h1 className="text-xl font-bold leading-tight">{displayName}</h1>
+                  {species.isLegendary && (
+                    <Badge variant="destructive">Legendary</Badge>
+                  )}
+                  {species.isMythical && (
+                    <Badge variant="destructive">Mythical</Badge>
+                  )}
+                  {canRename && (
+                    <button
+                      onClick={startEditingNickname}
+                      className="text-xs underline text-muted-foreground min-h-11 md:min-h-0 px-1"
+                    >
+                      {pokemon.nickname ? 'Edit nickname' : 'Add nickname'}
+                    </button>
+                  )}
+                </div>
+              )}
               <p className="text-sm text-muted-foreground">
                 #{pokemon.speciesId}
               </p>

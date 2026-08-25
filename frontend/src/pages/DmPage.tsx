@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { ChevronDown } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { apiError } from '../lib/apiError';
 import { Button } from '../components/ui/button';
@@ -9,6 +10,50 @@ import { Label } from '../components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 
 const API = import.meta.env.VITE_API_URL;
+
+// ── Collapsible card wrapper ────────────────────────────────────────────────
+// Every top-level DM Panel section renders through this instead of a raw
+// Card/CardHeader/CardContent, so the whole panel reads as a list of
+// collapsed headers the DM expands only when they need that section —
+// collapsed by default since the panel has ~10 sections stacked vertically.
+function CollapsibleCard({
+  title,
+  defaultOpen = false,
+  contentClassName = 'flex flex-col gap-4',
+  headerAction,
+  children,
+}: {
+  title: ReactNode;
+  defaultOpen?: boolean;
+  contentClassName?: string;
+  // Rendered outside the toggle button (e.g. a Refresh button) so it stays
+  // independently clickable instead of also toggling the section.
+  headerAction?: ReactNode;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            className="flex flex-1 items-center justify-between gap-2 text-left min-h-11"
+          >
+            <CardTitle>{title}</CardTitle>
+            <ChevronDown
+              size={20}
+              className={`text-muted-foreground shrink-0 transition-transform ${open ? 'rotate-180' : ''}`}
+            />
+          </button>
+          {headerAction}
+        </div>
+      </CardHeader>
+      {open && <CardContent className={contentClassName}>{children}</CardContent>}
+    </Card>
+  );
+}
 
 // ── Campaign card ─────────────────────────────────────────────────────────────
 // Shows the DM's current campaign. If they don't have one yet, shows a create
@@ -201,11 +246,7 @@ function CampaignCard({ token }: { token: string | null }) {
 
   // Has a campaign — show players, pending invites, and invite form
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{campaign.name}</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-5">
+    <CollapsibleCard title={campaign.name} defaultOpen contentClassName="flex flex-col gap-5">
 
         {/* Level cap toggle */}
         <div className="flex items-center justify-between rounded-md border p-3">
@@ -322,8 +363,7 @@ function CampaignCard({ token }: { token: string | null }) {
         {error    && <p className="text-sm text-destructive">{error}</p>}
         {feedback && <p className="text-sm text-muted-foreground">{feedback}</p>}
 
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -371,28 +411,25 @@ function ResetStarterCard({ token }: { token: string | null }) {
   }
 
   return (
-    <Card>
-      <CardHeader><CardTitle>Reset Player Starter</CardTitle></CardHeader>
-      <CardContent>
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="reset-username">Player username</Label>
-            <Input
-              id="reset-username"
-              placeholder="e.g. ash"
-              value={username}
-              onChange={e => setUsername(e.target.value)}
-              required
-            />
-          </div>
-          {error  && <p className="text-sm text-destructive">{error}</p>}
-          {result && <p className="text-sm text-muted-foreground">{result}</p>}
-          <Button type="submit" disabled={loading} className="min-h-11">
-            {loading ? 'Resetting…' : 'Reset starter'}
-          </Button>
-        </form>
-      </CardContent>
-    </Card>
+    <CollapsibleCard title="Reset Player Starter">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="reset-username">Player username</Label>
+          <Input
+            id="reset-username"
+            placeholder="e.g. ash"
+            value={username}
+            onChange={e => setUsername(e.target.value)}
+            required
+          />
+        </div>
+        {error  && <p className="text-sm text-destructive">{error}</p>}
+        {result && <p className="text-sm text-muted-foreground">{result}</p>}
+        <Button type="submit" disabled={loading} className="min-h-11">
+          {loading ? 'Resetting…' : 'Reset starter'}
+        </Button>
+      </form>
+    </CollapsibleCard>
   );
 }
 
@@ -440,9 +477,7 @@ function GivePokemonCard({ token }: { token: string | null }) {
   }
 
   return (
-    <Card>
-      <CardHeader><CardTitle>Give Pokémon to Player</CardTitle></CardHeader>
-      <CardContent>
+    <CollapsibleCard title="Give Pokémon to Player">
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
 
           <div className="flex flex-col gap-1.5">
@@ -528,8 +563,7 @@ function GivePokemonCard({ token }: { token: string | null }) {
             {loading ? 'Giving…' : 'Give Pokémon'}
           </Button>
         </form>
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -634,9 +668,7 @@ function GiveItemCard({ token }: { token: string | null }) {
   }
 
   return (
-    <Card>
-      <CardHeader><CardTitle>Give Item to Player</CardTitle></CardHeader>
-      <CardContent>
+    <CollapsibleCard title="Give Item to Player">
         <form onSubmit={handleSubmit} className="flex flex-col gap-4">
 
           <label className="flex items-center gap-2 text-sm min-h-11">
@@ -773,8 +805,7 @@ function GiveItemCard({ token }: { token: string | null }) {
             {loading ? 'Giving…' : giveToAll ? 'Give to Whole Campaign' : 'Give Item'}
           </Button>
         </form>
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -904,11 +935,7 @@ function ShopCatalogCard({ token }: { token: string | null }) {
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Pokémart Catalog</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
+    <CollapsibleCard title="Pokémart Catalog">
         <p className="text-sm text-muted-foreground">
           Choose which items your players can buy in the Pokémart. Nothing is for sale until you save a selection.
         </p>
@@ -952,8 +979,7 @@ function ShopCatalogCard({ token }: { token: string | null }) {
         <Button onClick={handleSave} disabled={saving} className="min-h-11">
           {saving ? 'Saving…' : 'Save Shop Selection'}
         </Button>
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -1067,11 +1093,7 @@ function RandomHeldItemsCard({ token }: { token: string | null }) {
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Random Held Items</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-4">
+    <CollapsibleCard title="Random Held Items">
         <p className="text-sm text-muted-foreground">
           Choose which items wild and NPC Pokémon can randomly hold. All {catalog.length} items are eligible until you save a narrower selection.
         </p>
@@ -1112,8 +1134,7 @@ function RandomHeldItemsCard({ token }: { token: string | null }) {
         <Button onClick={handleSave} disabled={saving} className="min-h-11">
           {saving ? 'Saving…' : 'Save Held Item Selection'}
         </Button>
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -1225,14 +1246,15 @@ function NpcCard({ token }: { token: string | null }) {
   }
 
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle>NPCs</CardTitle>
-        <Button variant="ghost" size="sm" onClick={loadNpcs} disabled={loading} className="h-11 md:h-8 text-xs">
+    <CollapsibleCard
+      title="NPCs"
+      contentClassName="flex flex-col gap-5"
+      headerAction={
+        <Button variant="ghost" size="sm" onClick={loadNpcs} disabled={loading} className="h-11 md:h-8 text-xs shrink-0">
           {loading ? 'Refreshing…' : 'Refresh'}
         </Button>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-5">
+      }
+    >
 
         {/* NPC list */}
         {loading ? (
@@ -1372,8 +1394,7 @@ function NpcCard({ token }: { token: string | null }) {
           </Button>
         </form>
 
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -1438,9 +1459,7 @@ function NpcPartyManagerCard({ token }: { token: string | null }) {
   const selectedNpcName = npcs.find(n => n._id === selectedNpc)?.name ?? '';
 
   return (
-    <Card>
-      <CardHeader><CardTitle>NPC Party Manager</CardTitle></CardHeader>
-      <CardContent className="flex flex-col gap-4">
+    <CollapsibleCard title="NPC Party Manager">
         {!loaded ? (
           <Button variant="outline" onClick={loadNpcs} disabled={loading} className="min-h-11">
             {loading ? 'Loading…' : 'Load NPCs'}
@@ -1520,8 +1539,7 @@ function NpcPartyManagerCard({ token }: { token: string | null }) {
             )}
           </>
         )}
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -1575,9 +1593,7 @@ function ActiveBattlesCard({ token }: { token: string | null }) {
   if (battles.length === 0) return null;
 
   return (
-    <Card>
-      <CardHeader><CardTitle>Active Battles</CardTitle></CardHeader>
-      <CardContent className="flex flex-col gap-2">
+    <CollapsibleCard title="Active Battles" defaultOpen contentClassName="flex flex-col gap-2">
         {battles.map(b => (
           <div key={b._id} className="flex items-center gap-2">
             <Link to={`/battle/${b._id}`} className="flex-1">
@@ -1602,8 +1618,7 @@ function ActiveBattlesCard({ token }: { token: string | null }) {
             </Button>
           </div>
         ))}
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 
@@ -1775,9 +1790,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
   }
 
   return (
-    <Card>
-      <CardHeader><CardTitle>Create Battle</CardTitle></CardHeader>
-      <CardContent>
+    <CollapsibleCard title="Create Battle">
         {loadingData ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : players.length === 0 ? (
@@ -1974,8 +1987,7 @@ function CreateBattleCard({ token }: { token: string | null }) {
             </Button>
           </form>
         )}
-      </CardContent>
-    </Card>
+    </CollapsibleCard>
   );
 }
 

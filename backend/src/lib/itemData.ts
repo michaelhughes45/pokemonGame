@@ -243,7 +243,8 @@ export function natureFromMintItem(itemId: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Random held item assignment (milestone 5.12)
+// Random held item assignment (milestone 5.12, widened to the full catalog
+// post-6.8)
 // Wild-owned Pokémon (Npc.type:'wild' parties and standalone wild-battle
 // spawns) can drop their held item to the player that faints them; trainer
 // NPCs' held items never drop and are flavor only. Mints only ever matter as
@@ -252,24 +253,23 @@ export function natureFromMintItem(itemId: string): string | null {
 // ---------------------------------------------------------------------------
 
 // Exported in milestone 6.8 so campaignController's held-item-catalog endpoint
-// can list the same pool this function draws from, without redriving the
-// ITEM_POCKET_MAP filter a second time.
-export const HELD_TYPE_ITEMS: string[] = Object.entries(ITEM_POCKET_MAP)
-  .filter(([, pocket]) => pocket === 'held_type')
-  .map(([itemId]) => itemId);
+// can list the same pool this function draws from. Widened post-6.8 from
+// held_type-only to every concrete item in ITEM_POCKET_MAP (berries,
+// medicine, Poké Balls, evolution stones, everything) — a wild/NPC Pokémon
+// can now hold literally anything in the catalog, not just type-boost items.
+// TM/HM is deliberately excluded: it's a synthesized per-move identifier
+// (`tm-<moveId>`), not a fixed catalog entry, so it has no natural place in a
+// flat random-draw pool.
+export const RANDOM_HELD_ITEM_POOL: string[] = Object.keys(ITEM_POCKET_MAP);
 
 export const MINT_ITEMS: string[] = NATURES.map(mintItemId);
 
-// Half the time a wild/NPC Pokémon holds nothing at all, matching the real
-// games' held-item rates loosely without needing a per-species table.
-const NO_ITEM_CHANCE = 0.5;
-
 /**
- * Rolls a random held item for a newly-created NPC or wild Pokémon, or null
- * for "holding nothing". `includeMints` should be true for anything that can
- * actually drop its held item (wild-type NPCs, standalone wild spawns) and
- * false for trainer-type NPCs, whose held items are flavor-only and never
- * transfer to a player.
+ * Rolls a random held item for a newly-created NPC or wild Pokémon — always
+ * draws one from the eligible pool, never "holding nothing". `includeMints`
+ * should be true for anything that can actually drop its held item (wild-type
+ * NPCs, standalone wild spawns) and false for trainer-type NPCs, whose held
+ * items are flavor-only and never transfer to a player.
  *
  * `eligibleIds` (milestone 6.8) is the DM-curated subset from
  * Campaign.randomHeldItemIds — undefined/null (the uncurated default) uses
@@ -279,8 +279,7 @@ const NO_ITEM_CHANCE = 0.5;
  * nothing rather than falling back to "unfiltered."
  */
 export function rollHeldItem(includeMints: boolean, eligibleIds?: string[] | null): string | null {
-  if (Math.random() < NO_ITEM_CHANCE) return null;
-  const fullPool = includeMints ? [...HELD_TYPE_ITEMS, ...MINT_ITEMS] : HELD_TYPE_ITEMS;
+  const fullPool = includeMints ? [...RANDOM_HELD_ITEM_POOL, ...MINT_ITEMS] : RANDOM_HELD_ITEM_POOL;
   const pool = eligibleIds == null ? fullPool : fullPool.filter(id => eligibleIds.includes(id));
   if (pool.length === 0) return null;
   return pool[Math.floor(Math.random() * pool.length)];

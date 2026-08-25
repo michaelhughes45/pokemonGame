@@ -631,23 +631,53 @@ export default function BattlePage() {
       (currentTargetEntry.actorType === 'npc' && isDm)
     : false;
 
-  // Display name for the actor currently picking targets. actorType 'player' can mean
-  // either side in pvp (the opposing trainer's entries live on enemySide but are still
-  // actorType 'player'), so check both rather than assuming playerSide.
-  const targetActorDisplayName = (() => {
+  // "<player/trainer> <pokemon>" label for the actor currently picking targets, used
+  // both in the Targeting card and as a synthetic "waiting for…" battle log line.
+  // actorType 'player' can mean either side in pvp (the opposing trainer's entries
+  // live on enemySide but are still actorType 'player'), so check both rather than
+  // assuming playerSide. For NPC trainers with more than one active Pokémon, and for
+  // battles with more than one simultaneous wild Pokémon, the name is suffixed with
+  // a 1-based number matching the existing "Slot N" grouping shown elsewhere.
+  const targetActorLabel = (() => {
     if (!currentTargetEntry || !battle) return '';
+
     if (currentTargetEntry.actorType === 'player') {
-      return battle.playerSide.find(e => e.userId === currentTargetEntry.actorId)?.username
-        ?? battle.enemySide.find(e => e.userId === currentTargetEntry.actorId)?.username
-        ?? 'Unknown';
+      const entry = battle.playerSide.find(e => e.userId === currentTargetEntry.actorId)
+        ?? battle.enemySide.find(e => e.userId === currentTargetEntry.actorId);
+      const trainerName = entry?.username ?? 'Unknown';
+      const pokeName = entry?.activePokemonInfo?.name ?? 'Pokémon';
+      return `${trainerName} ${pokeName}`;
     }
-    return battle.enemySide.find(e => e.npcId === currentTargetEntry.actorId)
-      ?.activePokemonInfo?.name ?? 'NPC';
+
+    // NPC actor — actorId is the shared trainer npcId for real NPC trainers, but the
+    // Pokémon's own activePokemonId for wild Pokémon (each wild mon acts independently).
+    const npcEntry = battle.enemySide.find(e => e.npcId === currentTargetEntry.actorId);
+    if (npcEntry) {
+      const slots = battle.enemySide.filter(e => e.npcId === npcEntry.npcId);
+      const slotIdx = slots.findIndex(e => e.activePokemonId === currentTargetEntry.activePokemonId);
+      const pokeName = (slotIdx !== -1 ? slots[slotIdx] : npcEntry).activePokemonInfo?.name ?? 'Pokémon';
+      const suffix = slots.length > 1 && slotIdx !== -1 ? String(slotIdx + 1) : '';
+      return `${npcEntry.npcName} ${pokeName}${suffix}`;
+    }
+
+    const wildSlots = battle.enemySide.filter(e => !e.npcId);
+    const wildIdx = wildSlots.findIndex(e => e.activePokemonId === currentTargetEntry.activePokemonId);
+    const pokeName = (wildIdx !== -1 ? wildSlots[wildIdx] : undefined)?.activePokemonInfo?.name ?? 'Pokémon';
+    const suffix = wildSlots.length > 1 && wildIdx !== -1 ? String(wildIdx + 1) : '';
+    return `DM ${pokeName}${suffix}`;
   })();
 
   const isNoTargetMove = currentTargetEntry
     ? (battle?.noTargetMoveIds ?? []).includes(currentTargetEntry.moveId)
     : false;
+
+  // Ephemeral "waiting for…" line shown at the end of the current turn's Battle Log
+  // entries during targeting. Computed client-side rather than persisted via
+  // appendToLog — it reflects live polling state, not a permanent turn event, so it
+  // should disappear once the actor submits and must never appear in Replay mode.
+  const battleLogWaitingLine = battle?.phase === 'targeting' && currentTargetEntry
+    ? `Waiting for ${targetActorLabel} move…`
+    : null;
 
   const isAutoTargetMove = !isNoTargetMove && battle?.currentMoveTargetCategory === 'auto';
   const isSingleTargetMove = !isNoTargetMove && !isAutoTargetMove;
@@ -1985,7 +2015,7 @@ export default function BattlePage() {
               ) : (
                 <p className="text-sm text-center text-muted-foreground py-2">
                   Waiting for{' '}
-                  <span className="font-medium text-foreground">{targetActorDisplayName}</span>
+                  <span className="font-medium text-foreground">{targetActorLabel}</span>
                   {isNoTargetMove ? ' to use their move…' : ' to pick targets…'}
                 </p>
               )}
@@ -2057,8 +2087,10 @@ export default function BattlePage() {
           </Card>
         )}
 
-        {/* Battle Log — visible to everyone once events exist, including after battle ends */}
-        {battle.status !== 'waiting' && battle.turnLog.length > 0 && (
+        {/* Battle Log — visible to everyone once events exist, including after battle ends.
+            Also shown with just the waiting line when the current turn has no logged
+            events yet (e.g. targeting on turn 1, before anything has resolved). */}
+        {battle.status !== 'waiting' && (battle.turnLog.length > 0 || battleLogWaitingLine) && (
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between gap-2">
@@ -2081,23 +2113,41 @@ export default function BattlePage() {
             <CardContent>
               {logMode === 'live' ? (
                 <div className="flex flex-col gap-4 max-h-64 overflow-y-auto pr-1">
-                  {[...battle.turnLog].reverse().map((entry, idx) => (
-                    <div key={entry.turn}>
-                      <p className={`text-xs font-semibold mb-1 ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}>
-                        Turn {entry.turn}
+                  {battle.turnLog.length === 0 && battleLogWaitingLine ? (
+                    <div>
+                      <p className="text-xs font-semibold mb-1 text-foreground">
+                        Turn {battle.turnNumber}
                       </p>
                       <ul className="flex flex-col gap-1">
-                        {entry.events.map((event, i) => (
-                          <li
-                            key={i}
-                            className={`text-sm ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}
-                          >
-                            {event}
-                          </li>
-                        ))}
+                        <li className="text-sm italic text-muted-foreground">
+                          {battleLogWaitingLine}
+                        </li>
                       </ul>
                     </div>
-                  ))}
+                  ) : (
+                    [...battle.turnLog].reverse().map((entry, idx) => (
+                      <div key={entry.turn}>
+                        <p className={`text-xs font-semibold mb-1 ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}>
+                          Turn {entry.turn}
+                        </p>
+                        <ul className="flex flex-col gap-1">
+                          {idx === 0 && battleLogWaitingLine && (
+                            <li className="text-sm italic text-muted-foreground">
+                              {battleLogWaitingLine}
+                            </li>
+                          )}
+                          {[...entry.events].reverse().map((event, i) => (
+                            <li
+                              key={i}
+                              className={`text-sm ${idx === 0 ? 'text-foreground' : 'text-muted-foreground'}`}
+                            >
+                              {event}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))
+                  )}
                 </div>
               ) : (
                 <>

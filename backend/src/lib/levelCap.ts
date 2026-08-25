@@ -4,10 +4,13 @@ import { User } from '../models/User';
 import { Campaign } from '../models/Campaign';
 import { Pokemon } from '../models/Pokemon';
 import { computeStats, expForLevel, BaseStats } from './statCalc';
-import { pokeDisplayName } from './battleCalc';
+import { pokeDisplayName, slugToDisplayName } from './battleCalc';
 import { canEvolve } from './evolution';
 import { resolveEvolvedSpecies } from './evolutionResolve';
 import { getIvsForOwner } from './trainerIv';
+import { getAutoLearnedMoves } from './moveLearning';
+
+type MoveSlot = { moveId: string; currentPP: number; maxPP: number; ppUps: number };
 
 export const BASE_LEVEL_CAP = 6;
 export const BADGE_LEVEL_BONUS = 3;
@@ -37,6 +40,7 @@ export type LevelUpLoopResult = {
   level: number;
   currentHp: number;
   speciesId: number;
+  moves: MoveSlot[];
   events: string[];
   // True when banked exp already covers the next level but `cap` stopped the loop.
   cappedOut: boolean;
@@ -61,11 +65,13 @@ export async function applyLevelUpLoop(params: {
   evs: BaseStats;
   ivs: BaseStats;
   cap: number;
+  moves: MoveSlot[];
 }): Promise<LevelUpLoopResult> {
   const { displayName, exp, nature, expGroup, baseStats, evs, ivs, cap } = params;
   let level = params.level;
   let currentHp = params.currentHp;
   let speciesId = params.speciesId;
+  const moves = [...params.moves];
   const events: string[] = [];
 
   while (level < cap && exp >= expForLevel(level + 1, expGroup)) {
@@ -78,6 +84,12 @@ export async function applyLevelUpLoop(params: {
     }
     events.push(`${displayName} grew to level ${level}!`);
 
+    const learnedMoves = await getAutoLearnedMoves(speciesId, level, moves.map(m => m.moveId), moves.length);
+    for (const learned of learnedMoves) {
+      moves.push(learned);
+      events.push(`${displayName} learned ${slugToDisplayName(learned.moveId)}!`);
+    }
+
     const evolveIntoId = await canEvolve({ speciesId, level, evolutionOverrides: params.evolutionOverrides });
     if (evolveIntoId !== null) {
       const { displayName: evolvedName, fullHp } = await resolveEvolvedSpecies(evolveIntoId, level, nature, evs, ivs);
@@ -89,7 +101,7 @@ export async function applyLevelUpLoop(params: {
 
   const cappedOut = level < 100 && level >= cap && exp >= expForLevel(level + 1, expGroup);
 
-  return { level, currentHp, speciesId, events, cappedOut };
+  return { level, currentHp, speciesId, moves, events, cappedOut };
 }
 
 // Replays every one of a player's Pokémon against a newly effective `cap`, persisting
@@ -105,7 +117,7 @@ export async function unlockPendingLevelUpsForPlayer(
 ): Promise<number> {
   const pokemonList = await Pokemon.find(
     { ownerId, ownerType: 'player' },
-    '_id nickname speciesId level exp nature currentHp evolutionOverrides evs',
+    '_id nickname speciesId level exp nature currentHp evolutionOverrides evs moves',
   ).lean();
   const growable = pokemonList.filter(p => (p.level as number) < cap);
   if (growable.length === 0) return 0;
@@ -120,7 +132,7 @@ export async function unlockPendingLevelUpsForPlayer(
     const cache = cacheMap.get(poke.speciesId);
     const overrides = (poke.evolutionOverrides ?? []) as EvolutionOverride[];
 
-    const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId } = await applyLevelUpLoop({
+    const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, moves: newMoves } = await applyLevelUpLoop({
       displayName: pokeDisplayName(poke, cache),
       level: poke.level as number,
       exp: poke.exp as number,
@@ -133,10 +145,11 @@ export async function unlockPendingLevelUpsForPlayer(
       evs: poke.evs as BaseStats,
       ivs,
       cap,
+      moves: (poke.moves ?? []) as MoveSlot[],
     });
 
     if (newLevel !== poke.level) {
-      await Pokemon.updateOne({ _id: poke._id }, { $set: { level: newLevel, currentHp: newHp, speciesId: newSpeciesId } });
+      await Pokemon.updateOne({ _id: poke._id }, { $set: { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, moves: newMoves } });
       changedCount += 1;
     }
   }

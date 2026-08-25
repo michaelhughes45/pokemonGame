@@ -4,7 +4,7 @@ import { Campaign } from '../models/Campaign';
 import { User } from '../models/User';
 import { getEffectiveLevelCap, unlockPendingLevelUpsForPlayer } from '../lib/levelCap';
 import { SHOP_PRICES, getSellPrice } from '../lib/shopData';
-import { getPocket, HELD_TYPE_ITEMS, MINT_ITEMS } from '../lib/itemData';
+import { getPocket, RANDOM_HELD_ITEM_POOL, MINT_ITEMS } from '../lib/itemData';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -409,12 +409,13 @@ export async function setShopItems(req: Request, res: Response): Promise<void> {
 // GET /api/campaigns/held-item-catalog
 // Milestone 6.8. Any authenticated user, same reasoning as getShopCatalog —
 // not campaign-specific. Returns the full pool rollHeldItem (lib/itemData.ts)
-// draws from: every held_type item (34, including the Arceus Plates) plus all
-// 25 mints. The DM curates a subset of this against Campaign.randomHeldItemIds
+// draws from: every item in the catalog (berries, medicine, Poké Balls,
+// evolution stones, held_type/held_battle items, everything) plus all 25
+// mints. The DM curates a subset of this against Campaign.randomHeldItemIds
 // client-side, same flow as the Pokémart catalog.
 // ---------------------------------------------------------------------------
 export async function getHeldItemCatalog(_req: Request, res: Response): Promise<void> {
-  const catalog = [...HELD_TYPE_ITEMS, ...MINT_ITEMS].map(itemId => ({
+  const catalog = [...RANDOM_HELD_ITEM_POOL, ...MINT_ITEMS].map(itemId => ({
     itemId,
     pocket: getPocket(itemId),
   }));
@@ -445,7 +446,7 @@ export async function setRandomHeldItems(req: Request, res: Response): Promise<v
     return sendError(res, 400, 'You do not have an active campaign');
   }
 
-  const fullPool = new Set([...HELD_TYPE_ITEMS, ...MINT_ITEMS]);
+  const fullPool = new Set([...RANDOM_HELD_ITEM_POOL, ...MINT_ITEMS]);
   campaign.randomHeldItemIds = itemIds === null
     ? null
     : [...new Set(itemIds)].filter(id => fullPool.has(id));

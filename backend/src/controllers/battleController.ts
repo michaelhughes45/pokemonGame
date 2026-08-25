@@ -1774,11 +1774,12 @@ async function awardExpToSide(
   if (faintedOpponentIds.length === 0 || gainingEntries.length === 0) return events;
 
   const faintedOpponents = await Pokemon.find({ _id: { $in: faintedOpponentIds } }, 'level speciesId').lean();
-  const totalBaseExp = faintedOpponents.reduce((sum, p) => sum + p.level * 5, 0);
+  const baseExp = faintedOpponents.reduce((sum, p) => sum + p.level * 5, 0);
+  const totalBaseExp = Math.floor(baseExp * (battle.expMultiplier ?? 1));
   if (totalBaseExp === 0) return events;
 
   const gainingUserIds  = gainingEntries.map(e => e.userId);
-  const allPartyPokemon = await Pokemon.find({ ownerId: { $in: gainingUserIds }, ownerType: 'player', isInParty: true }, '_id ownerId nickname speciesId level exp nature currentHp evs evolutionOverrides').lean();
+  const allPartyPokemon = await Pokemon.find({ ownerId: { $in: gainingUserIds }, ownerType: 'player', isInParty: true }, '_id ownerId nickname speciesId level exp nature currentHp evs evolutionOverrides moves').lean();
   const speciesIds = [...new Set([...allPartyPokemon.map(p => p.speciesId), ...faintedOpponents.map(p => p.speciesId)])];
   const caches     = speciesIds.length > 0 ? await PokedexCache.find({ pokeApiId: { $in: speciesIds } }, 'pokeApiId name expGroup baseStats evYield').lean() : [];
   const cacheMap   = new Map(caches.map(c => [c.pokeApiId as number, c]));
@@ -1816,7 +1817,7 @@ async function awardExpToSide(
       const cap       = capMap.get(gainingEntry.userId.toString()) ?? 100;
       const ivs       = ivsMap.get(gainingEntry.userId.toString()) ?? ZERO_IVS;
 
-      const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, events: levelEvents, cappedOut } = await applyLevelUpLoop({
+      const { level: newLevel, currentHp: newHp, speciesId: newSpeciesId, moves: newMoves, events: levelEvents, cappedOut } = await applyLevelUpLoop({
         displayName,
         level: poke.level as number,
         exp: newExp,
@@ -1829,10 +1830,11 @@ async function awardExpToSide(
         evs: newEvs,
         ivs,
         cap,
+        moves: (poke.moves ?? []) as { moveId: string; currentPP: number; maxPP: number; ppUps: number }[],
       });
       events.push(...levelEvents);
       if (cappedOut) events.push(`${displayName} has reached the level cap and cannot grow further!`);
-      await Pokemon.updateOne({ _id: poke._id }, { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId, evs: newEvs } });
+      await Pokemon.updateOne({ _id: poke._id }, { $set: { exp: newExp, level: newLevel, currentHp: newHp, speciesId: newSpeciesId, evs: newEvs, moves: newMoves } });
     }
   }
   return events;
