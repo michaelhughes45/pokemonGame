@@ -96,6 +96,20 @@ export type MimicState = {
   originalPpUps: number;
 };
 
+// Transform (milestone 6.10) — unlike Mimic's single-slot swap above, Transform
+// overwrites the user's ENTIRE moveset with the target's (each copied move at
+// min(5, its real max PP), matching the real games), directly on the Pokemon
+// document — the only way PP-tracking/move-legality/the frontend move picker all
+// see the swap automatically, with no separate override map for them to consult.
+// This snapshots the ORIGINAL full moveset so revertTransform (same switch-out/
+// faint call sites as revertMimic) can restore it. Types/ability/stat-stages/raw-
+// stats are NOT snapshotted here — those reuse the existing typeOverride/
+// tracedAbility/statStages/statBoostRatio maps, which every switch-out/faint site
+// already clears unconditionally for any outgoing Pokémon.
+export type TransformState = {
+  originalMoves: Array<{ moveId: string; currentPP: number; maxPP: number; ppUps: number }>;
+};
+
 // Healing Wish / Lunar Dance (milestone 5.14 Wave 10) — the user faints immediately
 // on use, and whichever Pokémon is sent into that same slot NEXT (no delay, unlike
 // PendingAttack) is fully healed. restorePP distinguishes Lunar Dance (also restores
@@ -241,6 +255,10 @@ export type IBattle = {
   // occupying the user's Mimic slot — see MimicState above. Reverted (and the entry
   // removed) on switch-out or faint, same lifetime as typeOverride/tracedAbility.
   mimicState: Record<string, MimicState>;
+  // Keyed by pokemonId.toString(). Present only while that Pokémon is currently
+  // Transformed — see TransformState above. Reverted (and the entry removed) on
+  // switch-out or faint, same lifetime as mimicState.
+  transformState: Record<string, TransformState>;
   // Future Sight / Doom Desire (milestone 5.14 Wave 9) — see the PendingAttack type
   // above for the full explanation. Resolved (and removed) in applyEndOfRound once
   // turnsRemaining hits 0.
@@ -375,6 +393,7 @@ const BattleSchema = new Schema<IBattle>(
     lastHitMoveType:     { type: Schema.Types.Mixed, default: {} },
     lastMoveAgainstMe:   { type: Schema.Types.Mixed, default: {} },
     mimicState:          { type: Schema.Types.Mixed, default: {} },
+    transformState:      { type: Schema.Types.Mixed, default: {} },
     pendingAttacks: [
       {
         moveId:              { type: String, required: true },

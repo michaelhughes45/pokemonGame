@@ -276,6 +276,26 @@ export const SELF_TARGETING_MOVES = new Set([
   // Imprison (milestone 6.15) — no foe target; blocks every opposing Pokémon from
   // using a move the user itself also knows (checked in checkMoveRestrictions).
   'imprison',
+  // Acupressure (milestone 6.10) — real target is 'user-or-ally'; simplified to
+  // self-only, same precedent as coaching/gear-up/howl/magnetic-flux above.
+  'acupressure',
+  // Jungle Healing (milestone 6.10) — real target is 'user-and-allies'; simplified to
+  // self-only, same precedent as aromatherapy/heal-bell above (heals + cures own status).
+  'jungle-healing',
+  // Flower Shield/Court Change (milestone 6.10) — field-wide, no single foe target
+  // needed, same shape as Haze/Perish Song above (sweeps every active Pokémon on both
+  // sides / swaps side conditions between sides).
+  'flower-shield', 'court-change',
+  // Happy Hour (milestone 6.10) — real effect is doubling prize money, which this
+  // project has no battle-prize-money system for; pure flavor, same treatment as Splash.
+  'happy-hour',
+  // Fairy Lock (milestone 6.10) — field-wide, no foe target, blocks switching for one
+  // additional round (see the fieldConditions entry and the submitMove/dmSubmitMove
+  // switch-action gate).
+  'fairy-lock',
+  // Teatime (milestone 6.10) — field-wide, no foe target, sweeps every active Pokémon
+  // on both sides same as Flower Shield above.
+  'teatime',
 ]);
 
 // Sport moves — Gen 5-7's version (the last generation where either was still a usable
@@ -367,11 +387,11 @@ export const COUNTER_MOVES: Record<string, { category: 'physical' | 'special' | 
 // more than one active Pokémon per side (a real, already-supported battle shape —
 // e.g. multi-player pve, pvp team battles). Heal Pulse alone can target either an
 // ally or a foe; Helping Hand/Aromatic Mist are ally-only.
-export const ALLY_ONLY_MOVES = new Set(['helping-hand', 'aromatic-mist']);
+export const ALLY_ONLY_MOVES = new Set(['helping-hand', 'aromatic-mist', 'floral-healing']);
 // Spotlight (milestone 6.15) — draws attention to whichever Pokémon it's used on
 // (ally or foe), redirecting single-target foe moves to them the same way Follow Me/
 // Rage Powder redirect to the user — see resolveRedirectTarget's own extended check.
-export const ALLY_OR_FOE_MOVES = new Set(['heal-pulse', 'spotlight']);
+export const ALLY_OR_FOE_MOVES = new Set(['heal-pulse', 'spotlight', 'purify']);
 
 // Redirect moves — for the rest of this round, single-target foe moves that would
 // have hit anyone on the user's side instead hit the user. Only affects moves whose
@@ -823,7 +843,7 @@ export const LIBRARY_FIXED_DAMAGE_MOVES = new Set([
   'seismic-toss', 'night-shade', 'dragon-rage', 'sonic-boom', 'final-gambit',
 ]);
 export const CUSTOM_FIXED_DAMAGE_MOVES = new Set([
-  'endeavor', 'super-fang', 'ruination', 'psywave',
+  'endeavor', 'super-fang', 'ruination', 'psywave', 'natures-madness',
 ]);
 export const FIXED_DAMAGE_MOVES = new Set([...LIBRARY_FIXED_DAMAGE_MOVES, ...CUSTOM_FIXED_DAMAGE_MOVES]);
 
@@ -838,7 +858,11 @@ export const FIXED_DAMAGE_MOVES = new Set([...LIBRARY_FIXED_DAMAGE_MOVES, ...CUS
 // "nothing to fling" guard.
 export const LIBRARY_VARIABLE_POWER_MOVES = new Set([
   'low-kick', 'grass-knot', 'heavy-slam', 'heat-crash', 'gyro-ball', 'electro-ball',
-  'flail', 'reversal', 'wring-out', 'hard-press', 'natural-gift',
+  'flail', 'reversal', 'wring-out', 'hard-press', 'natural-gift', 'crush-grip',
+  // Punishment (milestone 6.10) — power scales with the TARGET's positive stat stages
+  // (60 + 20 per stage, capped 200). @smogon/calc's own Punishment case already reads
+  // this off calcTarget.boosts, which resolveMove already populates from battle.statStages.
+  'punishment',
 ]);
 
 // High-crit-ratio moves (milestone 5.14 Wave 3) — sourced from PokeAPI's move-level
@@ -926,7 +950,10 @@ export const BOTH_SIDES_HAZARD_CLEAR = new Set(['defog', 'tidy-up']);
 // milestone 5.13), including the switch-block check and release-when-source-leaves
 // logic, but with no end-of-round chip damage and no turn-counted expiry (cast with
 // turnsRemaining:99, only cleared when the trapper itself leaves the field).
-export const NO_DAMAGE_TRAP_MOVES = new Set(['mean-look', 'block', 'spider-web']);
+// Octolock (milestone 6.10) shares this exact trap-with-no-chip-damage treatment —
+// the ADDITIONAL -1 Def/-1 SpD-every-turn part is handled separately in
+// applyEndOfRound's own bound: tick, gated on trapMoveId === 'octolock'.
+export const NO_DAMAGE_TRAP_MOVES = new Set(['mean-look', 'block', 'spider-web', 'octolock']);
 
 // Perish Song (milestone 5.14 Wave 8) — hits every active Pokémon on BOTH sides
 // (self, allies, and opponents alike), so it's resolved through the self-targeting

@@ -76,7 +76,7 @@ import {
   getSpitUpPower,
   getSwallowHealFraction,
 } from '../lib/moveData';
-import { PendingAttack, PendingWish, PendingWishHeal, MimicState } from '../models/Battle';
+import { PendingAttack, PendingWish, PendingWishHeal, MimicState, TransformState } from '../models/Battle';
 import {
   GEN9,
   type CachedAbility,
@@ -993,6 +993,21 @@ async function revertMimic(battle: HydratedDocument<IBattle>, pokemonId: mongoos
   battle.markModified('mimicState');
 }
 
+// Reverts a Transform back to the user's own original moveset (milestone 6.10) —
+// called from every switch-out/faint cleanup site, same lifetime as revertMimic
+// above. A no-op if this Pokémon isn't currently Transformed. Types/ability/stat-
+// stages/raw-stats revert on their own via the existing typeOverride/tracedAbility/
+// statStages/statBoostRatio cleanup already at every one of those call sites.
+async function revertTransform(battle: HydratedDocument<IBattle>, pokemonId: mongoose.Types.ObjectId): Promise<void> {
+  const transformMap = battle.transformState as Record<string, TransformState>;
+  const idStr = pokemonId.toString();
+  const state = transformMap[idStr];
+  if (!state) return;
+  await Pokemon.updateOne({ _id: pokemonId }, { moves: state.originalMoves });
+  delete transformMap[idStr];
+  battle.markModified('transformState');
+}
+
 async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mongoose.Types.ObjectId): Promise<string[]> {
   await Pokemon.updateOne({ _id: outgoingId }, { $set: { volatileStatus: [] } });
   delete (battle.statStages as Record<string, StatStages>)[outgoingId.toString()];
@@ -1016,6 +1031,7 @@ async function recallPokemon(battle: HydratedDocument<IBattle>, outgoingId: mong
   delete (battle.lastMoveAgainstMe as Record<string, string>)[outgoingId.toString()];
   battle.markModified('lastMoveAgainstMe');
   await revertMimic(battle, outgoingId);
+  await revertTransform(battle, outgoingId);
   return events;
 }
 
@@ -1248,6 +1264,7 @@ async function resolveBatonPass(battle: HydratedDocument<IBattle>, entry: TurnQu
   battle.markModified('lastMoveAgainstMe');
   // Mimic's temporary swap isn't Baton Pass-portable either — same treatment.
   await revertMimic(battle, outgoingId);
+  await revertTransform(battle, outgoingId);
 
   delete stageMap[outIdStr];
   const incIdStr = incomingId.toString();
@@ -1672,7 +1689,15 @@ async function resolveMove(
   // entry, same lifetime as Wide Guard/Quick Guard (cleared unconditionally each round).
   const ionDelugeActive = (battle.fieldConditions ?? []).some(f => f.condition === 'ion-deluge');
   const rawMoveType = moveData.type?.toLowerCase();
-  const moveType = ionDelugeActive && rawMoveType === 'normal' ? 'electric' : rawMoveType;
+  // Electrify (milestone 6.10) — a single-use, per-Pokémon version of the same
+  // Normal->Electric idea Ion Deluge does field-wide above, except ANY type becomes
+  // Electric, and it targets one specific Pokémon's next move rather than everyone's
+  // this round. Pushed onto the target as a turnsRemaining:0 volatile when Electrify
+  // is used (see the target-directed branch below); consumed here the next time that
+  // Pokémon's OWN move resolves this same round, then swept up in the same
+  // roosting/enduring/etc end-of-round cleanup Protect's family already uses.
+  const electrifyActive = ((attacker.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition === 'electrify');
+  const moveType = electrifyActive ? 'electric' : (ionDelugeActive && rawMoveType === 'normal' ? 'electric' : rawMoveType);
   // Foresight/Odor Sleuth/Miracle Eye (milestone 6.15) — identify:<attackerId> lets
   // THIS attacker's Normal/Fighting (Foresight/Odor Sleuth) or Psychic (Miracle Eye)
   // moves bypass a Ghost/Dark-type immunity by treating the target as not having that
@@ -1736,7 +1761,7 @@ async function resolveMove(
       damage = 0;
     } else if (moveId === 'endeavor') {
       damage = Math.max(0, target.currentHp - attacker.currentHp);
-    } else if (moveId === 'super-fang' || moveId === 'ruination') {
+    } else if (moveId === 'super-fang' || moveId === 'ruination' || moveId === 'natures-madness') {
       damage = Math.max(1, Math.floor(target.currentHp / 2));
     } else if (moveId === 'psywave') {
       // Gen 6+ formula: random 50%–150% of the user's level, in whole-percent steps.
@@ -1771,7 +1796,7 @@ async function resolveMove(
     const moveOverrides: Record<string, unknown> = {};
     if (powerOverride) moveOverrides.basePower = powerOverride;
     if (moveId === 'fling') { moveOverrides.type = cap(moveType ?? 'dark'); moveOverrides.category = 'Physical'; }
-    else if (ionDelugeActive && rawMoveType === 'normal') { moveOverrides.type = 'Electric'; }
+    else if (electrifyActive || (ionDelugeActive && rawMoveType === 'normal')) { moveOverrides.type = 'Electric'; }
     // Terrain/Gravity (milestone 6.10) — handed to @smogon/calc's own Field, which
     // already implements the terrain-boost (1.3x same-type move for a grounded
     // attacker), Misty's Dragon-halving, Grassy's Earthquake/Bulldoze-halving, Psychic
@@ -1958,6 +1983,7 @@ async function applyFaints(
       delete (battle.lastMoveAgainstMe as Record<string, string>)[entry.activePokemonId.toString()];
       battle.markModified('lastMoveAgainstMe');
       await revertMimic(battle, entry.activePokemonId);
+      await revertTransform(battle, entry.activePokemonId);
       events.push(...await awardExpToSide(battle, gainingEntries, [entry.activePokemonId]));
       entry.fainted.push(entry.activePokemonId);
       entry.activePokemonId = null;
@@ -2243,7 +2269,7 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
     }
 
     for (const poke of activePokemons) {
-      const toClear = ((poke.volatileStatus as Array<{ condition: string }>) ?? []).filter(v => v.condition === 'roosting' || v.condition === 'enduring' || v.condition.startsWith('protecting') || v.condition === 'follow-me' || v.condition === 'rage-powder' || v.condition === 'spotlight' || v.condition === 'helping-hand' || v.condition === 'destiny-bond' || v.condition === 'grudge').map(v => v.condition);
+      const toClear = ((poke.volatileStatus as Array<{ condition: string }>) ?? []).filter(v => v.condition === 'roosting' || v.condition === 'enduring' || v.condition.startsWith('protecting') || v.condition === 'follow-me' || v.condition === 'rage-powder' || v.condition === 'spotlight' || v.condition === 'helping-hand' || v.condition === 'destiny-bond' || v.condition === 'grudge' || v.condition === 'electrify').map(v => v.condition);
       if (toClear.length > 0) await Pokemon.updateOne({ _id: poke._id }, { $pull: { volatileStatus: { condition: { $in: toClear } } } });
     }
 
@@ -2267,6 +2293,12 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
         if (fc.condition === 'gravity') {
           const turnsLeft = fc.turnsRemaining - 1;
           if (turnsLeft <= 0) { allEvents.push('Gravity turned back to normal!'); continue; }
+          remaining.push({ condition: fc.condition, turnsRemaining: turnsLeft });
+          continue;
+        }
+        if (fc.condition === 'fairy-lock') {
+          const turnsLeft = fc.turnsRemaining - 1;
+          if (turnsLeft <= 0) { allEvents.push('The fairy lock wore off!'); continue; }
           remaining.push({ condition: fc.condition, turnsRemaining: turnsLeft });
           continue;
         }
@@ -2633,6 +2665,16 @@ async function applyEndOfRound(battle: HydratedDocument<IBattle>): Promise<void>
             );
           }
         }
+
+        // Octolock (milestone 6.10) — same bound:<moveId>:<sourceId> volatile as Mean
+        // Look/Block/Spider Web above (added to NO_DAMAGE_TRAP_MOVES, so it skips the
+        // chip-damage branch entirely), but ALSO drops the target's Def/SpD one stage
+        // every end of round for as long as the trap holds.
+        if (curHp > 0 && trapMoveId === 'octolock') {
+          const abilitySlugs = getEffectiveAbilitySlugs(battle, pokeId, (cache.abilities as CachedAbility[]) ?? [], poke.hasHiddenAbility as boolean);
+          allEvents.push(...applyStatStageEffects(stageMap, pokeId, [{ stat: 'def', stages: -1, target: 'self' }, { stat: 'spd', stages: -1, target: 'self' }], pokeName, abilitySlugs));
+          battle.markModified('statStages');
+        }
       }
 
       // Perish Song (milestone 5.14 Wave 8) — hits 0 by fainting outright, picked up
@@ -2870,7 +2912,7 @@ async function resolveTerrainMove(
 async function resolveSelfTargetMove(
   battle: HydratedDocument<IBattle>, entry: ActiveEntry, moveEvents: string[],
 ): Promise<void> {
-  const { poke: attacker, cache: atkCache, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs moves heldItem consumedHeldItem', 'name baseStats abilities types');
+  const { poke: attacker, cache: atkCache, name: attackerName } = await fetchDisplay(entry.activePokemonId, 'ownerId ownerType nickname speciesId currentHp nature level volatileStatus hasHiddenAbility evs moves heldItem consumedHeldItem statusCondition', 'name baseStats abilities types');
   const attackerIvs = attacker ? await getIvsForOwner(attacker.ownerId, attacker.ownerType) : ZERO_IVS;
 
   const moveMeta = attacker ? await fetchMoveMeta(attacker.speciesId, entry.moveId) : undefined;
@@ -2987,6 +3029,23 @@ async function resolveSelfTargetMove(
       moveEvents.push(`${attackerName} focused intensely!`);
     }
 
+    // Acupressure (milestone 6.10) — raises ONE randomly chosen stat (including
+    // accuracy/evasion) by +2 stages. Fails outright if every stat is already at +6.
+    if (entry.moveId === 'acupressure' && attacker) {
+      const stageMap = battle.statStages as Record<string, StatStages>;
+      const atkId    = entry.activePokemonId.toString();
+      if (!stageMap[atkId]) stageMap[atkId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
+      const raisable = (Object.keys(stageMap[atkId]) as (keyof StatStages)[]).filter(s => stageMap[atkId][s] < 6);
+      if (raisable.length === 0) {
+        moveEvents.push('But it failed!');
+      } else {
+        const stat = raisable[Math.floor(Math.random() * raisable.length)];
+        const atkAbilitySlugs = atkCache ? getEffectiveAbilitySlugs(battle, atkId, (atkCache.abilities as CachedAbility[]) ?? [], attacker.hasHiddenAbility as boolean) : [];
+        moveEvents.push(...applyStatStageEffects(stageMap, atkId, [{ stat, stages: 2, target: 'self' }], attackerName, atkAbilitySlugs));
+        battle.markModified('statStages');
+      }
+    }
+
     // Refresh — cures the user's own burn/poison/toxic/paralysis (NOT sleep/freeze,
     // matching the real games' exact exclusion list).
     if (entry.moveId === 'refresh' && attacker) {
@@ -2997,6 +3056,29 @@ async function resolveSelfTargetMove(
         moveEvents.push(`${attackerName} used Refresh! Its status was cured!`);
       } else {
         moveEvents.push(`${attackerName} used Refresh, but it failed!`);
+      }
+    }
+
+    // Jungle Healing (milestone 6.10) — heals 25% max HP AND cures the user's own
+    // status (unlike Refresh above, no sleep/freeze exclusion — real Jungle Healing
+    // cures anything). Can partially succeed (heal with no status, or cure status at
+    // full HP); only a genuine no-op (full HP, no status) fails outright.
+    if (entry.moveId === 'jungle-healing' && attacker && atkCache?.baseStats) {
+      const maxHp     = computeStats(atkCache.baseStats as BaseStats, attacker.level, attacker.nature, attacker.evs as BaseStats, attackerIvs).hp;
+      const currentHp = attacker.currentHp as number;
+      const healed    = Math.max(0, Math.min(maxHp - currentHp, Math.floor(maxHp / 4)));
+      const hadStatus = !!(attacker as any).statusCondition;
+      if (healed === 0 && !hadStatus) {
+        moveEvents.push(`${attackerName} used Jungle Healing, but it failed!`);
+      } else {
+        const update: Record<string, unknown> = {};
+        if (healed > 0) update.currentHp = currentHp + healed;
+        if (hadStatus) { update.statusCondition = null; update.statusCounter = null; }
+        await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: update });
+        const parts: string[] = [];
+        if (healed > 0) parts.push(`restored ${healed} HP`);
+        if (hadStatus) parts.push('cured its status');
+        moveEvents.push(`${attackerName} used Jungle Healing! ${attackerName} ${parts.join(' and ')}!`);
       }
     }
 
@@ -3388,6 +3470,91 @@ async function resolveSelfTargetMove(
         : 'But nobody was affected!');
     }
 
+    // Flower Shield (milestone 6.10) — raises Defense +1 for every Grass-type Pokémon
+    // currently active on BOTH sides, same all-active-mons sweep shape as Perish
+    // Song/Haze above.
+    if (entry.moveId === 'flower-shield') {
+      const allActiveIds = [
+        ...battle.playerSide.map(e => e.activePokemonId),
+        ...battle.enemySide.map(e => e.activePokemonId),
+      ].filter((id): id is mongoose.Types.ObjectId => id != null);
+      const stageMap = battle.statStages as Record<string, StatStages>;
+      let affectedAny = false;
+      for (const id of allActiveIds) {
+        const poke = await Pokemon.findById(id, 'nickname speciesId currentHp hasHiddenAbility').lean();
+        if (!poke || poke.currentHp <= 0) continue;
+        const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name types abilities').lean();
+        const idStr = id.toString();
+        const types = getEffectiveTypes(battle, idStr, (cache?.types as string[]) ?? []);
+        if (!types.includes('grass')) continue;
+        const abilitySlugs = getEffectiveAbilitySlugs(battle, idStr, (cache?.abilities as CachedAbility[]) ?? [], poke.hasHiddenAbility as boolean);
+        moveEvents.push(...applyStatStageEffects(stageMap, idStr, [{ stat: 'def', stages: 1, target: 'self' }], pokeDisplayName(poke, cache), abilitySlugs));
+        affectedAny = true;
+      }
+      if (affectedAny) battle.markModified('statStages');
+      else moveEvents.push('But it failed!');
+    }
+
+    // Teatime (milestone 6.10) — forces every active Pokémon on BOTH sides holding a
+    // berry to eat it immediately, regardless of the normal auto-trigger condition
+    // (this project has no automatic low-HP/status berry-trigger system at all —
+    // berries are otherwise only ever consumed through a manual item action — so this
+    // reuses BATTLE_ITEM_EFFECTS' hp_flat/status_cure cases directly, the only two
+    // effect kinds a battle-usable berry actually has here).
+    if (entry.moveId === 'teatime') {
+      const allActiveIds = [
+        ...battle.playerSide.map(e => e.activePokemonId),
+        ...battle.enemySide.map(e => e.activePokemonId),
+      ].filter((id): id is mongoose.Types.ObjectId => id != null);
+      let affectedAny = false;
+      for (const id of allActiveIds) {
+        const poke = await Pokemon.findById(id, 'nickname speciesId currentHp heldItem statusCondition nature level evs ownerId ownerType').lean();
+        if (!poke || poke.currentHp <= 0 || !poke.heldItem) continue;
+        const effect = BATTLE_ITEM_EFFECTS[poke.heldItem];
+        if (!effect || (effect.kind !== 'hp_flat' && effect.kind !== 'status_cure')) continue;
+        const cache = await PokedexCache.findOne({ pokeApiId: poke.speciesId }, 'name baseStats').lean();
+        const pokeName = pokeDisplayName(poke, cache);
+        const itemName = slugToDisplayName(poke.heldItem);
+        if (effect.kind === 'hp_flat') {
+          if (!cache?.baseStats) continue;
+          const maxHp = computeStats(cache.baseStats as BaseStats, poke.level, poke.nature, poke.evs as BaseStats, await getIvsForOwner(poke.ownerId, poke.ownerType)).hp;
+          if (poke.currentHp >= maxHp) continue;
+          const restored = Math.min(effect.amount, maxHp - poke.currentHp);
+          await Pokemon.updateOne({ _id: id }, { $set: { currentHp: poke.currentHp + restored }, heldItem: null, consumedHeldItem: poke.heldItem });
+          moveEvents.push(`${pokeName} ate its ${itemName} and restored ${restored} HP!`);
+          affectedAny = true;
+        } else {
+          if (!poke.statusCondition) continue;
+          const cures = effect.cures;
+          if (cures !== 'all' && !(cures as string[]).includes(poke.statusCondition)) continue;
+          await Pokemon.updateOne({ _id: id }, { $set: { statusCondition: null, statusCounter: null, heldItem: null, consumedHeldItem: poke.heldItem } });
+          moveEvents.push(`${pokeName} ate its ${itemName} and its status was cured!`);
+          affectedAny = true;
+        }
+      }
+      if (!affectedAny) moveEvents.push('But nobody was affected!');
+    }
+
+    // Court Change (milestone 6.10) — swaps every SIDE-specific field condition
+    // (hazards, screens, tailwind, etc — anything keyed 'moveId:playerSide[:layers]')
+    // between the two sides. Field-wide conditions with no side segment (gravity,
+    // trick-room, mud-sport, ...) are untouched since they already apply to everyone.
+    if (entry.moveId === 'court-change') {
+      const swapSide = (s: string) => s === 'playerSide' ? 'enemySide' : s === 'enemySide' ? 'playerSide' : s;
+      let swapped = false;
+      for (const fc of battle.fieldConditions ?? []) {
+        const newCondition = fc.condition.split(':').map(swapSide).join(':');
+        if (newCondition !== fc.condition) { fc.condition = newCondition; swapped = true; }
+      }
+      if (swapped) battle.markModified('fieldConditions');
+      moveEvents.push(swapped ? 'The effects on each side of the field were swapped!' : 'But it failed!');
+    }
+
+    // Happy Hour — pure flavor, no battle-mechanical effect (see SELF_TARGETING_MOVES).
+    if (entry.moveId === 'happy-hour') {
+      moveEvents.push('Everyone is much happier!');
+    }
+
     // Haze — resets every active Pokémon's stat stages on BOTH sides (not the whole
     // party, just who's currently out). Deleting the statStages entry is equivalent to
     // zeroing it — every reader already treats an absent entry as all-zero (see
@@ -3442,6 +3609,21 @@ async function resolveSelfTargetMove(
         battle.fieldConditions.push({ condition: 'gravity', turnsRemaining: 5 });
         battle.markModified('fieldConditions');
         moveEvents.push(`${attackerName} used Gravity! Gravity intensified!`);
+      }
+    }
+
+    // Fairy Lock (milestone 6.10) — field-wide (both sides), blocks switching for one
+    // additional round; the actual block is checked at submitMove/dmSubmitMove's
+    // existing 'switch'/'run' action-type gate (same spot the per-Pokémon `bound:`
+    // trap check already lives), not here.
+    if (entry.moveId === 'fairy-lock') {
+      const already = (battle.fieldConditions ?? []).some(f => f.condition === 'fairy-lock');
+      if (already) {
+        moveEvents.push(`${attackerName} used Fairy Lock, but it failed!`);
+      } else {
+        battle.fieldConditions.push({ condition: 'fairy-lock', turnsRemaining: 1 });
+        battle.markModified('fieldConditions');
+        moveEvents.push(`${attackerName} used Fairy Lock! No one can flee this round!`);
       }
     }
 
@@ -3560,7 +3742,7 @@ async function resolveAllyTargetMove(
   const { name: attackerName } = await fetchDisplay(entry.activePokemonId, 'nickname speciesId', 'name');
 
   const target = await Pokemon.findById(
-    targetId, 'ownerId ownerType nickname speciesId currentHp nature level evs hasHiddenAbility volatileStatus',
+    targetId, 'ownerId ownerType nickname speciesId currentHp nature level evs hasHiddenAbility volatileStatus statusCondition',
   ).lean();
   const targetCache = target ? await PokedexCache.findOne({ pokeApiId: target.speciesId }, 'name baseStats abilities').lean() : null;
   const targetName  = pokeDisplayName(target, targetCache);
@@ -3581,6 +3763,39 @@ async function resolveAllyTargetMove(
     const healed = Math.min(maxHp - target.currentHp, Math.floor(maxHp / 2));
     await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: target.currentHp + healed } });
     moveEvents.push(`${attackerName} used Heal Pulse! ${targetName} restored ${healed} HP!`);
+    return;
+  }
+
+  // Floral Healing (milestone 6.10) — same shape as Heal Pulse above, but heals 50%
+  // normally or 2/3 under Grassy Terrain instead of a flat 50%.
+  if (entry.moveId === 'floral-healing') {
+    if (!target || !targetCache?.baseStats) { moveEvents.push(`${attackerName} used Floral Healing, but it failed!`); return; }
+    const targetIvs = await getIvsForOwner(target.ownerId, target.ownerType);
+    const maxHp = computeStats(targetCache.baseStats as BaseStats, target.level, target.nature, target.evs as BaseStats, targetIvs).hp;
+    if (target.currentHp >= maxHp) { moveEvents.push(`${attackerName} used Floral Healing! ${targetName}'s HP is full!`); return; }
+    const fraction = battle.terrain === 'grassy' ? 2 / 3 : 0.5;
+    const healed = Math.min(maxHp - target.currentHp, Math.floor(maxHp * fraction));
+    await Pokemon.updateOne({ _id: targetId }, { $set: { currentHp: target.currentHp + healed } });
+    moveEvents.push(`${attackerName} used Floral Healing! ${targetName} restored ${healed} HP!`);
+    return;
+  }
+
+  // Purify (milestone 6.10) — cures the target's status; only if that actually cures
+  // something does the USER heal 50% of its own max HP.
+  if (entry.moveId === 'purify') {
+    if (!target?.statusCondition) { moveEvents.push(`${attackerName} used Purify, but it failed!`); return; }
+    await Pokemon.updateOne({ _id: targetId }, { $set: { statusCondition: null, statusCounter: 0 } });
+    const atkSnap = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType speciesId currentHp nature level evs').lean();
+    const atkCache = atkSnap ? await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'baseStats').lean() : null;
+    if (atkSnap && atkCache?.baseStats) {
+      const atkIvs = await getIvsForOwner(atkSnap.ownerId, atkSnap.ownerType);
+      const maxHp   = computeStats(atkCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs as BaseStats, atkIvs).hp;
+      const healed  = Math.max(0, Math.min(maxHp - atkSnap.currentHp, Math.floor(maxHp / 2)));
+      if (healed > 0) await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { currentHp: atkSnap.currentHp + healed } });
+      moveEvents.push(`${attackerName} used Purify! ${targetName}'s status was cured!${healed > 0 ? ` ${attackerName} restored ${healed} HP!` : ''}`);
+    } else {
+      moveEvents.push(`${attackerName} used Purify! ${targetName}'s status was cured!`);
+    }
     return;
   }
 
@@ -3803,8 +4018,8 @@ async function resolveDamagingMove(
   const drainEffect     = DRAIN_MOVES[entry.moveId];
   const selfStatEffects = (STAT_STAGE_MOVES[entry.moveId] ?? []).filter(e => e.target === 'self');
 
-  type AtkSnapshot = { ownerId: mongoose.Types.ObjectId; ownerType: string; currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats; gender?: string | null; heldItem?: string | null; consumedHeldItem?: string | null; moves?: Array<{ moveId: string; currentPP: number }> };
-  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs gender heldItem consumedHeldItem moves').lean() as AtkSnapshot | null;
+  type AtkSnapshot = { ownerId: mongoose.Types.ObjectId; ownerType: string; currentHp: number; speciesId: number; nature: string; level: number; nickname: string | null; hasHiddenAbility?: boolean; volatileStatus?: Array<{ condition: string }>; evs: BaseStats; gender?: string | null; heldItem?: string | null; consumedHeldItem?: string | null; moves?: Array<{ moveId: string; currentPP: number }>; statusCondition?: string | null };
+  const atkSnap      = await Pokemon.findById(entry.activePokemonId, 'ownerId ownerType nickname currentHp speciesId nature level hasHiddenAbility volatileStatus evs gender heldItem consumedHeldItem moves statusCondition').lean() as AtkSnapshot | null;
   const atkSnapCache = atkSnap ? await PokedexCache.findOne({ pokeApiId: atkSnap.speciesId }, 'name baseStats abilities').lean() : null;
   const atkIvs       = atkSnap ? await getIvsForOwner(atkSnap.ownerId, atkSnap.ownerType) : ZERO_IVS;
 
@@ -3964,6 +4179,31 @@ async function resolveDamagingMove(
     }
     variablePowerOverride = picked.power;
     moveEvents.push(`${atkName} used Magnitude! Magnitude ${picked.magnitude}!`);
+  }
+
+  // Present (milestone 6.10) — 20% chance to heal the target 25% max HP instead of
+  // dealing damage (handled entirely here, short-circuiting before the normal damage
+  // pipeline, same as Natural Gift's "no berry" guard above); otherwise rolls
+  // 40/80/120 BP (40%/30%/10% of the total 100%) fed through the same
+  // variablePowerOverride chain Magnitude uses.
+  if (entry.moveId === 'present') {
+    const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+    const roll = Math.random();
+    if (roll < 0.2) {
+      const tgtId = targets[0];
+      const tgt = tgtId ? await Pokemon.findById(tgtId, 'nickname speciesId currentHp nature level evs ownerId ownerType').lean() : null;
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name baseStats').lean() : null;
+      if (!tgt || !tgtCache?.baseStats) { moveEvents.push(`${atkName} used Present, but it failed!`); return; }
+      const tgtIvs = await getIvsForOwner((tgt as any).ownerId, (tgt as any).ownerType);
+      const maxHp  = computeStats(tgtCache.baseStats as BaseStats, (tgt as any).level, (tgt as any).nature, (tgt as any).evs as BaseStats, tgtIvs).hp;
+      const tgtName = pokeDisplayName(tgt, tgtCache);
+      if (tgt.currentHp >= maxHp) { moveEvents.push(`${atkName} used Present! ${tgtName}'s HP is full!`); return; }
+      const healed = Math.min(maxHp - tgt.currentHp, Math.floor(maxHp / 4));
+      await Pokemon.updateOne({ _id: tgtId }, { $set: { currentHp: tgt.currentHp + healed } });
+      moveEvents.push(`${atkName} used Present! ${tgtName} restored ${healed} HP!`);
+      return;
+    }
+    variablePowerOverride = roll < 0.6 ? 40 : roll < 0.9 ? 80 : 120;
   }
 
   if (entry.moveId === 'spit-up' && atkSnap) {
@@ -4223,6 +4463,37 @@ async function resolveDamagingMove(
       continue;
     }
 
+    // Heart Swap (milestone 6.10) — swaps ALL 7 stat stages with the target (Guard
+    // Swap/Power Swap above only swap one pair each). Never misses.
+    if (entry.moveId === 'heart-swap') {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const { name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+      const stageMap = battle.statStages as Record<string, StatStages>;
+      const atkId    = entry.activePokemonId.toString();
+      if (!stageMap[atkId]) stageMap[atkId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
+      if (!stageMap[targetId]) stageMap[targetId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
+      const atkStages = stageMap[atkId];
+      stageMap[atkId] = stageMap[targetId];
+      stageMap[targetId] = atkStages;
+      battle.markModified('statStages');
+      moveEvents.push(`${atkName} used Heart Swap! ${atkName} swapped stat changes with ${tgtName}!`);
+      continue;
+    }
+
+    // Topsy-Turvy (milestone 6.10) — inverts every one of the TARGET's own current
+    // stat stages (a +2 becomes -2, a -1 becomes +1, etc). Never misses.
+    if (entry.moveId === 'topsy-turvy') {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const { name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+      const stageMap = battle.statStages as Record<string, StatStages>;
+      if (!stageMap[targetId]) stageMap[targetId] = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
+      const stats = stageMap[targetId];
+      (Object.keys(stats) as (keyof StatStages)[]).forEach(k => { stats[k] = -stats[k]; });
+      battle.markModified('statStages');
+      moveEvents.push(`${atkName} used Topsy-Turvy! ${tgtName}'s stat changes were all reversed!`);
+      continue;
+    }
+
     // Skill Swap/Role Play (milestone 6.11) — reuse the Trace mechanism (tracedAbility)
     // rather than modeling a real ability replacement: this project's homebrew ability
     // model already has every non-hidden ability active simultaneously and Trace ADDS
@@ -4253,6 +4524,22 @@ async function resolveDamagingMove(
         battle.markModified('tracedAbility');
         moveEvents.push(`${atkName} used Role Play! ${atkName} copied ${tgtName}'s ${slugToDisplayName(tgtPick)}!`);
       }
+      continue;
+    }
+
+    // Entrainment (milestone 6.10) — sets the TARGET's effective ability to match the
+    // USER's, opposite direction from Role Play above. Same tracedAbility mechanism.
+    if (entry.moveId === 'entrainment') {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const { name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+      const atkSlugs = attackerAbilitySlugs.filter(s => !TRACE_BLOCKED_ABILITIES.has(s));
+      const atkPick  = atkSlugs[0];
+      if (!atkPick) { moveEvents.push(`${atkName} used Entrainment, but it failed!`); continue; }
+      const tracedMap = (battle.tracedAbility ?? {}) as Record<string, string>;
+      tracedMap[targetId] = atkPick;
+      battle.tracedAbility = tracedMap;
+      battle.markModified('tracedAbility');
+      moveEvents.push(`${atkName} used Entrainment! ${tgtName} became ${slugToDisplayName(atkPick)}!`);
       continue;
     }
 
@@ -4297,6 +4584,74 @@ async function resolveDamagingMove(
       continue;
     }
 
+    // Transform (milestone 6.10) — copies the target's types (typeOverride), current
+    // stat stages (statStages, same direct-overwrite Psych Up uses), ability
+    // (tracedAbility, same homebrew-stacking treatment Role Play uses), and raw Atk/
+    // Def/SpA/SpD/Spe (statBoostRatio, same mechanism Guard Split/Power Trick use —
+    // resolveMove always builds @smogon/calc's Pokemon from the ATTACKER's own real
+    // species/level/nature/evs/ivs and has no override slot for "compute stats as a
+    // different species entirely"). The moveset copy is different: it overwrites the
+    // Pokemon document's own `moves` field directly (the only way PP-tracking/move-
+    // legality/the frontend move picker all see it automatically), each copied move
+    // at min(5, its real max PP); the ORIGINAL moveset is snapshotted in
+    // Battle.transformState for revertTransform to restore on switch-out/faint,
+    // mirroring Mimic's revertMimic exactly. HP is untouched, matching the real games.
+    // Fails against a target with no real moveset to copy, or if already Transformed.
+    if (entry.moveId === 'transform' && atkSnap && atkSnapCache?.baseStats) {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const atkIdStr = entry.activePokemonId.toString();
+      const alreadyTransformed = !!(battle.transformState as Record<string, TransformState>)[atkIdStr];
+      const tgt = await Pokemon.findById(targetId, 'nickname speciesId level nature evs hasHiddenAbility moves ownerId ownerType').lean();
+      const tgtCache = tgt ? await PokedexCache.findOne({ pokeApiId: tgt.speciesId }, 'name baseStats types abilities').lean() : null;
+      if (alreadyTransformed || !tgt || !tgtCache?.baseStats || !tgt.moves || tgt.moves.length === 0) {
+        moveEvents.push(`${atkName} used Transform, but it failed!`);
+        continue;
+      }
+      const tgtName = pokeDisplayName(tgt, tgtCache);
+      const tgtIvsForTransform = await getIvsForOwner(tgt.ownerId, tgt.ownerType);
+      const tgtStats = computeStats(tgtCache.baseStats as BaseStats, tgt.level, tgt.nature, tgt.evs as BaseStats, tgtIvsForTransform);
+      const atkStats = computeStats(atkSnapCache.baseStats as BaseStats, atkSnap.level, atkSnap.nature, atkSnap.evs as BaseStats, atkIvs);
+
+      const tgtTypes = getEffectiveTypes(battle, targetId, (tgtCache.types as string[]) ?? []);
+      (battle.typeOverride as Record<string, string[]>)[atkIdStr] = tgtTypes;
+      battle.markModified('typeOverride');
+
+      const tgtAbilitySlugs = getEffectiveAbilitySlugs(battle, targetId, (tgtCache.abilities as CachedAbility[]) ?? [], tgt.hasHiddenAbility as boolean).filter(s => !TRACE_BLOCKED_ABILITIES.has(s));
+      if (tgtAbilitySlugs[0]) {
+        const tracedMap = (battle.tracedAbility ?? {}) as Record<string, string>;
+        tracedMap[atkIdStr] = tgtAbilitySlugs[0];
+        battle.tracedAbility = tracedMap;
+        battle.markModified('tracedAbility');
+      }
+
+      const stageMap = battle.statStages as Record<string, StatStages>;
+      const tgtStages = stageMap[targetId] ?? { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, acc: 0, eva: 0 };
+      stageMap[atkIdStr] = { ...tgtStages };
+      battle.markModified('statStages');
+
+      const ratioMap = (battle.statBoostRatio ?? {}) as Record<string, Partial<Record<string, number>>>;
+      ratioMap[atkIdStr] = {
+        atk: tgtStats.atk / atkStats.atk, def: tgtStats.def / atkStats.def,
+        spa: tgtStats.spatk / atkStats.spatk, spd: tgtStats.spdef / atkStats.spdef,
+        spe: tgtStats.speed / atkStats.speed,
+      };
+      battle.statBoostRatio = ratioMap;
+      battle.markModified('statBoostRatio');
+
+      const transformMap = (battle.transformState ?? {}) as Record<string, TransformState>;
+      transformMap[atkIdStr] = { originalMoves: (atkSnap.moves as TransformState['originalMoves']) ?? [] };
+      battle.transformState = transformMap;
+      battle.markModified('transformState');
+      const newMoves = (tgt.moves as Array<{ moveId: string; maxPP: number }>).map(m => {
+        const pp = Math.min(5, m.maxPP);
+        return { moveId: m.moveId, currentPP: pp, maxPP: pp, ppUps: 0 };
+      });
+      await Pokemon.updateOne({ _id: entry.activePokemonId }, { moves: newMoves });
+
+      moveEvents.push(`${atkName} used Transform! ${atkName} transformed into ${tgtName}!`);
+      continue;
+    }
+
     // Opponent-directed type-change moves (milestone 5.14 Wave 11) — Soak overwrites
     // the TARGET's type, Reflect Type copies the TARGET's type onto the USER. Neither
     // deals damage, same "custom branch + continue" shape as leech-seed/pain-split above.
@@ -4321,6 +4676,93 @@ async function resolveDamagingMove(
       (battle.typeOverride as Record<string, string[]>)[entry.activePokemonId.toString()] = targetTypes;
       battle.markModified('typeOverride');
       moveEvents.push(`${atkName} used Reflect Type! ${atkName} took on ${tgtName}'s type!`);
+      continue;
+    }
+
+    // Magic Powder (milestone 6.10) — same overwrite shape as Soak above, but to pure
+    // Psychic instead of pure Water.
+    if (entry.moveId === 'magic-powder') {
+      const { cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const currentTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
+      if (currentTypes.length === 1 && currentTypes[0] === 'psychic') {
+        moveEvents.push(`${atkName} used Magic Powder, but it failed!`);
+      } else {
+        (battle.typeOverride as Record<string, string[]>)[targetId] = ['psychic'];
+        battle.markModified('typeOverride');
+        moveEvents.push(`${atkName} used Magic Powder! ${tgtName} transformed into the Psychic type!`);
+      }
+      continue;
+    }
+
+    // Trick-or-Treat (milestone 6.10) — ADDS Ghost to the target's existing type(s)
+    // rather than overwriting them (unlike Soak/Magic Powder above); fails if the
+    // target is already Ghost-type.
+    if (entry.moveId === 'trick-or-treat') {
+      const { cache: tgtCache, name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name types');
+      const atkName  = pokeDisplayName(atkSnap, atkSnapCache);
+      const currentTypes = getEffectiveTypes(battle, targetId, (tgtCache?.types as string[]) ?? []);
+      if (currentTypes.includes('ghost')) {
+        moveEvents.push(`${atkName} used Trick-or-Treat, but it failed!`);
+      } else {
+        (battle.typeOverride as Record<string, string[]>)[targetId] = [...currentTypes, 'ghost'];
+        battle.markModified('typeOverride');
+        moveEvents.push(`${atkName} used Trick-or-Treat! ${tgtName} added the Ghost type!`);
+      }
+      continue;
+    }
+
+    // Electrify (milestone 6.10) — pushes the turnsRemaining:0 volatile resolveMove's
+    // moveType computation (above, in this file) consults for the TARGET's own next
+    // move this round. See that comment for the full lifetime explanation.
+    if (entry.moveId === 'electrify') {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const { name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+      await Pokemon.updateOne({ _id: targetId }, { $push: { volatileStatus: { condition: 'electrify', turnsRemaining: 0 } } });
+      moveEvents.push(`${atkName} used Electrify! ${tgtName}'s move was charged with electricity!`);
+      continue;
+    }
+
+    // Corrosive Gas (milestone 6.10) — melts away the target's held item outright.
+    // Unlike Knock Off, this is a status-class move not tied to landing a hit, so it's
+    // its own self-contained branch rather than living in the damage pipeline.
+    if (entry.moveId === 'corrosive-gas') {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const tgt = await Pokemon.findById(targetId, 'nickname speciesId heldItem').lean();
+      if (!tgt?.heldItem) {
+        moveEvents.push(`${atkName} used Corrosive Gas, but it failed!`);
+      } else {
+        const tgtCache = await PokedexCache.findOne({ pokeApiId: (tgt as any).speciesId }, 'name').lean();
+        const tgtName  = pokeDisplayName(tgt, tgtCache);
+        await Pokemon.updateOne({ _id: targetId }, { $set: { heldItem: null, consumedHeldItem: tgt.heldItem } });
+        moveEvents.push(`${atkName} used Corrosive Gas! ${tgtName}'s ${slugToDisplayName(tgt.heldItem)} was melted away!`);
+      }
+      continue;
+    }
+
+    // Psycho Shift (milestone 6.10) — moves the USER's own status condition onto the
+    // target, then clears it from the user, but only if the transfer actually lands
+    // (reuses applyStatusEffect for the real immunity/Safeguard/terrain checks rather
+    // than duplicating them; success is detected by re-reading the target's status
+    // after the call instead of string-matching applyStatusEffect's narration).
+    if (entry.moveId === 'psycho-shift' && atkSnap) {
+      const atkName = pokeDisplayName(atkSnap, atkSnapCache);
+      const { name: tgtName } = await fetchDisplay(targetId, 'nickname speciesId', 'name');
+      const userStatus = atkSnap.statusCondition ?? null;
+      if (!userStatus) {
+        moveEvents.push(`${atkName} used Psycho Shift, but it failed!`);
+      } else {
+        const beforeTgt = await Pokemon.findById(targetId, 'statusCondition').lean();
+        const effect: StatusMoveEffect = { status: userStatus as StatusMoveEffect['status'], chance: 1 };
+        const events = await applyStatusEffect(battle, new mongoose.Types.ObjectId(targetId), effect);
+        const afterTgt = await Pokemon.findById(targetId, 'statusCondition').lean();
+        if (afterTgt?.statusCondition && afterTgt.statusCondition !== beforeTgt?.statusCondition) {
+          await Pokemon.updateOne({ _id: entry.activePokemonId }, { $set: { statusCondition: null, statusCounter: 0 } });
+          moveEvents.push(`${atkName} used Psycho Shift! ${atkName} transferred its status to ${tgtName}!`);
+        } else {
+          moveEvents.push(`${atkName} used Psycho Shift!`, ...events);
+        }
+      }
       continue;
     }
 
@@ -5370,7 +5812,9 @@ export async function submitMove(req: Request, res: Response): Promise<void> {
   if ((actionType === 'switch' || actionType === 'run') && playerEntry.activePokemonId) {
     const boundCheck = await Pokemon.findById(playerEntry.activePokemonId, 'volatileStatus').lean();
     const isBound = ((boundCheck?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
+    const fairyLocked = (battle.fieldConditions ?? []).some(f => f.condition === 'fairy-lock');
     if (isBound) { res.status(400).json({ data: null, error: 'Your Pokémon is trapped and cannot switch out or flee!' }); return; }
+    if (fairyLocked) { res.status(400).json({ data: null, error: 'No one can flee this round — Fairy Lock is active!' }); return; }
   }
 
   if (actionType === 'item') {
@@ -5928,7 +6372,9 @@ export async function dmSubmitMove(req: Request, res: Response): Promise<void> {
   if (actionType === 'switch' && npcEntry.activePokemonId) {
     const boundCheck = await Pokemon.findById(npcEntry.activePokemonId, 'volatileStatus').lean();
     const isBound = ((boundCheck?.volatileStatus as Array<{ condition: string }>) ?? []).some(v => v.condition.startsWith('bound:'));
+    const fairyLocked = (battle.fieldConditions ?? []).some(f => f.condition === 'fairy-lock');
     if (isBound) { res.status(400).json({ data: null, error: 'This Pokémon is trapped and cannot switch out!' }); return; }
+    if (fairyLocked) { res.status(400).json({ data: null, error: 'No one can flee this round — Fairy Lock is active!' }); return; }
   }
 
   if (battle.type === 'wild' && actionType === 'switch') { res.status(400).json({ data: null, error: 'Wild Pokémon cannot switch' }); return; }
