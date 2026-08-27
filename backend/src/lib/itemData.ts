@@ -108,6 +108,10 @@ export const ITEM_POCKET_MAP: Record<string, ItemPocket> = {
   'assault-vest':   'held_battle',
   'eviolite':       'held_battle',
   'expert-belt':    'held_battle',
+  // Exp Share (Gen 7+ held-item style, not the Gen 6 XY key-item/toggle version) —
+  // no damage-formula effect, so no @smogon/calc wiring needed like the items above;
+  // its bonus-EXP effect is entirely in awardExpToSide (battleController.ts).
+  'exp-share':      'held_battle',
 
   // ── Evolution items (milestone 5.17c) ─────────────────────────────────────
   // Real PokeAPI 'use-item' evolution triggers, verified live against PokeAPI

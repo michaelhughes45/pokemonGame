@@ -1,5 +1,6 @@
 import { StatStages } from '../models/Battle';
 import { WEATHER_MOVES } from './weatherData';
+import { TERRAIN_MOVES } from './terrainData';
 
 export type StatusMoveEffect = {
   status: 'burn' | 'paralysis' | 'sleep' | 'freeze' | 'poison' | 'toxic' | 'confusion';
@@ -201,6 +202,10 @@ export const SELF_TARGETING_MOVES = new Set([
   'synthesis', 'rest', 'slack-off', 'milk-drink', 'heal-order', 'shore-up',
   // Other self-targeting
   'endure', 'belly-drum', 'substitute', 'ingrain', 'aqua-ring', 'magnet-rise', 'stockpile',
+  // Swallow — heals based on the Stockpile count, consuming it (see the dedicated
+  // Stockpile/Swallow blocks in battleController.ts). Spit Up is NOT here — it deals
+  // damage to a foe and goes through the normal foe-targeting path instead.
+  'swallow',
   // Protect family
   'protect', 'detect', 'kings-shield', 'spiky-shield', 'baneful-bunker', 'obstruct',
   'silk-trap', 'burning-bulwark',
@@ -233,7 +238,56 @@ export const SELF_TARGETING_MOVES = new Set([
   // target needed. Trick/Switcheroo/Knock Off/Thief/Covet/Bestow/Fling are NOT here —
   // all seven act on/steal from/give to a foe and go through the normal foe-targeting path.
   'recycle',
+  // Sport moves — field-wide (not side-specific, unlike Reflect/Screens), no target
+  // needed. See SPORT_MOVES below.
+  'mud-sport', 'water-sport',
+  // Milestone 6.9 — field/side-wide moves with no real foe target, same reasoning as
+  // the groups above. Wide Guard/Quick Guard-style single-round side guard: mat-block.
+  // Screens-style multi-turn side buff: tailwind, lucky-chant. Field-wide single-round:
+  // ion-deluge. Field-wide instant effect touching every active Pokémon on both sides,
+  // same shape as Perish Song above: haze, rototiller.
+  'mat-block', 'tailwind', 'lucky-chant', 'ion-deluge', 'haze', 'rototiller',
+  // Gravity (milestone 6.10) — field-wide, both sides, no foe target. Terrain moves are
+  // NOT here despite being field-wide too — they get their own TERRAIN_MOVES dispatch
+  // (mirroring WEATHER_MOVES) since they set Battle.terrain, not a self-target effect.
+  'gravity',
+  // Power Trick (milestone 6.12) — swaps the user's OWN Atk/Def, no foe target needed.
+  // Guard Split/Power Split/Speed Swap are NOT here — all three act on a foe/ally and
+  // go through the normal foe-targeting path, same as Guard Swap/Power Swap above.
+  'power-trick',
+  // Self-only utility (milestone 6.13). Splash and Teleport are pure flavor here —
+  // Splash famously does nothing in the real games either; Teleport would force a
+  // switch/flee in the real games, but this project doesn't model fleeing/forced-
+  // switching mechanically at all (the existing 'run' action is flavor-only for the
+  // same reason — the DM adjudicates leaving a fight, not a hard game rule), so it
+  // gets the same treatment. Laser Focus pushes a one-hit guaranteed-crit volatile,
+  // consumed in resolveMove. Sleep Talk is NOT here — it needs Metronome/Copycat's
+  // foe-targeting reroll dispatch, not this self-targeting one.
+  'splash', 'teleport', 'laser-focus',
+  // Cleric/support (milestone 6.14). Aromatherapy/Heal Bell cure the CASTER'S WHOLE
+  // PARTY's status (not just the active Pokémon) — real target is 'user-and-allies'.
+  // Life Dew/Dragon Cheer are ALSO 'user-and-allies'/'all-allies' but simplified to
+  // self-only, same precedent as coaching/gear-up/howl/magnetic-flux above (no generic
+  // ally-stat-stacking outside the dedicated ally-targeting moves). Refresh cures the
+  // user's own status; Wish queues a delayed self-heal; Destiny Bond/Grudge push a
+  // volatile consumed in applyFaints if the user faints before its next move.
+  'aromatherapy', 'heal-bell', 'life-dew', 'dragon-cheer', 'refresh', 'wish',
+  'destiny-bond', 'grudge',
+  // Imprison (milestone 6.15) — no foe target; blocks every opposing Pokémon from
+  // using a move the user itself also knows (checked in checkMoveRestrictions).
+  'imprison',
 ]);
+
+// Sport moves — Gen 5-7's version (the last generation where either was still a usable
+// move; Gen 8+ removed both outright), maps moveId to the type it weakens. Field-wide,
+// 5 turns, persists through switches (unlike Gen 3-4's "until the user switches out"
+// per-Pokémon version). Damage multiplier is exact: 1352/4096 ≈ 0.33, i.e. roughly a
+// 67% reduction — sourced from Bulbapedia, not the older Gen 3-4 flat 50%.
+export const SPORT_MOVES: Record<string, string> = {
+  'mud-sport':   'electric',
+  'water-sport': 'fire',
+};
+export const SPORT_DAMAGE_MULTIPLIER = 1352 / 4096;
 
 // Room effects — field-wide, last 5 turns, and uniquely among status moves in this
 // project, using one again while it's already active ENDS it early instead of
@@ -314,7 +368,10 @@ export const COUNTER_MOVES: Record<string, { category: 'physical' | 'special' | 
 // e.g. multi-player pve, pvp team battles). Heal Pulse alone can target either an
 // ally or a foe; Helping Hand/Aromatic Mist are ally-only.
 export const ALLY_ONLY_MOVES = new Set(['helping-hand', 'aromatic-mist']);
-export const ALLY_OR_FOE_MOVES = new Set(['heal-pulse']);
+// Spotlight (milestone 6.15) — draws attention to whichever Pokémon it's used on
+// (ally or foe), redirecting single-target foe moves to them the same way Follow Me/
+// Rage Powder redirect to the user — see resolveRedirectTarget's own extended check.
+export const ALLY_OR_FOE_MOVES = new Set(['heal-pulse', 'spotlight']);
 
 // Redirect moves — for the rest of this round, single-target foe moves that would
 // have hit anyone on the user's side instead hit the user. Only affects moves whose
@@ -369,7 +426,9 @@ export const STAT_STAGE_MOVES: Record<string, StatEffect[]> = {
   'double-team':     [{ stat: 'eva', stages: 1, target: 'self' }],
   'minimize':        [{ stat: 'eva', stages: 2, target: 'self' }],
   'charge':          [{ stat: 'spd', stages: 1, target: 'self' }],
-  'stockpile':       [{ stat: 'def', stages: 1, target: 'self' }, { stat: 'spd', stages: 1, target: 'self' }],
+  // Stockpile is NOT listed here despite being a +Def/+SpDef self-boost — it's capped
+  // at 3 uses and tracks a stack count (consumed by Spit Up/Swallow), so it's handled
+  // as its own dedicated block in resolveSelfTargetMove instead of this generic table.
   // Curse: non-Ghost variant (+1 Atk, +1 Def, −1 Spe). Ghost variant is handled separately in battles.ts.
   'curse':           [{ stat: 'atk', stages: 1, target: 'self' }, { stat: 'def', stages: 1, target: 'self' }, { stat: 'spe', stages: -1, target: 'self' }],
   // ── Milestone 5.14 Wave 1: status-class self-boost moves ──────────────────
@@ -720,16 +779,18 @@ export const ESCALATING_POWER_MOVES: Record<string, EscalatingPowerMove> = {
 // Sent to the client via the state endpoint so the UI can skip the target picker.
 export const NO_TARGET_MOVE_IDS = new Set([
   ...Object.keys(WEATHER_MOVES),
+  ...Object.keys(TERRAIN_MOVES),
   ...SELF_TARGETING_MOVES,
 ]);
 
 // Moves that gain +1 priority when used by a Pokémon with Prankster.
 // Derived from pure status moves (chance === 1), non-charging self-targeting moves,
-// and weather moves — all are "Status" category in PokeAPI.
+// and weather/terrain moves — all are "Status" category in PokeAPI.
 export const PRANKSTER_MOVES = new Set([
   ...Object.entries(STATUS_MOVES).filter(([, v]) => v.chance === 1).map(([k]) => k),
   ...[...SELF_TARGETING_MOVES].filter(m => !CHARGE_MOVES.has(m)),
   ...Object.keys(WEATHER_MOVES),
+  ...Object.keys(TERRAIN_MOVES),
 ]);
 
 // PokeAPI `target` values that mean "hit all active enemies" — no target picker needed.
@@ -765,6 +826,20 @@ export const CUSTOM_FIXED_DAMAGE_MOVES = new Set([
   'endeavor', 'super-fang', 'ruination', 'psywave',
 ]);
 export const FIXED_DAMAGE_MOVES = new Set([...LIBRARY_FIXED_DAMAGE_MOVES, ...CUSTOM_FIXED_DAMAGE_MOVES]);
+
+// Variable-power moves — cached with power:null since PokeAPI has no single fixed
+// value for them either, but unlike FIXED_DAMAGE_MOVES above, @smogon/calc computes
+// their real base power ITSELF (from its own bundled species weight/speed/HP data)
+// inside its own gen789 mechanics switch, then runs the normal damage formula with
+// it — no hand-rolled math needed here at all, resolveMove just needs to stop
+// short-circuiting on power:null and let them reach calculate(). Natural Gift needs
+// the attacker to actually be holding a berry or @smogon/calc falls back to 0 power;
+// that's checked before the calculate() call rather than added here, same as Fling's
+// "nothing to fling" guard.
+export const LIBRARY_VARIABLE_POWER_MOVES = new Set([
+  'low-kick', 'grass-knot', 'heavy-slam', 'heat-crash', 'gyro-ball', 'electro-ball',
+  'flail', 'reversal', 'wring-out', 'hard-press', 'natural-gift',
+]);
 
 // High-crit-ratio moves (milestone 5.14 Wave 3) — sourced from PokeAPI's move-level
 // meta.crit_rate field, which encodes two distinct real mechanics under one number:
@@ -879,3 +954,40 @@ export const SELF_KO_MOVES = new Set([
   'explosion', 'self-destruct', 'misty-explosion', 'memento', 'healing-wish', 'lunar-dance',
 ]);
 export const HEALING_WISH_MOVES = new Set(['healing-wish', 'lunar-dance']);
+
+// Magnitude — random power roll (Bulbapedia's real probability table), announced as
+// "Magnitude N!" before the hit. Not in LIBRARY_VARIABLE_POWER_MOVES since @smogon/calc
+// has no native case for it — this project rolls it itself and passes it through
+// resolveMove's existing powerOverride mechanism, same as Fling/escalating moves.
+export const MAGNITUDE_TABLE: Array<{ magnitude: number; chance: number; power: number }> = [
+  { magnitude: 4,  chance: 0.05, power: 10 },
+  { magnitude: 5,  chance: 0.10, power: 30 },
+  { magnitude: 6,  chance: 0.20, power: 50 },
+  { magnitude: 7,  chance: 0.30, power: 70 },
+  { magnitude: 8,  chance: 0.20, power: 90 },
+  { magnitude: 9,  chance: 0.10, power: 110 },
+  { magnitude: 10, chance: 0.05, power: 150 },
+];
+
+// Trump Card — power scales inversely with the move's OWN remaining PP at the moment
+// it's used (before this use's own decrement). No @smogon/calc native case either.
+export function getTrumpCardPower(currentPP: number): number {
+  if (currentPP <= 1) return 200;
+  if (currentPP === 2) return 80;
+  if (currentPP === 3) return 60;
+  if (currentPP === 4) return 50;
+  return 40;
+}
+
+// Spit Up/Swallow both consume the user's full Stockpile count (see the dedicated
+// Stockpile block in resolveSelfTargetMove — capped at 3, tracked as a stockpile:<n>
+// volatile since it's not a plain stat-stage move) and fail outright with none banked.
+// Spit Up's power scales 100/200/300 for 1/2/3 stacks; Swallow heals 25%/50%/100% of
+// max HP for the same. Both also undo the Def/SpDef boosts Stockpile granted.
+export const STOCKPILE_MAX = 3;
+export function getSpitUpPower(stacks: number): number {
+  return stacks * 100;
+}
+export function getSwallowHealFraction(stacks: number): number {
+  return stacks === 1 ? 0.25 : stacks === 2 ? 0.5 : 1;
+}

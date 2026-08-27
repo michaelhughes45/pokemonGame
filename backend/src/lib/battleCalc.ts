@@ -146,11 +146,15 @@ export function resolveActiveAbilitySlugs(
 // pass a plain lean object instead of a full HydratedDocument, which they don't
 // have and don't need one just to read two fields.
 export function getEffectiveAbilitySlugs(
-  battle: Pick<IBattle, 'hiddenAbilitiesEnabled' | 'tracedAbility'>,
+  battle: Pick<IBattle, 'hiddenAbilitiesEnabled' | 'tracedAbility' | 'abilitySuppressed'>,
   pokemonId: string,
   abilities: CachedAbility[],
   hasHiddenAbility: boolean,
 ): string[] {
+  // Gastro Acid (milestone 6.15) — suppresses every active ability, including a
+  // traced one, for the rest of the battle. Checked first so every ability-slug
+  // lookup project-wide picks it up with no per-caller changes needed.
+  if ((battle.abilitySuppressed as Record<string, boolean> | undefined)?.[pokemonId]) return [];
   const active = resolveActiveAbilitySlugs(abilities, hasHiddenAbility, battle.hiddenAbilitiesEnabled);
   const traced = (battle.tracedAbility as Record<string, string> | undefined)?.[pokemonId];
   return traced ? [...active, traced] : active;

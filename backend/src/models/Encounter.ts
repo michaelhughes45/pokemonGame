@@ -40,8 +40,8 @@ export type IEncounter = {
   // Max NPC Pokémon that must faint before the enemy side is eliminated.
   // null = all NPC Pokémon must faint. Carried into the Battle document at launch.
   npcPokemonLimit: number | null;
-  // EXP multiplier applied to all EXP awards after the battle. 1 = normal.
-  // Placeholder for Phase 5 — stored now, not yet wired into distributeExp.
+  // EXP multiplier applied to all EXP awards during the battle. 1 = normal.
+  // Carried into the Battle document at launch; read by awardExpToSide.
   expMultiplier: number;
   // pve only — Pokédollars paid to every playerSide trainer (not split) on victory.
   // Carried into the Battle document at launch. Always 0 for wild encounters.

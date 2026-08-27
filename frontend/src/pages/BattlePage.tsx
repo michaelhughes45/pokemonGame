@@ -126,6 +126,8 @@ type BattleState = {
   currentTargetIndex: number;
   weather: string | null;
   weatherTurnsRemaining: number | null;
+  terrain: string | null;
+  terrainTurnsRemaining: number | null;
   noTargetMoveIds: string[];
   currentMoveTargetCategory: 'single' | 'auto' | null;
   currentMoveAllyTarget: 'ally-only' | 'ally-or-foe' | null;
@@ -155,7 +157,24 @@ type PartyPokemon = {
 
 // Returned by GET /api/pokemon/:id (subset we need)
 type MoveSlot = { moveId: string; currentPP: number; maxPP: number };
-type LearnableMove = { name: string; type: string; power: number | null; accuracy: number | null };
+type LearnableMove = { name: string; type: string; power: number | null; accuracy: number | null; category: string; target: string };
+
+// Bulbapedia's "long-ranged" move flag — a move that can hit a non-adjacent opponent
+// even without a real position/adjacency system to speak of (this project doesn't
+// have one; see CLAUDE_CONTEXT.md). Two real categories carry it: every single-target
+// damage-dealing Flying-type move (Gust, Peck, Sky Attack, etc. — verified against
+// Bulbapedia's move-range data), and the seven "Pulse"/"Aura" moves, which get the
+// flag regardless of type or whether they deal damage.
+const SPREAD_TARGET_VALUES = new Set([
+  'all-opponents', 'all-adjacent-foes', 'all-adjacent', 'all-pokemon', 'all-other-pokemon', 'entire-field',
+]);
+const PULSE_AURA_MOVES = new Set([
+  'aura-sphere', 'dark-pulse', 'dragon-pulse', 'heal-pulse', 'origin-pulse', 'terrain-pulse', 'water-pulse',
+]);
+function isLongRangeMove(move: Pick<LearnableMove, 'name' | 'type' | 'category' | 'target'>): boolean {
+  if (PULSE_AURA_MOVES.has(move.name)) return true;
+  return move.type?.toLowerCase() === 'flying' && move.category !== 'status' && !SPREAD_TARGET_VALUES.has(move.target);
+}
 
 type ActivePokemonDetail = {
   _id: string;
@@ -257,6 +276,25 @@ function WeatherBadge({ battle }: { battle: BattleState }) {
   const cfg = WEATHER_CONFIG[battle.weather];
   if (!cfg) return <span className="text-sm text-muted-foreground">Weather: {battle.weather}</span>;
   const turns = battle.weatherTurnsRemaining !== null ? ` · ${battle.weatherTurnsRemaining}t` : '';
+  return (
+    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${cfg.cls}`}>
+      {cfg.label}{turns}
+    </span>
+  );
+}
+
+const TERRAIN_CONFIG: Record<string, { label: string; cls: string }> = {
+  electric: { label: 'Electric Terrain', cls: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' },
+  grassy:   { label: 'Grassy Terrain',   cls: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'    },
+  misty:    { label: 'Misty Terrain',    cls: 'bg-pink-100 text-pink-800 dark:bg-pink-900 dark:text-pink-200'       },
+  psychic:  { label: 'Psychic Terrain',  cls: 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200' },
+};
+
+function TerrainBadge({ battle }: { battle: BattleState }) {
+  if (!battle.terrain) return null;
+  const cfg = TERRAIN_CONFIG[battle.terrain];
+  if (!cfg) return <span className="text-sm text-muted-foreground">Terrain: {battle.terrain}</span>;
+  const turns = battle.terrainTurnsRemaining !== null ? ` · ${battle.terrainTurnsRemaining}t` : '';
   return (
     <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${cfg.cls}`}>
       {cfg.label}{turns}
@@ -1098,21 +1136,6 @@ export default function BattlePage() {
     }
   }
 
-  async function handleAutoTargetMove(targetIds: string[]) {
-    if (!id || targetIds.length === 0 || submitting) return;
-    setSubmitting(true);
-    setActionError('');
-    try {
-      await axios.post(`${API}/api/battles/${id}/submit-target`, { targets: targetIds }, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-    } catch (err: unknown) {
-      setActionError(apiError(err, 'Failed to submit move.'));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function handleSubmitTarget() {
     if (!id || selectedTargets.length === 0) return;
     setSubmitting(true);
@@ -1205,6 +1228,12 @@ export default function BattlePage() {
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground">Weather:</span>
                 <WeatherBadge battle={battle} />
+              </div>
+            )}
+            {battle.terrain && (
+              <div className="flex items-center gap-2">
+                <span className="text-muted-foreground">Terrain:</span>
+                <TerrainBadge battle={battle} />
               </div>
             )}
           </CardContent>
@@ -1353,6 +1382,7 @@ export default function BattlePage() {
                                   {detail?.type ? `${detail.type} · ` : ''}
                                   {detail?.power != null ? `Pwr ${detail.power} · ` : ''}
                                   PP {slot.currentPP}/{slot.maxPP}
+                                  {detail && isLongRangeMove(detail) ? ' · Long range' : ''}
                                 </span>
                               </button>
                             );
@@ -1920,18 +1950,16 @@ export default function BattlePage() {
                     </span>
                     {isNoTargetMove
                       ? '.'
-                      : isAutoTargetMove
-                        ? ' — hits all active targets automatically.'
-                        : battle.currentMoveAllyTarget === 'ally-only'
-                          ? ' — select an ally below.'
-                          : battle.currentMoveAllyTarget === 'ally-or-foe'
-                            ? ' — select an ally or an opponent below.'
-                            : isSingleTargetMove
-                              ? ' — select one target below.'
-                              : ' — select one or more targets below.'}
+                      : battle.currentMoveAllyTarget === 'ally-only'
+                        ? ' — select an ally below.'
+                        : battle.currentMoveAllyTarget === 'ally-or-foe'
+                          ? ' — select an ally or an opponent below.'
+                          : isSingleTargetMove
+                            ? ' — select one target below.'
+                            : ' — select one or more targets below.'}
                   </p>
 
-                  {!isNoTargetMove && !isAutoTargetMove && (
+                  {!isNoTargetMove && (
                     pickerTargets.length === 0 ? (
                       <p className="text-sm text-muted-foreground">No valid targets available.</p>
                     ) : (
@@ -1991,16 +2019,6 @@ export default function BattlePage() {
                       className="w-full min-h-11"
                     >
                       {submitting ? 'Confirming…' : `Use ${formatMove(currentTargetEntry.moveId)}`}
-                    </Button>
-                  ) : isAutoTargetMove ? (
-                    <Button
-                      onClick={() => handleAutoTargetMove(opposingTargets.map(t => t._id))}
-                      disabled={submitting || opposingTargets.length === 0}
-                      className="w-full min-h-11"
-                    >
-                      {submitting
-                        ? 'Confirming…'
-                        : `Use ${formatMove(currentTargetEntry.moveId)} — hits all (${opposingTargets.length})`}
                     </Button>
                   ) : (
                     <Button

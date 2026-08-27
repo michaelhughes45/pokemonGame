@@ -106,6 +106,19 @@ export type PendingWish = {
   restorePP: boolean;
 };
 
+// Wish (milestone 6.14) — unlike PendingWish above, this heals whoever occupies the
+// slot ONE ROUND LATER (turnsRemaining starts at 2, same "one full round of delay"
+// convention DELAYED_DAMAGE_TURNS already uses for Future Sight/Doom Desire), not on
+// next send-out. healAmount is fixed at cast time (half the CASTER's own max HP),
+// not recomputed from whoever's actually in the slot when it resolves.
+export type PendingWishHeal = {
+  targetSide: 'playerSide' | 'enemySide';
+  targetSlotIndex: number;
+  turnsRemaining: number;
+  healAmount: number;
+  casterName: string;
+};
+
 type TurnLogEntry = {
   turn: number;
   events: string[];
@@ -133,6 +146,11 @@ export type IBattle = {
   weather: 'rain' | 'sun' | 'sandstorm' | 'hail' | 'snow' | null;
   // null = no countdown (DM-set indefinite); number counts down each round
   weatherTurnsRemaining: number | null;
+  // Terrain (milestone 6.10) — mutually exclusive with itself same as weather, but a
+  // fully separate field/counter since terrain and weather coexist independently in
+  // the real games (e.g. Rain + Electric Terrain both active at once is legal).
+  terrain: 'electric' | 'grassy' | 'misty' | 'psychic' | null;
+  terrainTurnsRemaining: number | null;
   fieldConditions: FieldCondition[];
   turnLog: TurnLogEntry[];
   catchAttempts: CatchAttempt[];
@@ -176,21 +194,49 @@ export type IBattle = {
   // The most recent move ANY Pokémon executed this battle, for Copycat. Same
   // resolved-moveId convention as lastMoveByPokemon.
   globalLastMoveUsed: string | null;
+  // Keyed by pokemonId.toString(), value is the list of opposing pokemonId.toString()s
+  // it has directly targeted or been targeted by with a move this battle (recorded
+  // symmetrically for both sides of every move use, damaging or not, in the target
+  // loop in resolveDamagingMove). Drives EXP eligibility — only Pokémon actually
+  // engaged with a given fainted/caught opponent gain EXP from it. Never cleared on
+  // switch-out or faint; a Pokémon still "earned" a kill it engaged with earlier.
+  engagements: Record<string, string[]>;
   // Keyed by pokemonId.toString(). Set on entry when the Pokémon's real ability is Trace
   // and a valid opposing ability was copied — the effective ability slug for every
   // ability-slug lookup afterward. Cleared on switch-out or faint, same as statStages.
   tracedAbility: Record<string, string>;
+  // Keyed by pokemonId.toString(). Gastro Acid (milestone 6.15) — suppresses EVERY
+  // active ability (including a traced one) for the rest of the battle, checked
+  // directly in getEffectiveAbilitySlugs alongside tracedAbility so every ability-slug
+  // lookup project-wide picks it up automatically. Cleared on switch-out or faint,
+  // same as tracedAbility.
+  abilitySuppressed: Record<string, boolean>;
   // Keyed by pokemonId.toString(). Set by Soak/Conversion/Camouflage/Reflect Type/
   // Conversion 2 (milestone 5.14 Wave 11) — this Pokémon's real type array is
   // overridden with this value everywhere types matter (damage effectiveness, STAB,
   // @smogon/calc's own internal type calc, frontend type badges). Cleared on
   // switch-out or faint, same as statStages/tracedAbility.
   typeOverride: Record<string, string[]>;
+  // Keyed by pokemonId.toString(). Guard Split/Power Split/Speed Swap/Power Trick
+  // (milestone 6.12) — @smogon/calc always derives its stats internally from
+  // species+level+EVs+IVs, so there's no clean way to hand it a final swapped/averaged
+  // stat directly. Instead this stores a multiplier per stat (effective/natural ratio),
+  // computed once at the moment of the swap from computeStats' raw values (ignoring
+  // stat stages, matching the real games), and applied as a post-hoc adjustment:
+  // atk/spa scale outgoing damage, def/spd scale incoming damage (inversely), spe
+  // scales turn-order speed only (NOT @smogon/calc's own internal speed, so it doesn't
+  // reach Gyro Ball/Electro Ball's power formula — a known gap). Cleared on switch-out
+  // or faint, same as statStages/tracedAbility/typeOverride.
+  statBoostRatio: Record<string, Partial<Record<'atk' | 'def' | 'spa' | 'spd' | 'spe', number>>>;
   // Keyed by pokemonId.toString(). The TYPE of the most recent damaging hit this
   // Pokémon has taken, for Conversion 2 — unlike damageTakenThisTurn this persists
   // across rounds (only cleared on switch-out or faint), since Conversion 2 needs to
   // react to "the last move that hit me" regardless of which round that was.
   lastHitMoveType: Record<string, string>;
+  // Keyed by pokemonId.toString(). The MOVE ID (not just type) of the most recent
+  // damaging hit this Pokémon has taken, for Mirror Move — same persistence and
+  // damaging-hits-only scope as lastHitMoveType above, updated at the same site.
+  lastMoveAgainstMe: Record<string, string>;
   // Keyed by pokemonId.toString(). Present only while a Mimic-copied move is currently
   // occupying the user's Mimic slot — see MimicState above. Reverted (and the entry
   // removed) on switch-out or faint, same lifetime as typeOverride/tracedAbility.
@@ -202,7 +248,9 @@ export type IBattle = {
   // Healing Wish / Lunar Dance (milestone 5.14 Wave 10) — see PendingWish above.
   // Consumed (and removed) the moment a Pokémon is sent into the matching slot.
   pendingWishes: PendingWish[];
-  expAwarded: boolean;
+  // Wish (milestone 6.14) — see PendingWishHeal above. Resolved (and removed) in
+  // applyEndOfRound once turnsRemaining hits 0, same lifecycle as pendingAttacks.
+  pendingWishHeals: PendingWishHeal[];
   moneyAwarded: boolean;
   // Set once the battle completes. For pve/wild this always mirrors "did the players win"
   // (playerSide) vs lose (enemySide). For pvp it tells you which trainer roster is left
@@ -281,6 +329,13 @@ const BattleSchema = new Schema<IBattle>(
 
     weatherTurnsRemaining: { type: Number, default: null },
 
+    terrain: {
+      type:    String,
+      enum:    ['electric', 'grassy', 'misty', 'psychic', null],
+      default: null,
+    },
+    terrainTurnsRemaining: { type: Number, default: null },
+
     fieldConditions: [
       {
         condition:      { type: String, required: true },
@@ -312,9 +367,13 @@ const BattleSchema = new Schema<IBattle>(
     damageTakenThisTurn: { type: Schema.Types.Mixed, default: {} },
     lastMoveByPokemon:   { type: Schema.Types.Mixed, default: {} },
     globalLastMoveUsed:  { type: String, default: null },
+    engagements:         { type: Schema.Types.Mixed, default: {} },
     tracedAbility:       { type: Schema.Types.Mixed, default: {} },
+    abilitySuppressed:   { type: Schema.Types.Mixed, default: {} },
     typeOverride:        { type: Schema.Types.Mixed, default: {} },
+    statBoostRatio:      { type: Schema.Types.Mixed, default: {} },
     lastHitMoveType:     { type: Schema.Types.Mixed, default: {} },
+    lastMoveAgainstMe:   { type: Schema.Types.Mixed, default: {} },
     mimicState:          { type: Schema.Types.Mixed, default: {} },
     pendingAttacks: [
       {
@@ -341,13 +400,22 @@ const BattleSchema = new Schema<IBattle>(
         _id:              false,
       },
     ],
+    pendingWishHeals: [
+      {
+        targetSide:      { type: String, enum: ['playerSide', 'enemySide'], required: true },
+        targetSlotIndex: { type: Number, required: true },
+        turnsRemaining:  { type: Number, required: true },
+        healAmount:      { type: Number, required: true },
+        casterName:      { type: String, required: true },
+        _id:             false,
+      },
+    ],
     playerPokemonLimit: { type: Number, default: null },
     npcPokemonLimit:    { type: Number, default: null },
     wildCatchable:      { type: Boolean, default: true },
     moneyReward:        { type: Number, default: 0 },
     expMultiplier:      { type: Number, default: 1 },
     hiddenAbilitiesEnabled: { type: Boolean, default: true },
-    expAwarded:         { type: Boolean, default: false },
     moneyAwarded:       { type: Boolean, default: false },
     winningSide:        { type: String, enum: ['playerSide', 'enemySide', null], default: null },
     encounterId:        { type: Schema.Types.ObjectId, ref: 'Encounter', default: null },

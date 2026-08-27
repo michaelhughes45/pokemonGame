@@ -27,7 +27,7 @@ export const AI_STRATEGIES: NpcAiStrategy[] = ['worst', 'random', 'highest-damag
 // reasoning as getEffectiveAbilitySlugs's own narrowed param type. statStages
 // added in 6.7.2 so scoreSelfTargetingMove can tell whether a stat-boost move
 // still has room before capping at +6.
-type BattleContext = Pick<IBattle, 'playerSide' | 'weather' | 'hiddenAbilitiesEnabled' | 'tracedAbility' | 'statStages'>;
+type BattleContext = Pick<IBattle, 'playerSide' | 'weather' | 'hiddenAbilitiesEnabled' | 'tracedAbility' | 'abilitySuppressed' | 'statStages'>;
 
 type AttackerInfo = {
   _id: mongoose.Types.ObjectId;
