@@ -4,6 +4,7 @@ import axios from 'axios';
 import { AuthProvider } from './context/AuthProvider';
 import { ThemeProvider } from './context/ThemeProvider';
 import { ThemeToggle } from './components/ThemeToggle';
+import { BackendWarmup } from './components/BackendWarmup';
 import { useAuth } from './hooks/useAuth';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -222,10 +223,12 @@ export default function App() {
   return (
     <BrowserRouter>
       <ThemeProvider>
-        <AuthProvider>
-          <ThemeToggle />
-          <AppRoutes />
-        </AuthProvider>
+        <BackendWarmup>
+          <AuthProvider>
+            <ThemeToggle />
+            <AppRoutes />
+          </AuthProvider>
+        </BackendWarmup>
       </ThemeProvider>
     </BrowserRouter>
   );
