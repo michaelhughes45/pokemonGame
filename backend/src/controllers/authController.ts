@@ -75,6 +75,48 @@ export async function login(req: Request, res: Response): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/auth/reset-password
+// Body: { email, token, newPassword }
+// Redeems a one-time code an admin generated via
+// POST /api/admin/users/:id/password-reset-token — the user, not the admin,
+// chooses the new password here. Public route (a locked-out user has no JWT
+// to authenticate with); the admin-issued code is what stands in for auth.
+// Identified by email, matching login's own identifier (not username).
+// ---------------------------------------------------------------------------
+const MIN_PASSWORD_LENGTH = 6;
+
+export async function resetPassword(req: Request, res: Response): Promise<void> {
+  const { email, token, newPassword } = req.body as {
+    email?: string; token?: string; newPassword?: string;
+  };
+
+  if (!email || !token || !newPassword) {
+    return sendError(res, 400, 'email, token, and newPassword are required');
+  }
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    return sendError(res, 400, `newPassword must be at least ${MIN_PASSWORD_LENGTH} characters`);
+  }
+
+  const user = await User.findOne({ email });
+  if (
+    !user ||
+    !user.passwordResetToken ||
+    user.passwordResetToken !== token.toUpperCase() ||
+    !user.passwordResetExpires ||
+    user.passwordResetExpires.getTime() < Date.now()
+  ) {
+    return sendError(res, 400, 'Invalid or expired reset code');
+  }
+
+  user.passwordHash         = await bcrypt.hash(newPassword, 12);
+  user.passwordResetToken   = null;
+  user.passwordResetExpires = null;
+  await user.save();
+
+  sendOk(res, { reset: true });
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/auth/me  (requires verifyToken — applied per-route in auth.ts)
 // ---------------------------------------------------------------------------
 export async function getMe(req: Request, res: Response): Promise<void> {

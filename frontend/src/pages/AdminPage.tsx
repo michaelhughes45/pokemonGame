@@ -41,6 +41,7 @@ const selectClass =
 // ---------------------------------------------------------------------------
 
 type DeleteStep = 'confirm1' | 'confirm2' | 'busy';
+type ResetCode = { token: string; expiresAt: string };
 
 function UsersCard({ token, currentUserId }: { token: string | null; currentUserId: string | undefined }) {
   const [users,        setUsers]        = useState<AdminUser[]>([]);
@@ -49,6 +50,9 @@ function UsersCard({ token, currentUserId }: { token: string | null; currentUser
   const [actionError,   setActionError]   = useState('');
   const [savingId,      setSavingId]      = useState<string | null>(null);
   const [deleteTarget,  setDeleteTarget]  = useState<{ id: string; step: DeleteStep } | null>(null);
+  const [resetBusyId,   setResetBusyId]   = useState<string | null>(null);
+  const [resetError,    setResetError]    = useState('');
+  const [resetCodes,    setResetCodes]    = useState<Record<string, ResetCode>>({});
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -71,6 +75,19 @@ function UsersCard({ token, currentUserId }: { token: string | null; currentUser
       setActionError(apiError(err, 'Failed to update role'));
     } finally {
       setSavingId(null);
+    }
+  }
+
+  async function handleGenerateResetCode(userId: string) {
+    setResetError('');
+    setResetBusyId(userId);
+    try {
+      const res = await axios.post(`${API}/api/admin/users/${userId}/password-reset-token`, {}, { headers });
+      setResetCodes(prev => ({ ...prev, [userId]: { token: res.data.data.token, expiresAt: res.data.data.expiresAt } }));
+    } catch (err: unknown) {
+      setResetError(apiError(err, 'Failed to generate reset code'));
+    } finally {
+      setResetBusyId(null);
     }
   }
 
@@ -129,17 +146,40 @@ function UsersCard({ token, currentUserId }: { token: string | null; currentUser
                 </div>
               </div>
 
+              {resetCodes[u._id] && (
+                <div className="flex flex-col gap-0.5 rounded-md bg-muted px-3 py-2">
+                  <span className="text-sm">
+                    Reset code: <span className="font-mono font-semibold">{resetCodes[u._id].token}</span>
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    Give this to {u.username} — they enter it on the login page's "Forgot password"
+                    form to set their own new password. Expires {new Date(resetCodes[u._id].expiresAt).toLocaleTimeString()}.
+                  </span>
+                </div>
+              )}
+
               {!deleting && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground self-end"
-                  disabled={isSelf}
-                  title={isSelf ? "You can't delete your own account" : undefined}
-                  onClick={() => setDeleteTarget({ id: u._id, step: 'confirm1' })}
-                >
-                  Delete
-                </Button>
+                <div className="flex items-center justify-end gap-2">
+                  {resetError && <p className="text-sm text-destructive">{resetError}</p>}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={resetBusyId === u._id}
+                    onClick={() => handleGenerateResetCode(u._id)}
+                  >
+                    {resetBusyId === u._id ? 'Generating…' : 'Generate Reset Code'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground"
+                    disabled={isSelf}
+                    title={isSelf ? "You can't delete your own account" : undefined}
+                    onClick={() => setDeleteTarget({ id: u._id, step: 'confirm1' })}
+                  >
+                    Delete
+                  </Button>
+                </div>
               )}
 
               {deleting === 'confirm1' && (

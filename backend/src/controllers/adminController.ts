@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import { Pokemon } from '../models/Pokemon';
 import { PokedexCache } from '../models/PokedexCache';
 import { User } from '../models/User';
@@ -108,6 +109,37 @@ export async function updateUserRole(req: Request, res: Response): Promise<void>
 
   await User.updateOne({ _id: id }, { $set: { role } });
   sendOk(res, { _id: id, role });
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/users/:id/password-reset-token
+// Generates a one-time code the admin relays to the user out-of-band (no
+// email system exists in this project) — the admin activates the ability to
+// reset but never sees/chooses the new password; the user picks their own via
+// the public POST /api/auth/reset-password (see authController.resetPassword),
+// which consumes the code. Expires in 1 hour, unused codes are overwritten by
+// a fresh call.
+// ---------------------------------------------------------------------------
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
+
+export async function generatePasswordResetToken(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+
+  const target = await User.findById(id, 'username').lean();
+  if (!target) {
+    sendError(res, 404, 'User not found');
+    return;
+  }
+
+  const token     = crypto.randomBytes(4).toString('hex').toUpperCase();
+  const expiresAt = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+
+  await User.updateOne(
+    { _id: id },
+    { $set: { passwordResetToken: token, passwordResetExpires: expiresAt } },
+  );
+
+  sendOk(res, { username: target.username, token, expiresAt });
 }
 
 // ---------------------------------------------------------------------------

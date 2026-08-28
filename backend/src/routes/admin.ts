@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import {
-  ping, fixPokemonExp, listUsers, updateUserRole, deleteUser, bulkDeleteUsers,
+  ping, fixPokemonExp, listUsers, updateUserRole, generatePasswordResetToken, deleteUser, bulkDeleteUsers,
   listPokedexCache, refreshPokedexEntry,
 } from '../controllers/adminController';
 
@@ -19,6 +19,9 @@ router.get('/users', listUsers);
 
 // PATCH /api/admin/users/:id/role  — change a user's role
 router.patch('/users/:id/role', updateUserRole);
+
+// POST /api/admin/users/:id/password-reset-token — issue a one-time code the user redeems themself
+router.post('/users/:id/password-reset-token', generatePasswordResetToken);
 
 // DELETE /api/admin/users/:id      — delete a user and cascade their owned data
 router.delete('/users/:id', deleteUser);

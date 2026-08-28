@@ -19,6 +19,14 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  const [showReset, setShowReset] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetToken, setResetToken] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetError, setResetError] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetDone, setResetDone] = useState(false);
+
   async function handleSubmit(e: { preventDefault(): void }) {
     e.preventDefault();
     setError('');
@@ -35,6 +43,25 @@ export default function LoginPage() {
     }
   }
 
+  async function handleResetSubmit(e: { preventDefault(): void }) {
+    e.preventDefault();
+    setResetError('');
+    setResetLoading(true);
+
+    try {
+      await axios.post(`${API}/api/auth/reset-password`, {
+        email: resetEmail,
+        token: resetToken,
+        newPassword: resetPassword,
+      });
+      setResetDone(true);
+    } catch (err: unknown) {
+      setResetError(apiError(err, 'Failed to reset password'));
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center p-4">
       <Card className="w-full max-w-sm">
@@ -42,42 +69,119 @@ export default function LoginPage() {
           <CardTitle className="text-2xl text-center">PokéTTRPG</CardTitle>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
+          {!showReset ? (
+            <>
+              <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="email">Email</Label>
+                  <Input
+                    id="email"
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                  />
+                </div>
 
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label htmlFor="password">Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                  />
+                </div>
 
-            {error && <p className="text-sm text-destructive">{error}</p>}
+                {error && <p className="text-sm text-destructive">{error}</p>}
 
-            <Button type="submit" disabled={loading} className="min-h-11">
-              {loading ? 'Signing in…' : 'Sign in'}
-            </Button>
-          </form>
+                <Button type="submit" disabled={loading} className="min-h-11">
+                  {loading ? 'Signing in…' : 'Sign in'}
+                </Button>
+              </form>
 
-          <p className="text-sm text-center text-muted-foreground mt-4">
-            No account?{' '}
-            <Link to="/register" className="underline text-foreground">
-              Register
-            </Link>
-          </p>
+              <p className="text-sm text-center text-muted-foreground mt-4">
+                No account?{' '}
+                <Link to="/register" className="underline text-foreground">
+                  Register
+                </Link>
+              </p>
+              <p className="text-sm text-center mt-2">
+                <button
+                  type="button"
+                  className="underline text-muted-foreground"
+                  onClick={() => { setShowReset(true); setResetDone(false); setResetError(''); }}
+                >
+                  Forgot password?
+                </button>
+              </p>
+            </>
+          ) : (
+            <>
+              {resetDone ? (
+                <div className="flex flex-col gap-4">
+                  <p className="text-sm text-center">
+                    Password reset. You can sign in with your new password now.
+                  </p>
+                  <Button className="min-h-11" onClick={() => setShowReset(false)}>
+                    Back to sign in
+                  </Button>
+                </div>
+              ) : (
+                <form onSubmit={handleResetSubmit} className="flex flex-col gap-4">
+                  <p className="text-sm text-muted-foreground">
+                    Ask your DM/admin for a reset code, then enter it here with your new password.
+                  </p>
+
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="reset-email">Email</Label>
+                    <Input
+                      id="reset-email"
+                      type="email"
+                      value={resetEmail}
+                      onChange={(e) => setResetEmail(e.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="reset-token">Reset code</Label>
+                    <Input
+                      id="reset-token"
+                      value={resetToken}
+                      onChange={(e) => setResetToken(e.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-1.5">
+                    <Label htmlFor="reset-password">New password</Label>
+                    <Input
+                      id="reset-password"
+                      type="password"
+                      value={resetPassword}
+                      onChange={(e) => setResetPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+
+                  {resetError && <p className="text-sm text-destructive">{resetError}</p>}
+
+                  <Button type="submit" disabled={resetLoading} className="min-h-11">
+                    {resetLoading ? 'Resetting…' : 'Reset password'}
+                  </Button>
+                  <button
+                    type="button"
+                    className="text-sm underline text-muted-foreground"
+                    onClick={() => setShowReset(false)}
+                  >
+                    Back to sign in
+                  </button>
+                </form>
+              )}
+            </>
+          )}
         </CardContent>
       </Card>
     </div>

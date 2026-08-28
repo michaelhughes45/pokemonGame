@@ -19,6 +19,10 @@ type IUser = {
   badges: BadgeEntry[];
   money: number;
   currentCampaignId: mongoose.Types.ObjectId | null;
+  // Admin-issued one-time code letting this user set their own new password
+  // without the admin ever seeing/choosing it (see authController.resetPassword).
+  passwordResetToken: string | null;
+  passwordResetExpires: Date | null;
 };
 
 const UserSchema = new Schema<IUser>(
@@ -39,6 +43,8 @@ const UserSchema = new Schema<IUser>(
     ],
     money:             { type: Number, default: 0 },
     currentCampaignId: { type: Schema.Types.ObjectId, ref: 'Campaign', default: null },
+    passwordResetToken:   { type: String, default: null },
+    passwordResetExpires: { type: Date, default: null },
   },
   { timestamps: true }
 );
